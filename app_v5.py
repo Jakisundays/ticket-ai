@@ -150,12 +150,12 @@ def mostrar_items_facturados(datos):
             with st.expander(
                 "No fue posible formatear correctamente los detalles de facturación. A continuación, se muestra el contenido en formato JSON:"
             ):
-                st.json(datos["detalles"])
+                st.write(datos["detalles"])
     else:
         with st.expander(
             "No fue posible formatear correctamente los detalles de facturación. A continuación, se muestra el contenido en formato JSON:"
         ):
-            st.json(datos["detalles"])
+            st.write(datos["detalles"])
 
     # Totales
     st.subheader("Totales")
@@ -837,6 +837,12 @@ async def main():
                         st.write(all_results)
                     mostrar_datos(all_results)
 
+                # Delete the temporary PDF file after processing
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"Error deleting file {file_path}: {e}")
+
             elif archivo_cargado.type == "application/pdf":
 
                 file_path = save_uploaded_file(archivo_cargado, "./uploaded_pdfs")
@@ -883,6 +889,11 @@ async def main():
                         with st.expander("Respuestas - No formateadas"):
                             st.write(all_results)
                         mostrar_datos(all_results)
+
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"Error deleting file {file_path}: {e}")
 
 
 if __name__ == "__main__":
