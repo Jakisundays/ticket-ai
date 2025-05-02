@@ -9,9 +9,17 @@ import certifi
 import asyncio
 import base64
 from pathlib import Path
-from pdf2image import convert_from_bytes
 import pandas as pd
+import fitz
 
+def convert_pdf_to_images(pdf_bytes):
+    images = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for page in doc:
+        pix = page.get_pixmap()
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        images.append(img)
+    return images
 
 # Mostrar datos extraídos
 def mostrar_datos(respuestas):
@@ -849,8 +857,7 @@ async def main():
                 static_content = pdf_to_base64(file_path)
 
                 with open(file_path, "rb") as saved_file:
-                    pdf_data = saved_file.read()
-                    images = convert_from_bytes(pdf_data)
+                    images = convert_pdf_to_images(saved_file.read())
 
                     col1, col2 = st.columns([1, 1])  # Puedes ajustar las proporciones
 
