@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import fitz
 
+
 def convert_pdf_to_images(pdf_bytes):
     images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -20,6 +21,7 @@ def convert_pdf_to_images(pdf_bytes):
         img = Image.open(io.BytesIO(pix.tobytes("png")))
         images.append(img)
     return images
+
 
 # Mostrar datos extraídos
 def mostrar_datos(respuestas):
@@ -509,7 +511,11 @@ async def main():
         if st.sidebar.button("Procesar Factura", use_container_width=True):
             tools = [
                 {
-                    "prompt": "Extrae los detalles estructurados de la factura",
+                    "prompt": (
+                        "Extrae los detalles estructurados de la factura. "
+                        "Incluye el domicilio comercial del emisor y del receptor, "
+                        "priorizando siempre el Domicilio Comercial sobre el Legal o Fiscal. "
+                    ),
                     "data": {
                         "name": "datos_del_emisor_y_receptor",  # Updated name
                         "description": "Extrae y gestiona los datos clave de un comprobante fiscal, incluyendo datos del emisor y del receptor con validación de enums.",
@@ -579,7 +585,7 @@ async def main():
                                         },
                                         "direccion": {
                                             "type": "string",
-                                            "description": "Domicilio fiscal del emisor.",
+                                            "description": "Extrae el domicilio comercial del emisor. Prioriza siempre el Domicilio Comercial sobre el Legal o Fiscal.",
                                         },
                                         "condicion_iva": {
                                             "type": "string",
@@ -609,7 +615,7 @@ async def main():
                                         },
                                         "direccion": {
                                             "type": "string",
-                                            "description": "Domicilio del receptor.",
+                                            "description": "Extrae el domicilio comercial del receptor. Prioriza siempre el Domicilio Comercial sobre el Legal o Fiscal.",
                                         },
                                         "condicion_iva": {
                                             "type": "string",
@@ -712,7 +718,13 @@ async def main():
                     },
                 },
                 {
-                    "prompt": "Extrae y clasifica todos los cargos de la factura que estén por encima del subtotal. Identifica cada tipo de impuesto (como IVA, impuesto a las ventas) con su importe específico, y enumera cualquier cargo adicional o recargo junto con una breve descripción y sus respectivos montos.",
+                    "prompt": (
+                        "Extrae y clasifica todos los cargos que aparezcan en la factura por encima del subtotal. "
+                        "Incluye impuestos como IVA o impuestos a las ventas, y detalla cualquier cargo adicional o recargo con su descripción y monto. "
+                        "Las retenciones deben corresponder exclusivamente a conceptos fiscales o tributarios (como Ganancias, IVA, IIBB). "
+                        "No incluyas descuentos comerciales, promociones ni bonificaciones bajo la categoría de retenciones. "
+                        "Estos deben clasificarse por separado o ser ignorados si no corresponden a un cargo sobre el subtotal."
+                    ),
                     "data": {
                         "name": "impuestos_y_retenciones_de_la_factura",  # Updated name
                         "description": "Extrae, valida y estructura la información de impuestos y retenciones de una factura.",
@@ -758,17 +770,17 @@ async def main():
                                 },
                                 "retenciones": {
                                     "type": "array",
-                                    "description": "Lista de retenciones aplicadas.",
+                                    "description": "Lista de retenciones aplicadas. No incluir descuentos ni promociones; estos deben clasificarse por separado.",
                                     "items": {
                                         "type": "object",
                                         "properties": {
                                             "tipo": {
                                                 "type": "string",
-                                                "description": "Tipo de retención (e.g., Ganancias, IVA, IIBB).",
+                                                "description": "Tipo de retención (e.g., Ganancias, IVA, IIBB). No usar para descuentos o promociones.",
                                             },
                                             "description": {
                                                 "type": "string",
-                                                "description": "Detalle adicional de la retención.",
+                                                "description": "Detalle adicional de la retención. No incluir información de descuentos ni promociones.",
                                                 "nullable": True,
                                             },
                                             "base_imponible": {
