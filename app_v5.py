@@ -11,6 +11,8 @@ import base64
 from pathlib import Path
 import pandas as pd
 import fitz
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
 
 
 def convert_pdf_to_images(pdf_bytes):
@@ -21,6 +23,224 @@ def convert_pdf_to_images(pdf_bytes):
         img = Image.open(io.BytesIO(pix.tobytes("png")))
         images.append(img)
     return images
+
+
+def generar_excel(datos_factura, total_tokens):
+    output = io.BytesIO()
+    # It's good practice to ensure 'openpyxl' is installed in the environment.
+    # e.g., by adding 'openpyxl' to your requirements.txt
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        workbook = writer.book
+
+        # Estilos
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(
+            start_color="4F81BD", end_color="4F81BD", fill_type="solid"
+        )
+        alignment_center = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
+        alignment_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        thin_border_side = Side(border_style="thin", color="000000")
+        thin_border = Border(
+            left=thin_border_side,
+            right=thin_border_side,
+            top=thin_border_side,
+            bottom=thin_border_side,
+        )
+
+        def apply_styles_and_adjust_cols(sheet_name, df):
+            sheet = workbook[sheet_name]
+            # Aplicar estilo a los encabezados
+            for col_num, value in enumerate(df.columns.values, 1):
+                cell = sheet.cell(row=1, column=col_num)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = alignment_center
+                cell.border = thin_border
+
+            # Aplicar estilo a las celdas de datos y ajustar ancho de columnas
+            for row_num, row_data in enumerate(df.values, 2):
+                for col_num, cell_value in enumerate(row_data, 1):
+                    cell = sheet.cell(row=row_num, column=col_num)
+                    cell.alignment = (
+                        alignment_left
+                        if isinstance(cell_value, str)
+                        else alignment_center
+                    )
+                    cell.border = thin_border
+
+            # Ajustar ancho de columnas
+            for col_idx, column in enumerate(sheet.columns, 1):
+                max_length = 0
+                column_letter = get_column_letter(col_idx)
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = (max_length + 2) * 1.2
+                sheet.column_dimensions[column_letter].width = adjusted_width
+
+            # Estilo especial para la hoja General para diferenciar secciones
+            if sheet_name == "General":
+                current_section = None
+                for row_num in range(2, sheet.max_row + 1):
+                    section_cell = sheet.cell(row=row_num, column=1)
+                    if section_cell.value != current_section:
+                        current_section = section_cell.value
+                        # Aplicar un relleno diferente o un borde superior más grueso para la primera fila de una nueva sección
+                        for col_num in range(1, sheet.max_column + 1):
+                            cell = sheet.cell(row=row_num, column=col_num)
+                            # Ejemplo: Poner negrita la primera celda de la sección
+                            if col_num == 1:
+                                cell.font = Font(bold=True)
+                            # Podrías añadir un borde superior más grueso aquí si es la primera fila de la sección
+                            # if row_num > 2: # Evitar aplicar al primer dato después del encabezado si no es una nueva sección
+                            #     top_border = Border(top=Side(border_style="medium", color="000000"))
+                            #     cell.border = Border(left=cell.border.left, right=cell.border.right, top=top_border, bottom=cell.border.bottom)
+
+        # Sheet: General
+        general_data_list = []
+        if "emisor_receptor" in datos_factura:
+            er_data = datos_factura.get("emisor_receptor", {})
+            if er_data:  # Check if not empty
+                comprobante = er_data.get("comprobante", {})
+                for key, value in comprobante.items():
+                    general_data_list.append(
+                        {"Sección": "Comprobante", "Campo": key, "Valor": value}
+                    )
+
+                emisor = er_data.get("emisor", {})
+                for key, value in emisor.items():
+                    general_data_list.append(
+                        {"Sección": "Emisor", "Campo": key, "Valor": value}
+                    )
+
+                receptor = er_data.get("receptor", {})
+                for key, value in receptor.items():
+                    general_data_list.append(
+                        {"Sección": "Receptor", "Campo": key, "Valor": value}
+                    )
+
+                otros = er_data.get("otros", {})
+                for key, value in otros.items():
+                    general_data_list.append(
+                        {"Sección": "Otros", "Campo": key, "Valor": value}
+                    )
+
+        if general_data_list:
+            df_general = pd.DataFrame(general_data_list)
+            df_general.to_excel(writer, sheet_name="General", index=False)
+            apply_styles_and_adjust_cols("General", df_general)
+        else:
+            df_no_data = pd.DataFrame(
+                [{"Mensaje": "No hay datos generales disponibles."}]
+            )
+            df_no_data.to_excel(writer, sheet_name="General", index=False)
+            apply_styles_and_adjust_cols("General", df_no_data)
+
+        # Sheet: Detalle Factura (Items)
+        items_list = []
+        if "items" in datos_factura and datos_factura.get("items", {}).get("detalles"):
+            items_list = datos_factura["items"]["detalles"]
+
+        if items_list:
+            df_items = pd.DataFrame(items_list)
+            df_items.to_excel(writer, sheet_name="Detalle Factura", index=False)
+            apply_styles_and_adjust_cols("Detalle Factura", df_items)
+        else:
+            df_no_data = pd.DataFrame(
+                [{"Mensaje": "No hay detalles de items disponibles."}]
+            )
+            df_no_data.to_excel(writer, sheet_name="Detalle Factura", index=False)
+            apply_styles_and_adjust_cols("Detalle Factura", df_no_data)
+
+        # Sheet: Totales y Observaciones
+        summary_data_list = []
+        if "items" in datos_factura:
+            items_data = datos_factura.get("items", {})
+            if "subtotal" in items_data:  # Check key existence
+                summary_data_list.append(
+                    {"Descripción": "Subtotal", "Valor": items_data.get("subtotal")}
+                )
+            if "total" in items_data:  # Check key existence
+                summary_data_list.append(
+                    {"Descripción": "Total", "Valor": items_data.get("total")}
+                )
+            if "observaciones" in items_data and items_data.get("observaciones"):
+                summary_data_list.append(
+                    {
+                        "Descripción": "Observaciones",
+                        "Valor": items_data.get("observaciones"),
+                    }
+                )
+
+        if summary_data_list:
+            df_summary = pd.DataFrame(summary_data_list)
+            df_summary.to_excel(
+                writer, sheet_name="Totales y Observaciones", index=False
+            )
+            apply_styles_and_adjust_cols("Totales y Observaciones", df_summary)
+        else:
+            df_no_data = pd.DataFrame(
+                [{"Mensaje": "No hay totales ni observaciones disponibles."}]
+            )
+            df_no_data.to_excel(
+                writer, sheet_name="Totales y Observaciones", index=False
+            )
+            apply_styles_and_adjust_cols("Totales y Observaciones", df_no_data)
+
+        # Sheet: Impuestos
+        impuestos_list = []
+        if "impuestos" in datos_factura and datos_factura.get("impuestos", {}).get(
+            "impuestos"
+        ):
+            impuestos_list = datos_factura["impuestos"]["impuestos"]
+
+        if impuestos_list:
+            df_impuestos = pd.DataFrame(impuestos_list)
+            df_impuestos.to_excel(writer, sheet_name="Impuestos", index=False)
+            apply_styles_and_adjust_cols("Impuestos", df_impuestos)
+        else:
+            df_no_data = pd.DataFrame([{"Mensaje": "No hay impuestos registrados."}])
+            df_no_data.to_excel(writer, sheet_name="Impuestos", index=False)
+            apply_styles_and_adjust_cols("Impuestos", df_no_data)
+
+        # Sheet: Retenciones
+        retenciones_list = []
+        if "impuestos" in datos_factura and datos_factura.get("impuestos", {}).get(
+            "retenciones"
+        ):
+            retenciones_list = datos_factura["impuestos"]["retenciones"]
+
+        if retenciones_list:
+            df_retenciones = pd.DataFrame(retenciones_list)
+            df_retenciones.to_excel(writer, sheet_name="Retenciones", index=False)
+            apply_styles_and_adjust_cols("Retenciones", df_retenciones)
+        else:
+            df_no_data = pd.DataFrame([{"Mensaje": "No hay retenciones registradas."}])
+            df_no_data.to_excel(writer, sheet_name="Retenciones", index=False)
+            apply_styles_and_adjust_cols("Retenciones", df_no_data)
+
+        # Sheet: Uso de Tokens
+        if total_tokens:
+            tokens_list_excel = [
+                {"Tipo": key, "Cantidad": value} for key, value in total_tokens.items()
+            ]
+            df_tokens = pd.DataFrame(tokens_list_excel)
+            df_tokens.to_excel(writer, sheet_name="Uso de Tokens", index=False)
+            apply_styles_and_adjust_cols("Uso de Tokens", df_tokens)
+        else:
+            df_no_data = pd.DataFrame(
+                [{"Mensaje": "No hay datos de uso de tokens disponibles."}]
+            )
+            df_no_data.to_excel(writer, sheet_name="Uso de Tokens", index=False)
+            apply_styles_and_adjust_cols("Uso de Tokens", df_no_data)
+
+    output.seek(0)
+    return output
 
 
 # Mostrar datos extraídos
@@ -63,6 +283,22 @@ def mostrar_datos(respuestas):
 
     # Mostrar el uso de tokens
     mostrar_uso_tokens(total_tokens)
+
+    # Generar Excel y agregar botón de descarga
+    if datos_factura or total_tokens:  # Check if there's any data to put in Excel
+        try:
+            excel_bytes = generar_excel(datos_factura, total_tokens)
+            st.download_button(
+                label="Descargar Factura en Excel",
+                data=excel_bytes,
+                file_name="factura_procesada.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception as e:
+            st.error(f"Error al generar el archivo Excel: {e}")
+            # Optionally log the full traceback for debugging
+            # import traceback
+            # st.expander("Detalles del error").code(traceback.format_exc())
 
 
 # Mostrar datos del comprobante
