@@ -125,7 +125,7 @@ def guardar_factura_completa_en_sheets(
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 
     client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
-    private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+    private_key = os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n")
 
     if not private_key:
         st.error("No se encontró la clave privada.")
