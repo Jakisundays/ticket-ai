@@ -165,7 +165,7 @@ def convert_pdf_to_images(pdf_bytes):
 
 
 # Mostrar datos extraídos
-def mostrar_datos(respuestas):
+def mostrar_datos(respuestas, client_email, private_key, sheet_id):
     # Extracción de datos de las respuestas
     datos_factura = {}
     total_tokens = {
@@ -204,10 +204,6 @@ def mostrar_datos(respuestas):
 
     # Mostrar el uso de tokens
     mostrar_uso_tokens(total_tokens)
-
-    client_email = st.secrets["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
-    private_key = st.secrets["GOOGLE_PRIVATE_KEY"]
-    sheet_id =  st.secrets["SHEET_ID"]
 
     guardar_factura_completa_en_sheets(
         tool_messages=respuestas,
@@ -1010,6 +1006,14 @@ async def main():
                 #     st.write(results)
 
                 all_results = [response] + results
+                
+                client_email = st.secrets["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
+                private_key = st.secrets["GOOGLE_PRIVATE_KEY"]
+                sheet_id =  st.secrets["SHEET_ID"]
+                
+                st.write(client_email)
+                st.write(private_key)
+                st.write(sheet_id)
 
                 with col2:
                     st.write("## Respuestas")
