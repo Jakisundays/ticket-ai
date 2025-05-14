@@ -645,6 +645,14 @@ async def main():
     st.sidebar.write(
         "Ticket AI es una aplicación diseñada para extraer información relevante de facturas."
     )
+    
+    client_email = st.secrets["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
+    private_key = st.secrets["GOOGLE_PRIVATE_KEY"]
+    sheet_id =  st.secrets["SHEET_ID"]
+    
+    st.write(client_email)
+    st.write(private_key)
+    st.write(sheet_id)
 
     # Separador
     st.sidebar.markdown("---")
@@ -1007,19 +1015,13 @@ async def main():
 
                 all_results = [response] + results
                 
-                client_email = st.secrets["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
-                private_key = st.secrets["GOOGLE_PRIVATE_KEY"]
-                sheet_id =  st.secrets["SHEET_ID"]
                 
-                st.write(client_email)
-                st.write(private_key)
-                st.write(sheet_id)
 
                 with col2:
                     st.write("## Respuestas")
                     with st.expander("Respuestas - No formateadas"):
                         st.write(all_results)
-                    mostrar_datos(all_results)
+                    mostrar_datos(all_results, client_email, private_key, sheet_id)
 
                 # Delete the temporary PDF file after processing
                 try:
