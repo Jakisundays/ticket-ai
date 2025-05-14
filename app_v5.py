@@ -35,12 +35,16 @@ def formatear_impuestos(impuestos):
         return "No hay impuestos."
     resultado = []
     for i, imp in enumerate(impuestos, start=1):
+        if imp["alicuota"] is not None:
+            alicuota_str = f"{imp['alicuota']:.2f}%"
+        else:
+            alicuota_str = "No especificada"
         texto = (
             f"Impuesto #{i}:\n"
             f"  - Tipo: {imp['tipo']}\n"
             f"  - Descripción: {imp['descripcion'] or 'No especificada'}\n"
             f"  - Base Imponible: ${imp['base_imponible']:.2f}\n"
-            f"  - Alícuota: {f'{imp["alicuota"]:.2f}%' if imp['alicuota'] is not None else 'No especificada'}\n"
+            f"  - Alícuota: {alicuota_str}\n"
             f"  - Importe: ${imp['importe']:.2f}\n"
         )
         resultado.append(texto)
