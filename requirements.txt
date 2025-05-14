@@ -43,3 +43,9 @@ tzdata==2025.2
 urllib3==2.4.0
 yarl==1.20.0
 openpyxl==3.1.5
+dotenv==0.9.9
+google-api-core==2.24.2
+google-api-python-client==2.169.0
+google-auth==2.40.1
+google-auth-httplib2==0.2.0
+googleapis-common-protos==1.70.0
