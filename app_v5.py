@@ -205,9 +205,9 @@ def mostrar_datos(respuestas):
     # Mostrar el uso de tokens
     mostrar_uso_tokens(total_tokens)
 
-    client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
-    private_key = os.getenv("GOOGLE_PRIVATE_KEY")
-    sheet_id = os.getenv("SHEET_ID")
+    client_email = st.secrets["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
+    private_key = st.secrets["GOOGLE_PRIVATE_KEY"]
+    sheet_id =  st.secrets["SHEET_ID"]
 
     guardar_factura_completa_en_sheets(
         tool_messages=respuestas,
