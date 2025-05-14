@@ -49,9 +49,6 @@ def formatear_impuestos(impuestos):
 
 def guardar_factura_completa_en_sheets(
     tool_messages: list,
-    client_email: str,
-    private_key: str,
-    sheet_id: str,
     range_: str = "A2:M2",
 ):
     """
@@ -123,6 +120,10 @@ def guardar_factura_completa_en_sheets(
     # Cargar credenciales y conectar con Sheets
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 
+    client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+    private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+    sheet_id = os.getenv("SHEET_ID")
+
     credentials = service_account.Credentials.from_service_account_info(
         {
             "type": "service_account",
@@ -165,7 +166,7 @@ def convert_pdf_to_images(pdf_bytes):
 
 
 # Mostrar datos extraídos
-def mostrar_datos(respuestas, client_email, private_key, sheet_id):
+def mostrar_datos(respuestas):
     # Extracción de datos de las respuestas
     datos_factura = {}
     total_tokens = {
@@ -207,9 +208,6 @@ def mostrar_datos(respuestas, client_email, private_key, sheet_id):
 
     guardar_factura_completa_en_sheets(
         tool_messages=respuestas,
-        client_email=client_email,
-        private_key=private_key,
-        sheet_id=sheet_id,
     )
 
     # Show link to Google Sheet with extracted data
@@ -645,14 +643,10 @@ async def main():
     st.sidebar.write(
         "Ticket AI es una aplicación diseñada para extraer información relevante de facturas."
     )
-    
-    client_email = st.secrets["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
-    private_key = st.secrets["GOOGLE_PRIVATE_KEY"]
-    sheet_id =  st.secrets["SHEET_ID"]
-    
-    st.write(client_email)
-    st.write(private_key)
-    st.write(sheet_id)
+
+    # client_email = st.secrets["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
+    # private_key = st.secrets["GOOGLE_PRIVATE_KEY"]
+    # sheet_id =  st.secrets["SHEET_ID"]
 
     # Separador
     st.sidebar.markdown("---")
@@ -1014,13 +1008,12 @@ async def main():
                 #     st.write(results)
 
                 all_results = [response] + results
-                
-                
 
                 with col2:
                     st.write("## Respuestas")
                     with st.expander("Respuestas - No formateadas"):
                         st.write(all_results)
+
                     mostrar_datos(all_results, client_email, private_key, sheet_id)
 
                 # Delete the temporary PDF file after processing
