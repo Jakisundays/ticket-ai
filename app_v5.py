@@ -42,22 +42,21 @@ def formatear_impuestos(impuestos):
             f"  - Base Imponible: ${imp['base_imponible']:.2f}\n"
             f"  - Importe: ${imp['importe']:.2f}\n"
         )
-        
+
         # Add optional fields if present
-        if 'descripcion' in imp:
+        if "descripcion" in imp:
             texto = texto.replace(
                 f"  - Tipo: {imp['tipo']}\n",
-                f"  - Tipo: {imp['tipo']}\n"
-                f"  - Descripción: {imp['descripcion']}\n"
+                f"  - Tipo: {imp['tipo']}\n" f"  - Descripción: {imp['descripcion']}\n",
             )
-            
-        if 'alicuota' in imp and imp['alicuota'] is not None:
+
+        if "alicuota" in imp and imp["alicuota"] is not None:
             texto = texto.replace(
                 f"  - Base Imponible: ${imp['base_imponible']:.2f}\n",
                 f"  - Base Imponible: ${imp['base_imponible']:.2f}\n"
-                f"  - Alícuota: {imp['alicuota']:.2f}%\n"
+                f"  - Alícuota: {imp['alicuota']:.2f}%\n",
             )
-            
+
         resultado.append(texto)
     return "\n".join(resultado)
 
@@ -91,7 +90,10 @@ def guardar_factura_completa_en_sheets(
                 elif name == "detalle_de_items_facturados":
                     detalles = input_data.get("detalles", [])
                     descripcion_items = "; ".join(
-                        [d.get("descripcion", "") for d in detalles]
+                        [
+                            f"Descripción: {d.get('descripcion', '')}, Cantidad: {d.get('cantidad', '')}, Precio Unitario: ${d.get('precio_unitario', '')}, Precio Total: ${d.get('precio_total', '')}"
+                            for d in detalles
+                        ]
                     )
                     subtotal = input_data.get("subtotal", "")
                     total = input_data.get("total", "")
