@@ -133,13 +133,8 @@ def guardar_factura_completa_en_sheets(
         scopes=scopes,
     )
 
-    print(credentials)
-    # credentials = service_account.Credentials.from_service_account_file(
-    #     cred_path, scopes=scopes
-    # )
     service = build("sheets", "v4", credentials=credentials)
 
-    print(service)
     sheet = service.spreadsheets()
 
     # Escribir en la hoja
