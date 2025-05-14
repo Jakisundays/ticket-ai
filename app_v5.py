@@ -141,8 +141,6 @@ def guardar_factura_completa_en_sheets(
     if not private_key:
         st.error("No se encontró la clave privada.")
         return
-    
-    st.write(private_key)
 
     sheet_id = os.getenv("SHEET_ID")
 
