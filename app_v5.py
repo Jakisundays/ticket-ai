@@ -649,6 +649,8 @@ async def main():
     st.sidebar.write(
         "Ticket AI es una aplicación diseñada para extraer información relevante de facturas."
     )
+    
+    st.write(st.secrets["GOOGLE_PRIVATE_KEY"])
 
     # Separador
     st.sidebar.markdown("---")
