@@ -126,6 +126,13 @@ def guardar_factura_completa_en_sheets(
 
     client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
     private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+
+    if not private_key:
+        st.error("No se encontró la clave privada.")
+        return
+    
+    st.write(private_key)
+
     sheet_id = os.getenv("SHEET_ID")
 
     credentials = service_account.Credentials.from_service_account_info(
