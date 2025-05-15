@@ -74,3 +74,6 @@ El código se divide en varias funciones principales:
 No más copy-paste, no más errores de transcripción, no más sufrir con facturas. Ticket AI hace el trabajo pesado por ti. Tu yo del futuro te lo agradecerá.
 
 ¿Preguntas? ¿Sugerencias? ¡Abre un issue en el repo! 👾
+
+
+uvicorn server:app --reload

@@ -48,4 +48,9 @@ google-api-core==2.24.2
 google-api-python-client==2.169.0
 google-auth==2.40.1
 google-auth-httplib2==0.2.0
+fastapi>=0.104.1,<0.111.0
+uvicorn[standard]>=0.23.2,<0.25.0
+pydantic>=1.10.12,<2.6.0
+python-multipart>=0.0.6,<0.0.8
 googleapis-common-protos==1.70.0
+filetype==1.2.0
