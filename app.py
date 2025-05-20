@@ -13,6 +13,9 @@ import pandas as pd
 import fitz
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def formatear_retenciones(retenciones):
@@ -138,13 +141,17 @@ def guardar_factura_completa_en_sheets(
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 
     client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+    if not client_email:
+        st.error("No se encontró el correo electrónico del servicio.")
+        return
     private_key = os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n")
-
     if not private_key:
         st.error("No se encontró la clave privada.")
         return
-
     sheet_id = os.getenv("SHEET_ID")
+    if not sheet_id:
+        st.error("No se encontró el ID de la hoja de cálculo.")
+        return
 
     credentials = service_account.Credentials.from_service_account_info(
         {
@@ -666,9 +673,18 @@ async def main():
         "Ticket AI es una aplicación diseñada para extraer información relevante de facturas."
     )
 
-    # client_email = st.secrets["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
-    # private_key = st.secrets["GOOGLE_PRIVATE_KEY"]
-    # sheet_id =  st.secrets["SHEET_ID"]
+    client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+    if not client_email:
+        st.error("No se encontró el correo electrónico del servicio.")
+        return
+    private_key = os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n")
+    if not private_key:
+        st.error("No se encontró la clave privada.")
+        return
+    sheet_id = os.getenv("SHEET_ID")
+    if not sheet_id:
+        st.error("No se encontró el ID de la hoja de cálculo.")
+        return
 
     # Separador
     st.sidebar.markdown("---")
@@ -1036,7 +1052,7 @@ async def main():
                     with st.expander("Respuestas - No formateadas"):
                         st.write(all_results)
 
-                    mostrar_datos(all_results, client_email, private_key, sheet_id)
+                    mostrar_datos(all_results)
 
                 # Delete the temporary PDF file after processing
                 try:
