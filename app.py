@@ -1,3 +1,4 @@
+import json
 import streamlit as st
 import os
 import io
@@ -14,13 +15,17 @@ import fitz
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
+import zipfile
+import queue
+import mimetypes
+from jsonschema import validate, ValidationError
 
 load_dotenv()
 
 
 def formatear_retenciones(retenciones):
     if not retenciones:
-        return "No hay retenciones."
+        return ""
     resultado = []
     for i, r in enumerate(retenciones, start=1):
         texto = (
@@ -35,7 +40,7 @@ def formatear_retenciones(retenciones):
 
 def formatear_impuestos(impuestos):
     if not impuestos:
-        return "No hay impuestos."
+        return ""
     resultado = []
     for i, imp in enumerate(impuestos, start=1):
         # Build base text with required fields
@@ -92,6 +97,7 @@ def guardar_factura_completa_en_sheets(
 
                 elif name == "detalle_de_items_facturados":
                     detalles = input_data.get("detalles", [])
+
                     descripcion_items = "; ".join(
                         [
                             f"Descripción: {d.get('descripcion', '')}, Cantidad: {d.get('cantidad', '')}, Precio Unitario: ${d.get('precio_unitario', '')}, Precio Total: ${d.get('precio_total', '')}"
@@ -137,51 +143,56 @@ def guardar_factura_completa_en_sheets(
         ]
     ]
 
-    # Cargar credenciales y conectar con Sheets
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    try:
+        # Cargar credenciales y conectar con Sheets
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 
-    client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
-    if not client_email:
-        st.error("No se encontró el correo electrónico del servicio.")
-        return
-    private_key = os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n")
-    if not private_key:
-        st.error("No se encontró la clave privada.")
-        return
-    sheet_id = os.getenv("SHEET_ID")
-    if not sheet_id:
-        st.error("No se encontró el ID de la hoja de cálculo.")
-        return
+        client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+        if not client_email:
+            st.error("No se encontró el correo electrónico del servicio.")
+            return None
+        private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+        if not private_key:
+            st.error("No se encontró la clave privada.")
+            return None
+        private_key = private_key.replace("\\n", "\n")
 
-    credentials = service_account.Credentials.from_service_account_info(
-        {
-            "type": "service_account",
-            "client_email": client_email,
-            "private_key": private_key,
-            "token_uri": "https://accounts.google.com/o/oauth2/token",
-        },
-        scopes=scopes,
-    )
+        sheet_id = os.getenv("SHEET_ID")
+        if not sheet_id:
+            st.error("No se encontró el ID de la hoja de cálculo.")
+            return None
 
-    service = build("sheets", "v4", credentials=credentials)
-
-    sheet = service.spreadsheets()
-
-    # Escribir en la hoja
-    body = {"values": fila}
-    response = (
-        sheet.values()
-        .append(
-            spreadsheetId=sheet_id,
-            range=range_,
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body=body,
+        credentials = service_account.Credentials.from_service_account_info(
+            {
+                "type": "service_account",
+                "client_email": client_email,
+                "private_key": private_key,
+                "token_uri": "https://accounts.google.com/o/oauth2/token",
+            },
+            scopes=scopes,
         )
-        .execute()
-    )
 
-    return response
+        service = build("sheets", "v4", credentials=credentials)
+
+        sheet = service.spreadsheets()
+
+        # Escribir en la hoja
+        body = {"values": fila}
+        response = (
+            sheet.values()
+            .append(
+                spreadsheetId=sheet_id,
+                range=range_,
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body=body,
+            )
+            .execute()
+        )
+        return response
+    except Exception as e:
+        st.error(f"Error al guardar en Google Sheets: {e}")
+        return None
 
 
 def convert_pdf_to_images(pdf_bytes):
@@ -208,7 +219,8 @@ def mostrar_datos(respuestas):
     for respuesta in respuestas:
         # Acumular tokens
         for token_type, value in respuesta.get("usage", {}).items():
-            total_tokens[token_type] += value
+            if token_type in total_tokens:
+                total_tokens[token_type] += value
 
         # Extraer datos según el tipo de herramienta
         if respuesta.get("content") and len(respuesta["content"]) > 0:
@@ -235,17 +247,24 @@ def mostrar_datos(respuestas):
     # Mostrar el uso de tokens
     mostrar_uso_tokens(total_tokens)
 
-    guardar_factura_completa_en_sheets(
+    st.write("Guardando datos en Google Sheets...")
+
+    answer_sheet = guardar_factura_completa_en_sheets(
         tool_messages=respuestas,
     )
 
-    # Show link to Google Sheet with extracted data
-    st.markdown(
+    if answer_sheet:
+        # Show link to Google Sheet with extracted data
+        st.markdown(
+            """
+            ### Ver datos en Google Sheets
+            Los datos extraídos se pueden visualizar en tiempo real en esta [hoja de cálculo](https://docs.google.com/spreadsheets/d/1hUUm3OKJGn2JAGatl2HsykhvYadAWxASJ9DOTQVyrCg/edit?gid=0#gid=0).
         """
-        ### Ver datos en Google Sheets
-        Los datos extraídos se pueden visualizar en tiempo real en esta [hoja de cálculo](https://docs.google.com/spreadsheets/d/1hUUm3OKJGn2JAGatl2HsykhvYadAWxASJ9DOTQVyrCg/edit?gid=0#gid=0).
-    """
-    )
+        )
+    else:
+        st.error("Error al guardar los datos en Google Sheets.")
+
+    st.write("---")
 
 
 # Mostrar datos del comprobante
@@ -526,10 +545,7 @@ async def make_api_request(
                             f"Service unavailable. Waiting {retry_after} seconds before retrying..."
                         )
                         await asyncio.sleep(retry_after)
-                        # print(
-                        #     f"Service unavailable. Waiting {WAIT_TIMES[i]} seconds before retrying..."
-                        # )
-                        # await asyncio.sleep(WAIT_TIMES[i])
+
                     else:
                         print(f"Error: {response.status} - {await response.text()}")
                         raise ValueError(
@@ -547,38 +563,17 @@ async def call_claude_vision(
     prompt: str,
     tool_name: str,
     process_id: str,
-    model: str = "claude-3-7-sonnet-20250219",
+    model: str = "claude-sonnet-4-20250514",
+    max_retries: int = 6,
 ):
+
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if api_key is None:
         raise ValueError("ANTHROPIC_API_KEY is not set in the environment variables.")
-    data = {
-        "model": model,
-        "tools": tools,
-        "max_tokens": 8192,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": type,
-                            "data": encoded_img,
-                        },
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            },
-        ],
-        "tool_choice": {
-            "type": "tool",
-            "name": tool_name,
-            "disable_parallel_tool_use": True,
-        },
-    }
+
+    schema = next(
+        (tool["input_schema"] for tool in tools if tool["name"] == tool_name), None
+    )
 
     headers = {
         "Content-Type": "application/json",
@@ -586,13 +581,68 @@ async def call_claude_vision(
         "anthropic-version": "2023-06-01",
     }
 
-    response = await make_api_request(
-        url="https://api.anthropic.com/v1/messages",
-        headers=headers,
-        data=data,
-        process_id=process_id,
-    )
-    return response
+    for attempt in range(0, max_retries):
+        try:
+            data = {
+                "model": model if attempt < 3 else "claude-3-7-sonnet-20250219",
+                "tools": tools,
+                "max_tokens": 8192,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": type,
+                                    "data": encoded_img,
+                                },
+                                "cache_control": {"type": "ephemeral"},
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    },
+                ],
+                "tool_choice": {
+                    "type": "tool",
+                    "name": tool_name,
+                    "disable_parallel_tool_use": True,
+                },
+            }
+
+            response = await make_api_request(
+                url="https://api.anthropic.com/v1/messages",
+                headers=headers,
+                data=data,
+                process_id=process_id,
+            )
+            content = response.get("content", [])
+            tool_msg = next((c for c in content if c.get("type") == "tool_use"), None)
+            tool_output = tool_msg["input"]
+            print(json.dumps({"tool_output": tool_output}, indent=2))
+            validate(instance=tool_output, schema=schema)
+            return response
+        except ValidationError as e:
+            print(f"❌ Validation error for '{tool_name}': {e.message}")
+            if attempt < max_retries:
+                print("🔄 Retrying...")
+                continue
+            else:
+                print("❌ Max retries exceeded.")
+                raise ValueError(
+                    f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
+                )
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            if attempt < max_retries:
+                print("🔄 Retrying...")
+                continue
+            else:
+                print("❌ Max retries exceeded.")
+                raise ValueError(
+                    f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
+                )
 
 
 async def call_claude_pdf(
@@ -601,39 +651,16 @@ async def call_claude_pdf(
     prompt: str,
     tool_name: str,
     process_id: str,
-    model: str = "claude-3-7-sonnet-20250219",
+    model: str = "claude-sonnet-4-20250514",
+    max_retries: int = 6,
 ):
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if api_key is None:
         raise ValueError("ANTHROPIC_API_KEY is not set in the environment variables.")
 
-    data = {
-        "model": model,
-        "tools": tools,
-        "max_tokens": 8192,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": static_content,
-                        },
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            },
-        ],
-        "tool_choice": {
-            "type": "tool",
-            "name": tool_name,
-            "disable_parallel_tool_use": True,
-        },
-    }
+    schema = next(
+        (tool["input_schema"] for tool in tools if tool["name"] == tool_name), None
+    )
 
     headers = {
         "Content-Type": "application/json",
@@ -641,13 +668,68 @@ async def call_claude_pdf(
         "anthropic-version": "2023-06-01",
     }
 
-    response = await make_api_request(
-        url="https://api.anthropic.com/v1/messages",
-        headers=headers,
-        data=data,
-        process_id=process_id,
-    )
-    return response
+    for attempt in range(0, max_retries):
+        try:
+            data = {
+                "model": model if attempt < 3 else "claude-3-7-sonnet-20250219",
+                "tools": tools,
+                "max_tokens": 8192,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": static_content,
+                                },
+                                "cache_control": {"type": "ephemeral"},
+                            },
+                            {"type": "text", "text": prompt},
+                        ],
+                    },
+                ],
+                "tool_choice": {
+                    "type": "tool",
+                    "name": tool_name,
+                    "disable_parallel_tool_use": True,
+                },
+            }
+
+            response = await make_api_request(
+                url="https://api.anthropic.com/v1/messages",
+                headers=headers,
+                data=data,
+                process_id=process_id,
+            )
+            content = response.get("content", [])
+            tool_msg = next((c for c in content if c.get("type") == "tool_use"), None)
+            tool_output = tool_msg["input"]
+            validate(instance=tool_output, schema=schema)
+            return response
+
+        except ValidationError as e:
+            print(f"❌ Validation error for '{tool_name}': {e.message}")
+            if attempt < max_retries:
+                print("🔄 Retrying...")
+                continue
+            else:
+                print("❌ Max retries exceeded.")
+                raise ValueError(
+                    f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
+                )
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            if attempt < max_retries:
+                print("🔄 Retrying...")
+                continue
+            else:
+                print("❌ Max retries exceeded.")
+                raise ValueError(
+                    f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
+                )
 
 
 def save_uploaded_file(uploaded_file, save_path):
@@ -698,13 +780,14 @@ async def main():
     # Componente para cargar archivos
     archivo_cargado = st.sidebar.file_uploader(
         "Seleccione un archivo",
-        type=["pdf", "png", "jpg", "jpeg", "webp", "gif"],
+        type=["zip", "pdf", "png", "jpg", "jpeg", "webp", "gif"],
         help="Formatos soportados: PDF, PNG, JPEG, WEBP, GIF no animado",
     )
 
     # Mostrar el archivo cargado
     if archivo_cargado is not None:
         if st.sidebar.button("Procesar Factura", use_container_width=True):
+
             tools = [
                 {
                     "prompt": (
@@ -998,6 +1081,7 @@ async def main():
 
             # Mostrar vista previa según el tipo de archivo
             if archivo_cargado.type.startswith("image"):
+                file_path = save_uploaded_file(archivo_cargado, "./downloads")
                 col1, col2 = st.columns([1, 1])
 
                 with col1:
@@ -1007,8 +1091,6 @@ async def main():
                         caption=f"Imagen cargada: {archivo_cargado.name}",
                         use_container_width=True,
                     )
-
-                file_path = save_uploaded_file(archivo_cargado, "./uploaded_pdfs")
 
                 image_file = Path(file_path)
                 assert image_file.is_file(), "The provided image path does not exist."
@@ -1061,8 +1143,7 @@ async def main():
                     print(f"Error deleting file {file_path}: {e}")
 
             elif archivo_cargado.type == "application/pdf":
-
-                file_path = save_uploaded_file(archivo_cargado, "./uploaded_pdfs")
+                file_path = save_uploaded_file(archivo_cargado, "./downloads")
                 static_content = pdf_to_base64(file_path)
 
                 with open(file_path, "rb") as saved_file:
@@ -1110,6 +1191,172 @@ async def main():
                     os.remove(file_path)
                 except OSError as e:
                     print(f"Error deleting file {file_path}: {e}")
+
+            elif archivo_cargado.type == "application/zip":
+
+                st.write("Procesando archivo de zip...")
+
+                try:
+                    supported_extensions = [
+                        ".pdf",
+                        ".png",
+                        ".jpg",
+                        ".jpeg",
+                        ".webp",
+                        ".gif",
+                    ]
+                    processed_files_count = 0
+                    with zipfile.ZipFile(archivo_cargado, "r") as zip_ref:
+                        member_list = zip_ref.namelist()
+                        st.info(
+                            f"Found {len(member_list)} files in the archive. Processing..."
+                        )
+                        for member_name in member_list:
+                            # Skip directories
+                            if member_name.endswith("/"):
+                                continue
+
+                            file_name_in_zip = os.path.basename(member_name)
+                            file_extension_in_zip = os.path.splitext(file_name_in_zip)[
+                                1
+                            ].lower()
+
+                            downloads_folder = "downloads"
+
+                            # Extract the file
+                            zip_ref.extract(member_name, downloads_folder)
+                            extracted_file_path = os.path.join(
+                                downloads_folder, member_name
+                            )
+                            media_type, _ = mimetypes.guess_type(extracted_file_path)
+                            # You can now use the media_type variable, for example, print it:
+                            
+            
+                            st.markdown(f"### {file_name_in_zip}")
+                            if file_extension_in_zip in supported_extensions:
+
+                                # Procesar y mostrar datos según el tipo de archivo
+                                if file_extension_in_zip == ".pdf":
+                                    static_content = pdf_to_base64(extracted_file_path)
+
+                                    with open(extracted_file_path, "rb") as saved_file:
+                                        static_content = pdf_to_base64(
+                                            extracted_file_path
+                                        )
+
+                                        response = await call_claude_pdf(
+                                            tools=[tool["data"] for tool in tools],
+                                            static_content=static_content,
+                                            prompt=tools[0]["prompt"],
+                                            tool_name=tools[0]["data"]["name"],
+                                            process_id="process_id",
+                                        )
+
+                                        tasks = []
+                                        for tool in tools[1:]:
+                                            tool_res = call_claude_pdf(
+                                                tools=[tool["data"] for tool in tools],
+                                                static_content=static_content,
+                                                prompt=tool["prompt"],
+                                                tool_name=tool["data"]["name"],
+                                                process_id="process_id",
+                                            )
+                                            tasks.append(tool_res)
+
+                                        results = await asyncio.gather(*tasks)
+
+                                        all_results = [response] + results
+
+                                        mostrar_datos(all_results)
+
+                                        try:
+                                            os.remove(extracted_file_path)
+                                        except OSError as e:
+                                            print(
+                                                f"Error deleting file {extracted_file_path}: {e}"
+                                            )
+
+                                elif file_extension_in_zip in [
+                                    ".png",
+                                    ".jpg",
+                                    ".jpeg",
+                                    ".webp",
+                                    ".gif",
+                                ]:
+                                    # Procesar imagen
+                                    image_file = Path(extracted_file_path)
+                                    assert (
+                                        image_file.is_file()
+                                    ), "The provided image path does not exist."
+                                    # Read and encode the image file
+                                    base64_string = base64.b64encode(
+                                        image_file.read_bytes()
+                                    ).decode()
+
+                                    response = await call_claude_vision(
+                                        tools=[tool["data"] for tool in tools],
+                                        encoded_img=base64_string,
+                                        type=media_type,
+                                        prompt=tools[0]["prompt"],
+                                        tool_name=tools[0]["data"]["name"],
+                                        process_id="process_id",
+                                    )
+
+                                    tasks = []
+                                    for tool in tools[1:]:
+                                        tool_res = call_claude_vision(
+                                            tools=[tool["data"] for tool in tools],
+                                            encoded_img=base64_string,
+                                            type=media_type,
+                                            prompt=tool["prompt"],
+                                            tool_name=tool["data"]["name"],
+                                            process_id="process_id",
+                                        )
+                                        tasks.append(tool_res)
+
+                                    # Wait for all tasks to complete
+                                    results = await asyncio.gather(*tasks)
+                                    # with st.expander("Respuestas"):
+                                    #     st.write(results)
+
+                                    all_results = [response] + results
+
+                                    st.write("## Respuestas")
+                                    with st.expander("Respuestas - No formateadas"):
+                                        st.write(all_results)
+
+                                    mostrar_datos(all_results)
+
+                                    try:
+                                        os.remove(extracted_file_path)
+                                    except OSError as e:
+                                        print(
+                                            f"Error deleting file {extracted_file_path}: {e}"
+                                        )
+
+                                else:
+                                    st.warning(
+                                        f"Skipping unsupported file type: {file_name_in_zip} ({file_extension_in_zip})"
+                                    )
+
+                            else:
+                                st.warning(
+                                    f"Skipping unsupported file type: {file_name_in_zip} ({file_extension_in_zip})"
+                                )
+
+                    if processed_files_count > 0:
+                        st.success(
+                            f"Successfully extracted and processed {processed_files_count} supported files to the '{downloads_folder}' folder."
+                        )
+                    else:
+                        st.info("No supported files found to process in the archive.")
+                    st.info("All files in the archive have been processed.")
+                except zipfile.BadZipFile:
+                    st.error(
+                        "Error: The uploaded file is not a valid ZIP archive or is corrupted."
+                    )
+                except Exception as e:
+                    st.error(f"An error occurred during extraction: {e}")
 
 
 if __name__ == "__main__":
