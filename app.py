@@ -19,8 +19,11 @@ import zipfile
 import queue
 import mimetypes
 from jsonschema import validate, ValidationError
+import requests
 
 load_dotenv()
+
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 
 def formatear_retenciones(retenciones):
@@ -625,6 +628,20 @@ async def call_claude_vision(
             return response
         except ValidationError as e:
             print(f"❌ Validation error for '{tool_name}': {e.message}")
+            error_message = {
+                "tool_name": tool_name,
+                "tool_output": tool_output,
+                "tool": next(
+                    (tool for tool in tools if tool["name"] == tool_name), None
+                ),
+                "error": e.message,
+            }
+            error_response = requests.post(
+                WEBHOOK_URL,
+                json=error_message,
+                timeout=10,
+            )
+            print(f"Webhook Status Code: {error_response.status_code}")
             if attempt < max_retries:
                 print("🔄 Retrying...")
                 continue
@@ -635,6 +652,20 @@ async def call_claude_vision(
                 )
         except Exception as e:
             print(f"❌ Unexpected error: {e}")
+            error_message = {
+                "tool_name": tool_name,
+                "tool_output": tool_output,
+                "tool": next(
+                    (tool for tool in tools if tool["name"] == tool_name), None
+                ),
+                "error": e.message,
+            }
+            error_response = requests.post(
+                WEBHOOK_URL,
+                json=error_message,
+                timeout=10,
+            )
+            print(f"Webhook Status Code: {error_response.status_code}")
             if attempt < max_retries:
                 print("🔄 Retrying...")
                 continue
@@ -712,6 +743,20 @@ async def call_claude_pdf(
 
         except ValidationError as e:
             print(f"❌ Validation error for '{tool_name}': {e.message}")
+            error_message = {
+                "tool_name": tool_name,
+                "tool_output": tool_output,
+                "tool": next(
+                    (tool for tool in tools if tool["name"] == tool_name), None
+                ),
+                "error": e.message,
+            }
+            error_response = requests.post(
+                WEBHOOK_URL,
+                json=error_message,
+                timeout=10,
+            )
+            print(f"Webhook Status Code: {error_response.status_code}")
             if attempt < max_retries:
                 print("🔄 Retrying...")
                 continue
@@ -722,6 +767,20 @@ async def call_claude_pdf(
                 )
         except Exception as e:
             print(f"❌ Unexpected error: {e}")
+            error_message = {
+                "tool_name": tool_name,
+                "tool_output": tool_output,
+                "tool": next(
+                    (tool for tool in tools if tool["name"] == tool_name), None
+                ),
+                "error": e.message,
+            }
+            error_response = requests.post(
+                WEBHOOK_URL,
+                json=error_message,
+                timeout=10,
+            )
+            print(f"Webhook Status Code: {error_response.status_code}")
             if attempt < max_retries:
                 print("🔄 Retrying...")
                 continue
@@ -1230,8 +1289,7 @@ async def main():
                             )
                             media_type, _ = mimetypes.guess_type(extracted_file_path)
                             # You can now use the media_type variable, for example, print it:
-                            
-            
+
                             st.markdown(f"### {file_name_in_zip}")
                             if file_extension_in_zip in supported_extensions:
 
