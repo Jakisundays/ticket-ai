@@ -706,7 +706,7 @@ class InvoiceOrchestrator:
 # semaphore: cuántos procesos paralelos permitimos (3 max)
 
 orchestrator = InvoiceOrchestrator(
-    secret="1234",
+    secret=os.getenv("SECRET_KEY"),
     webhook_url=os.getenv("WEBHOOK_URL"),
     api_key=os.getenv("ANTHROPIC_API_KEY"),
     recharge_cooldown=45,
