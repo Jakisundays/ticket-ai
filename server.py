@@ -55,5 +55,5 @@ async def read_root():
     }
     """
     return {
-        "message": "Bienvenido a la API de Invoicy. Documentación disponible en /docs y /redoc."
+        "message": "Bienvenido a la API de Invoicy. 📈"
     }
