@@ -19,6 +19,8 @@ import filetype
 import requests
 import zipfile
 from jsonschema import validate, ValidationError
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 # Local imports
 from tools import tools
@@ -127,6 +129,8 @@ class InvoiceOrchestrator:
             item = await self.task_queue.get()
             print(f"Procesando item {item}")
             try:
+                self.active_comparisons[item["process_id"]] = item
+                print(f"Procesando item: {item['process_id']}")
                 # Procesa la factura y notifica resultado
                 factura = await self.process_item(item)
                 print("Factura procesada")
@@ -146,6 +150,8 @@ class InvoiceOrchestrator:
                 else:
                     print("Error sending webhook")
             finally:
+                if item["process_id"] in self.active_comparisons:
+                    del self.active_comparisons[item["process_id"]]
                 # Limpia archivos temporales
                 try:
                     os.remove(item["file_path"])
@@ -180,7 +186,7 @@ class InvoiceOrchestrator:
                 print("Tenemos las respuestas")
                 # Guarda en sheets y formatea respuesta
                 saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
-                    respuestas
+                    respuestas["data"]
                 )
                 print(
                     "Guardamos la factura"
@@ -543,6 +549,8 @@ class InvoiceOrchestrator:
         """
         Extrae los datos clave de un array de tool_use y los guarda como una fila en Google Sheets.
         """
+        # with open("datos.json", "w", encoding="utf-8") as f:
+        #     json.dump(tool_messages, f, ensure_ascii=False, indent=4)
 
         # Inicializar variables
         emisor = receptor = otros = comprobante = {}
@@ -872,7 +880,9 @@ async def process_invoice(
                 respuestas = await orchestrator.run_pdf_toolchain(item)
 
             # Guarda resultados y formatea respuesta
-            saved_sheet = orchestrator.guardar_factura_completa_en_sheets(respuestas)
+            saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
+                respuestas["data"]
+            )
             factura = orchestrator.formatear_factura(respuestas["data"])
             factura["id"] = id
             factura["saved_sheet"] = bool(saved_sheet)
@@ -915,7 +925,7 @@ async def process_invoice(
 
                     # Notifica y elimina si no es compatible
                     else:
-                        error_response = await orchestrator.fire_webhook(
+                        await orchestrator.fire_webhook(
                             {
                                 "file_name": file_name_in_zip,
                                 "file_extension": file_extension_in_zip,
@@ -941,3 +951,33 @@ async def process_invoice(
         raise HTTPException(
             status_code=500, detail=f"Error interno del servidor: {str(e)}"
         )
+
+
+@router.get(
+    "/queue",
+    summary="Get current queue status",
+    description="Returns information about currently active invoice processing tasks",
+    response_description="A dictionary containing details about active comparisons in the processing queue",
+)
+async def get_queue_status():
+    """
+    Endpoint to check the current status of the invoice processing queue.
+
+    Returns:
+        dict: Contains 'queue_size' key with a dictionary of active processing tasks,
+              where each key is a process ID and value contains file processing details
+
+    Example response:
+        {
+            "queue_size": {
+                "process_123": {
+                    "file_name": "invoice.pdf",
+                    "file_extension": ".pdf",
+                    "file_path": "/tmp/invoice.pdf",
+                    "media_type": "application/pdf",
+                    "process_id": "process_123"
+                }
+            }
+        }
+    """
+    return {"queue_size": orchestrator.active_comparisons}
