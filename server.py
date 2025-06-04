@@ -3,6 +3,7 @@ import asyncio
 
 # Third-party imports
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # Local application imports
 from routes.process_invoice import orchestrator
@@ -27,14 +28,24 @@ app = FastAPI(
     ],
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Conecta las rutas de facturas a la app
 app.include_router(process_invoice_router)
+
 
 @app.on_event("startup")
 async def startup_event():
     # Crea 5 workers al iniciar para procesar facturas en paralelo
     for _ in range(5):
         asyncio.create_task(orchestrator.worker())
+
 
 # API Endpoints
 @app.get(
@@ -54,6 +65,4 @@ async def read_root():
         "message": "Bienvenido a la API de Invoicy. Documentación disponible en /docs y /redoc."
     }
     """
-    return {
-        "message": "Bienvenido a la API de Invoicy. 📈"
-    }
+    return {"message": "Bienvenido a la API de Invoicy. 📈"}
