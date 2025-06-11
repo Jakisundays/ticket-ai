@@ -4,6 +4,7 @@ tools = [
             "Extrae los detalles estructurados de la factura. "
             "Incluye el domicilio comercial del emisor y del receptor, "
             "priorizando siempre el Domicilio Comercial sobre el Legal o Fiscal. "
+            "SE MUY CRÍTICO PARA NÚMERO DE FACTURA - Identifica el número único de esta factura/comprobante"
         ),
         "data": {
             "name": "datos_del_emisor_y_receptor",  # Updated name
@@ -39,7 +40,7 @@ tools = [
                             },
                             "numero": {
                                 "type": "string",
-                                "description": "Número del comprobante, por ejemplo: '0001-00001234'.",
+                                "description": "Número de la factura/comprobante fiscal. Este es el número único identificatorio del comprobante que aparece impreso en el documento. Busca líneas que contengan 'Nro:', 'Número:', 'N°:' seguido del número, o el número que aparece directamente después del tipo y código de comprobante. Formatos típicos: 'XX-XXXXX', 'XX-XXXXX', 'XXXXX-XXXXX'. EXTRAE EXACTAMENTE como está impreso: mantén todos los dígitos, guiones, ceros iniciales y formato original. NO modifiques, no reformatees, no agregues ni quites caracteres - copia literal el número de factura completo",
                             },
                             "fecha_emision": {
                                 "type": "string",

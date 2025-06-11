@@ -11,6 +11,9 @@ import ssl
 import mimetypes
 from pathlib import Path
 from typing import Dict, Optional, Union, TypedDict
+import fitz  # PyMuPDF
+from PIL import Image
+import io
 
 # Third-party imports
 import aiohttp
@@ -24,9 +27,10 @@ from googleapiclient.discovery import build
 
 # Local imports
 from tools import tools
+from tools_standard import tools as tools_standard
 
 # Crea una instancia del router de FastAPI
-router = APIRouter()
+router = APIRouter(prefix="/gemini")
 
 
 # Convierte un archivo PDF a string base64
@@ -229,6 +233,129 @@ class InvoiceOrchestrator:
                     raise ValueError(f"Request error: {str(e)}")
         raise ValueError("Max retries exceeded.")
 
+    async def tool_handler(
+        self,
+        tools: list,
+        messages: list,
+        tool_name: str,
+        process_id: str,
+        model: str = "gemini-2.0-flash",
+        max_retries: int = 6,
+    ):
+        url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {os.getenv('GEMINI_API_KEY')}",
+        }
+        data = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": tool_name},
+            },
+        }
+        schema = next(
+            (
+                tool["function"]["parameters"]
+                for tool in tools
+                if tool["function"]["name"] == tool_name
+            ),
+            None,
+        )
+        tool_output = None
+        for attempt in range(0, max_retries):
+            try:
+                response = await self.make_api_request(
+                    url=url,
+                    headers=headers,
+                    data=data,
+                    process_id=process_id,
+                )
+
+                if response["choices"][0]["message"]["tool_calls"][0]["function"][
+                    "arguments"
+                ]:
+                    tool_output = json.loads(
+                        response["choices"][0]["message"]["tool_calls"][0]["function"][
+                            "arguments"
+                        ]
+                    )
+                else:
+                    raise ValueError("No tool output")
+
+                usage = response["usage"]
+
+                validate(instance=tool_output, schema=schema)
+                print("✅ Validation passed.")
+                return {
+                    "content": [
+                        {
+                            "name": tool_name,
+                            "input": tool_output,
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": usage["prompt_tokens"],
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "output_tokens": usage["completion_tokens"],
+                        "service_tier": "standard",
+                    },
+                }
+                # return {"content": tool_output, "usage": usage, "tool_name": tool_name}
+            except ValidationError as e:
+                # Notifica error de validación
+                print(f"❌ Validation error for '{tool_name}': {e.message}")
+                error_message = {
+                    "tool_name": tool_name,
+                    "tool_output": tool_output,
+                    "tool": next(
+                        (tool for tool in tools if tool["name"] == tool_name), None
+                    ),
+                    "error": e.message,
+                }
+                error_response = requests.post(
+                    self.WEBHOOK_URL,
+                    json=error_message,
+                    timeout=10,
+                )
+                print(f"Webhook Status Code: {error_response.status_code}")
+                if attempt < max_retries:
+                    print("🔄 Retrying...")
+                    continue
+                else:
+                    print("❌ Max retries exceeded.")
+                    raise ValueError(
+                        f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
+                    )
+            except Exception as e:
+                # Notifica error general
+                print(f"❌ Unexpected error: {e}")
+                error_message = {
+                    "tool_name": tool_name,
+                    "tool_output": tool_output,
+                    "tool": next(
+                        (tool for tool in tools if tool["name"] == tool_name), None
+                    ),
+                    "error": e.message,
+                }
+                error_response = requests.post(
+                    self.WEBHOOK_URL,
+                    json=error_message,
+                    timeout=10,
+                )
+                print(f"Webhook Status Code: {error_response.status_code}")
+                if attempt < max_retries:
+                    print("🔄 Retrying...")
+                    continue
+                else:
+                    print("❌ Max retries exceeded.")
+                    raise ValueError(
+                        f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
+                    )
+
     # Procesa imágenes con Claude Vision
     async def run_image_toolchain(
         self,
@@ -238,25 +365,46 @@ class InvoiceOrchestrator:
         image_file = Path(item["file_path"])
         base64_string = base64.b64encode(image_file.read_bytes()).decode()
 
-        # Procesa con primera herramienta
-        response = await self.vision_tool_handler(
-            tools=[tool["data"] for tool in self.tool_with_prompts],
-            encoded_img=base64_string,
-            type=item["media_type"],
-            prompt=self.tool_with_prompts[0]["prompt"],
-            tool_name=self.tool_with_prompts[0]["data"]["name"],
+        response = await self.tool_handler(
+            tools=[tool["data"] for tool in tools_standard],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": tools_standard[0]["prompt"]},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{item["media_type"]};base64,{base64_string}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            tool_name=tools_standard[0]["data"]["function"]["name"],
             process_id=item["process_id"],
         )
 
         # Procesa con resto de herramientas en paralelo
         tasks = []
-        for tool in self.tool_with_prompts[1:]:
-            tool_res = self.vision_tool_handler(
-                tools=[tool["data"] for tool in self.tool_with_prompts],
-                encoded_img=base64_string,
-                type=item["media_type"],
-                prompt=tool["prompt"],
-                tool_name=tool["data"]["name"],
+        for tool in tools_standard[1:]:
+            tool_res = self.tool_handler(
+                tools=[tool["data"] for tool in tools_standard],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{item["media_type"]};base64,{base64_string}"
+                                },
+                            },
+                            {"type": "text", "text": tool["prompt"]},
+                        ],
+                    }
+                ],
+                tool_name=tool["data"]["function"]["name"],
                 process_id=item["process_id"],
             )
             tasks.append(tool_res)
@@ -270,26 +418,59 @@ class InvoiceOrchestrator:
         self,
         item: QueueItem,
     ):
-        # Convierte PDF a base64
-        static_content = pdf_to_base64(item["file_path"])
+        doc = fitz.open(item["file_path"])
+        base64_images = []
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            pix = page.get_pixmap(dpi=150)  # convertimos a imagen
 
-        # Procesa con primera herramienta
-        response = await self.pdf_tool_handler(
-            tools=[tool["data"] for tool in self.tool_with_prompts],
-            static_content=static_content,
-            prompt=self.tool_with_prompts[0]["prompt"],
-            tool_name=self.tool_with_prompts[0]["data"]["name"],
+            # Convertimos el pixmap a imagen PIL
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+            # Guardamos en memoria y convertimos a base64
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG")
+            img_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            base64_images.append(img_base64)
+
+        image_messages = [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+            }
+            for img_b64 in base64_images
+        ]
+
+        response = await self.tool_handler(
+            tools=[tool["data"] for tool in tools_standard],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        *image_messages,
+                        {"type": "text", "text": tools_standard[0]["prompt"]},
+                    ],
+                }
+            ],
+            tool_name=tools_standard[0]["data"]["function"]["name"],
             process_id=item["process_id"],
         )
 
         # Procesa con resto de herramientas en paralelo
         tasks = []
-        for tool in self.tool_with_prompts[1:]:
-            tool_res = self.pdf_tool_handler(
-                tools=[tool["data"] for tool in self.tool_with_prompts],
-                static_content=static_content,
-                prompt=tool["prompt"],
-                tool_name=tool["data"]["name"],
+        for tool in tools_standard[1:]:
+            tool_res = self.tool_handler(
+                tools=[tool["data"] for tool in tools_standard],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            *image_messages,
+                            {"type": "text", "text": tool["prompt"]},
+                        ],
+                    }
+                ],
+                tool_name=tool["data"]["function"]["name"],
                 process_id=item["process_id"],
             )
             tasks.append(tool_res)
@@ -298,332 +479,102 @@ class InvoiceOrchestrator:
         item["data"] = respuestas
         return item
 
-    # Maneja el procesamiento de imágenes con Claude Vision
-    async def vision_tool_handler(
-        self,
-        tools: list,
-        encoded_img: str,
-        type: str,
-        prompt: str,
-        tool_name: str,
-        process_id: str,
-        model: str = "claude-sonnet-4-20250514",
-        max_retries: int = 6,
-    ):
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        schema = next(
-            (tool["input_schema"] for tool in tools if tool["name"] == tool_name), None
-        )
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        }
-
-        # Intenta procesar con reintentos
-        for attempt in range(0, max_retries):
-            try:
-                data = {
-                    "model": model if attempt < 3 else "claude-3-7-sonnet-20250219",
-                    "tools": tools,
-                    "max_tokens": 8192,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": type,
-                                        "data": encoded_img,
-                                    },
-                                    "cache_control": {"type": "ephemeral"},
-                                },
-                                {"type": "text", "text": prompt},
-                            ],
-                        },
-                    ],
-                    "tool_choice": {
-                        "type": "tool",
-                        "name": tool_name,
-                        "disable_parallel_tool_use": True,
-                    },
-                }
-
-                response = await self.make_api_request(
-                    url="https://api.anthropic.com/v1/messages",
-                    headers=headers,
-                    data=data,
-                    process_id=process_id,
-                )
-                content = response.get("content", [])
-                tool_msg = next(
-                    (c for c in content if c.get("type") == "tool_use"), None
-                )
-                tool_output = tool_msg["input"]
-                validate(instance=tool_output, schema=schema)
-                print("✅ Validation passed.")
-                return response
-            except ValidationError as e:
-                # Notifica error de validación
-                print(f"❌ Validation error for '{tool_name}': {e.message}")
-                error_message = {
-                    "tool_name": tool_name,
-                    "tool_output": tool_output,
-                    "tool": next(
-                        (tool for tool in tools if tool["name"] == tool_name), None
-                    ),
-                    "error": e.message,
-                }
-                error_response = requests.post(
-                    self.WEBHOOK_URL,
-                    json=error_message,
-                    timeout=10,
-                )
-                print(f"Webhook Status Code: {error_response.status_code}")
-                if attempt < max_retries:
-                    print("🔄 Retrying...")
-                    continue
-                else:
-                    print("❌ Max retries exceeded.")
-                    raise ValueError(
-                        f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
-                    )
-            except Exception as e:
-                # Notifica error general
-                print(f"❌ Unexpected error: {e}")
-                error_message = {
-                    "tool_name": tool_name,
-                    "tool_output": tool_output,
-                    "tool": next(
-                        (tool for tool in tools if tool["name"] == tool_name), None
-                    ),
-                    "error": e.message,
-                }
-                error_response = requests.post(
-                    self.WEBHOOK_URL,
-                    json=error_message,
-                    timeout=10,
-                )
-                print(f"Webhook Status Code: {error_response.status_code}")
-                if attempt < max_retries:
-                    print("🔄 Retrying...")
-                    continue
-                else:
-                    print("❌ Max retries exceeded.")
-                    raise ValueError(
-                        f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
-                    )
-
-    # Maneja el procesamiento de PDFs con Claude
-    async def pdf_tool_handler(
-        self,
-        tools: list,
-        static_content: str,
-        prompt: str,
-        tool_name: str,
-        process_id: str,
-        model: str = "claude-sonnet-4-20250514",
-        max_retries: int = 6,
-    ):
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-
-        if api_key is None:
-            raise ValueError(
-                "ANTHROPIC_API_KEY is not set in the environment variables."
-            )
-
-        schema = next(
-            (tool["input_schema"] for tool in tools if tool["name"] == tool_name), None
-        )
-
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        }
-
-        # Intenta procesar con reintentos
-        for attempt in range(0, max_retries):
-            try:
-                data = {
-                    "model": model if attempt < 3 else "claude-3-7-sonnet-20250219",
-                    "tools": tools,
-                    "max_tokens": 8192,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "document",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "application/pdf",
-                                        "data": static_content,
-                                    },
-                                    "cache_control": {"type": "ephemeral"},
-                                },
-                                {"type": "text", "text": prompt},
-                            ],
-                        },
-                    ],
-                    "tool_choice": {
-                        "type": "tool",
-                        "name": tool_name,
-                        "disable_parallel_tool_use": True,
-                    },
-                }
-
-                response = await self.make_api_request(
-                    url="https://api.anthropic.com/v1/messages",
-                    headers=headers,
-                    data=data,
-                    process_id=process_id,
-                )
-                content = response.get("content", [])
-                tool_msg = next(
-                    (c for c in content if c.get("type") == "tool_use"), None
-                )
-                tool_output = tool_msg["input"]
-                validate(instance=tool_output, schema=schema)
-                return response
-
-            except ValidationError as e:
-                # Notifica error de validación
-                print(f"❌ Validation error for '{tool_name}': {e.message}")
-                error_message = {
-                    "tool_name": tool_name,
-                    "tool_output": tool_output,
-                    "tool": next(
-                        (tool for tool in tools if tool["name"] == tool_name), None
-                    ),
-                    "error": e.message,
-                }
-                error_response = requests.post(
-                    self.WEBHOOK_URL,
-                    json=error_message,
-                    timeout=10,
-                )
-                print(f"Webhook Status Code: {error_response.status_code}")
-                if attempt < max_retries:
-                    print("🔄 Retrying...")
-                    continue
-                else:
-                    print("❌ Max retries exceeded.")
-                    raise ValueError(
-                        f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
-                    )
-            except Exception as e:
-                # Notifica error general
-                print(f"❌ Unexpected error: {e}")
-                error_message = {
-                    "tool_name": tool_name,
-                    "tool_output": tool_output,
-                    "tool": next(
-                        (tool for tool in tools if tool["name"] == tool_name), None
-                    ),
-                    "error": e.message,
-                }
-                error_response = requests.post(
-                    self.WEBHOOK_URL,
-                    json=error_message,
-                    timeout=10,
-                )
-                print(f"Webhook Status Code: {error_response.status_code}")
-                if attempt < max_retries:
-                    print("🔄 Retrying...")
-                    continue
-                else:
-                    print("❌ Max retries exceeded.")
-                    raise ValueError(
-                        f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
-                    )
-
     # Guarda los datos de la factura en Google Sheets
     def guardar_factura_completa_en_sheets(
         self,
-        tool_messages: list,
-        range_: str = "A2:M2",
+        factura_data: dict,  # El input ahora es el diccionario formateado
+        range_name: str = "A2:M2",  # Es mejor especificar la hoja, ej: 'Facturas!A1'
     ):
         """
-        Extrae los datos clave de un array de tool_use y los guarda como una fila en Google Sheets.
+        Toma los datos de una factura ya formateada y los guarda como una fila en Google Sheets.
         """
-        # with open("datos.json", "w", encoding="utf-8") as f:
-        #     json.dump(tool_messages, f, ensure_ascii=False, indent=4)
-
-        # Inicializar variables
-        emisor = receptor = otros = comprobante = {}
-        subtotal = total = observaciones = ""
-        descripcion_items = ""
-        impuestos = []
-
         try:
+            print("Preparando datos para guardar en Google Sheets...")
 
-            # Buscar los bloques relevantes
-            for msg in tool_messages:
-                for content in msg.get("content", []):
-                    if content.get("type") == "tool_use":
-                        name = content.get("name")
-                        input_data = content.get("input", {})
+            sheet_id = os.getenv("SHEET_ID")
+            if not sheet_id:
+                print("No se encontró el ID de la hoja de cálculo.")
+                return None
 
-                        if name == "datos_del_emisor_y_receptor":
-                            comprobante = input_data.get("comprobante", {})
-                            emisor = input_data.get("emisor", {})
-                            receptor = input_data.get("receptor", {})
-                            otros = input_data.get("otros", {})
+            # --- Lógica de Extracción de Datos (Ahora mucho más simple) ---
 
-                        elif name == "detalle_de_items_facturados":
-                            detalles = input_data.get("detalles", [])
+            # Obtener los bloques de datos principales. Usamos .get({}, {}) para evitar errores.
+            emisor_receptor = factura_data.get("emisor_receptor", {})
+            items_info = factura_data.get("items", {})
+            impuestos_info = factura_data.get("impuestos", {})
 
-                            descripcion_items = "; ".join(
-                                [
-                                    f"Descripción: {d.get('descripcion', '')}, Cantidad: {d.get('cantidad', '')}, Precio Unitario: ${d.get('precio_unitario', '')}, Precio Total: ${d.get('precio_total', '')}"
-                                    for d in detalles
-                                ]
-                            )
-                            subtotal = input_data.get("subtotal", "")
-                            total = input_data.get("total", "")
-                            observaciones = input_data.get("observaciones", "")
+            # Extraer sub-bloques de datos
+            comprobante = emisor_receptor.get("comprobante", {})
+            emisor = emisor_receptor.get("emisor", {})
+            receptor = emisor_receptor.get("receptor", {})
+            otros = emisor_receptor.get("otros", {})
 
-                        elif name == "impuestos_y_retenciones_de_la_factura":
-                            impuestos = input_data.get("impuestos", [])
-                            retenciones = input_data.get("retenciones", [])
-
-            # total_impuestos = sum([imp.get("importe", 0) for imp in impuestos])
-
-            # Preparar los datos para una fila
-            fila = [
+            # Extraer detalles de los items
+            detalles = items_info.get("detalles", [])
+            descripcion_items = "; ".join(
                 [
-                    comprobante.get("tipo", ""),
-                    comprobante.get("subtipo", ""),
-                    comprobante.get("jurisdiccion_fiscal", ""),
-                    comprobante.get("numero", ""),
-                    comprobante.get("fecha_emision", ""),
-                    comprobante.get("moneda", ""),
-                    emisor.get("nombre", ""),
-                    emisor.get("id_fiscal", ""),
-                    emisor.get("condicion_iva", ""),
-                    emisor.get("direccion", ""),
-                    receptor.get("nombre", ""),
-                    receptor.get("id_fiscal", ""),
-                    receptor.get("condicion_iva", ""),
-                    receptor.get("direccion", ""),
-                    descripcion_items,
-                    subtotal,
-                    formatear_impuestos(impuestos),
-                    formatear_retenciones(retenciones),
-                    total,
-                    observaciones,
-                    otros.get("CAE", ""),
-                    otros.get("vencimiento_CAE", ""),
-                    otros.get("forma_pago", ""),
+                    f"Desc: {d.get('descripcion', '')}, Cant: {d.get('cantidad', '')}, Total: ${d.get('precio_total', '')}"
+                    for d in detalles
                 ]
+            )
+            subtotal = items_info.get("subtotal", "")
+            total = items_info.get("total", "")
+            observaciones = items_info.get("observaciones", "")
+
+            # Extraer impuestos y retenciones
+            impuestos = impuestos_info.get("impuestos", [])
+            retenciones = impuestos_info.get("retenciones", [])
+
+            # --- Preparación de la Fila (La lógica es casi la misma) ---
+            fila_para_sheets = [
+                # Datos del Comprobante
+                comprobante.get("tipo", ""),
+                comprobante.get("subtipo", ""),
+                comprobante.get("jurisdiccion_fiscal", ""),
+                comprobante.get("numero", ""),
+                comprobante.get("fecha_emision", ""),
+                comprobante.get("moneda", ""),
+                # Datos del Emisor
+                emisor.get("nombre", ""),
+                emisor.get("id_fiscal", ""),
+                emisor.get("condicion_iva", ""),
+                emisor.get("direccion", ""),
+                # Datos del Receptor
+                receptor.get("nombre", ""),
+                receptor.get("id_fiscal", ""),
+                receptor.get("condicion_iva", ""),
+                receptor.get("direccion", ""),
+                # Detalles de la Factura
+                descripcion_items,
+                subtotal,
+                formatear_impuestos(impuestos),
+                formatear_retenciones(retenciones),
+                total,
+                observaciones,
+                # Otros datos
+                otros.get("CAE", ""),
+                otros.get("vencimiento_CAE", ""),
+                otros.get("forma_pago", ""),
             ]
 
-            # Cargar credenciales y conectar con Sheets
+            # Envolvemos la fila en otra lista porque la API espera una lista de filas
+            valores_para_api = [fila_para_sheets]
+
+            print("\nFila a enviar a Google Sheets:")
+            print(valores_para_api)
+
+            # --- Conexión y Escritura en Google Sheets (Sin cambios) ---
+
+            # NOTA: La siguiente sección es para la ejecución real.
+            # Si solo quieres probar la lógica de formateo, puedes detenerte aquí.
+
+            print("\nConectando con Google Sheets API...")
             scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 
+            # Carga de credenciales desde variables de entorno (o un archivo de secretos)
+            # service_account_info = json.loads(
+            #     os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            # )
             client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
             if not client_email:
                 print("No se encontró el correo electrónico del servicio.")
@@ -633,11 +584,6 @@ class InvoiceOrchestrator:
                 print("No se encontró la clave privada.")
                 return None
             private_key = private_key.replace("\\n", "\n")
-
-            sheet_id = os.getenv("SHEET_ID")
-            if not sheet_id:
-                print("No se encontró el ID de la hoja de cálculo.")
-                return None
 
             credentials = service_account.Credentials.from_service_account_info(
                 {
@@ -650,30 +596,40 @@ class InvoiceOrchestrator:
             )
 
             service = build("sheets", "v4", credentials=credentials)
-
             sheet = service.spreadsheets()
 
-            # Escribir en la hoja
-            body = {"values": fila}
+            body = {"values": valores_para_api}
+
+            # Usamos append para añadir la fila al final de la tabla
             response = (
                 sheet.values()
                 .append(
                     spreadsheetId=sheet_id,
-                    range=range_,
-                    valueInputOption="RAW",
+                    range=range_name,
+                    valueInputOption="USER_ENTERED",  # USER_ENTERED interpreta los datos como si los escribiera un usuario
                     insertDataOption="INSERT_ROWS",
                     body=body,
                 )
                 .execute()
             )
+            print("¡Factura guardada con éxito en Google Sheets!")
+            print(response)
             return True
+
         except Exception as e:
             print(f"Error al guardar la factura en Google Sheets: {e}")
+            # En caso de error, es útil imprimir la fila que se intentó guardar
+            if "fila_para_sheets" in locals():
+                print("Datos que fallaron:", fila_para_sheets)
             return False
+        # Formatea los datos de la factura para la respuesta
 
-    # Formatea los datos de la factura para la respuesta
     def formatear_factura(self, factura_completa):
-        print("Formateando factura")
+        """
+        Formatea una lista de respuestas de la API en un único diccionario
+        estructurado con los datos de la factura y el total de tokens utilizados.
+        """
+        print("Formateando factura...")
         datos_factura = {}
         total_tokens = {
             "input_tokens": 0,
@@ -681,15 +637,23 @@ class InvoiceOrchestrator:
             "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": 0,
         }
+
+        # Itera sobre cada diccionario en la lista 'factura_completa'
         for respuesta in factura_completa:
-            # Acumular tokens
+            # 1. Acumula los tokens de uso
+            # El .get("usage", {}) previene errores si la clave 'usage' no existe
             for token_type, value in respuesta.get("usage", {}).items():
                 if token_type == "service_tier":
                     continue
                 total_tokens[token_type] += value
-            # Extraer datos según el tipo de herramienta
+
+            # 2. Extrae los datos de la factura del 'content'
+            # Verifica que 'content' exista y no esté vacío
             if respuesta.get("content") and len(respuesta["content"]) > 0:
+                # Accede al primer (y único) elemento de la lista 'content'
                 tool_content = respuesta["content"][0]
+
+                # Asigna los datos a la clave correcta según el 'name' de la herramienta
                 if tool_content.get("name") == "datos_del_emisor_y_receptor":
                     datos_factura["emisor_receptor"] = tool_content.get("input", {})
                 elif tool_content.get("name") == "detalle_de_items_facturados":
@@ -698,6 +662,8 @@ class InvoiceOrchestrator:
                     tool_content.get("name") == "impuestos_y_retenciones_de_la_factura"
                 ):
                     datos_factura["impuestos"] = tool_content.get("input", {})
+
+        print("Formateo completado.")
         return {
             "data": datos_factura,
             "tokens": total_tokens,
@@ -726,7 +692,7 @@ orchestrator = InvoiceOrchestrator(
 
 @router.post(
     "/process-invoice",
-    summary="Procesar factura - Claude",
+    summary="Procesar factura - GEMINI",
     tags=["Procesamiento de facturas"],
     response_description="Datos extraídos de la factura y uso de tokens.",
     response_model=dict,
@@ -879,15 +845,14 @@ async def process_invoice(
             elif kind.mime == "application/pdf":
                 respuestas = await orchestrator.run_pdf_toolchain(item)
 
-            # Guarda resultados y formatea respuesta
-            saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
-                respuestas["data"]
-            )
             factura = orchestrator.formatear_factura(respuestas["data"])
+            saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
+                factura["data"]
+            )
             factura["id"] = id
             factura["saved_sheet"] = bool(saved_sheet)
             factura["status_code"] = 200
-            
+
             os.remove(file_location)
 
             return factura
@@ -949,11 +914,11 @@ async def process_invoice(
         }
 
     except Exception as e:
-        print(e)
+        print(f"Error: {e}")
         raise HTTPException(
             status_code=500, detail=f"Error interno del servidor: {str(e)}"
         )
-    
+
 
 @router.get(
     "/queue",

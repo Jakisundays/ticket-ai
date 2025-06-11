@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Local application imports
 from routes.process_invoice import orchestrator
 from routes.process_invoice import router as process_invoice_router
+from routes.process_invoice_google import router as process_invoice_google_router
 
 # Configuración básica de la API - título, versión y docs
 app = FastAPI(
@@ -38,6 +39,7 @@ app.add_middleware(
 
 # Conecta las rutas de facturas a la app
 app.include_router(process_invoice_router)
+app.include_router(process_invoice_google_router)
 
 
 @app.on_event("startup")
