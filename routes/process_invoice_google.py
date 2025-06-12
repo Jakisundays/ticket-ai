@@ -125,7 +125,6 @@ class InvoiceOrchestrator:
         self.SECRET = secret
         self.WEBHOOK_URL = webhook_url
         self.api_key = api_key
-        print(f"API KEY: {api_key}")
         self.active_comparisons = {}
 
         self.task_queue = asyncio.Queue()  # Cola async para procesar facturas
