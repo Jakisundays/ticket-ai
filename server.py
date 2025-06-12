@@ -79,4 +79,4 @@ async def startup_event():
 )
 async def read_root():
     app_logger.info("Acceso al endpoint raíz.")
-    return {"message": "Bienvenido a la API de Invoicy. 📈"}
+    return {"message": "Bienvenido a la API de Invoicy. 🥸"}
