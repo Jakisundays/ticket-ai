@@ -17,6 +17,7 @@ from typing import Dict, Optional, Union, TypedDict
 import fitz  # PyMuPDF
 from PIL import Image
 import io
+from dotenv import load_dotenv
 
 # Third-party imports
 import aiohttp
@@ -31,6 +32,8 @@ from googleapiclient.discovery import build
 # Local imports
 from tools import tools
 from tools_standard import tools as tools_standard
+
+load_dotenv()
 
 # Crea una instancia del router de FastAPI
 router = APIRouter(prefix="/gemini")

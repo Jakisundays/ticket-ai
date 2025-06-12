@@ -14,6 +14,7 @@ import ssl
 import mimetypes
 from pathlib import Path
 from typing import Dict, Optional, Union, TypedDict
+from dotenv import load_dotenv
 
 # Third-party imports
 import aiohttp
@@ -27,6 +28,8 @@ from googleapiclient.discovery import build
 
 # Local imports
 from tools import tools
+
+load_dotenv()
 
 # Crea una instancia del router de FastAPI
 router = APIRouter()
