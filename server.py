@@ -69,10 +69,21 @@ async def startup_event():
     for _ in range(5):
         asyncio.create_task(orchestrator.worker())
 
+@app.get(
+    "/",
+    summary="Redirección a la interfaz de Ticket AI",
+    tags=["General"],
+    response_description="Redirige al frontend de la aplicación Ticket AI.",
+)
+async def read_root():
+    """
+    Endpoint raíz que redirige al frontend de Ticket AI.
+    """
+    return RedirectResponse(url="https://ticket-ai-ui.vercel.app/")
 
 # API Endpoints
 @app.get(
-    "/",
+    "/api",
     summary="Chequeo de salud",
     tags=["General"],
     response_description="Mensaje de bienvenida y estado de la API.",
