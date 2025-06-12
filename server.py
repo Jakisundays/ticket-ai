@@ -1,15 +1,27 @@
 # Standard library imports
 import asyncio
+import logging
 
 # Third-party imports
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from fastapi.routing import APIRoute
 
 # Local application imports
 from routes.process_invoice import orchestrator
 from routes.process_invoice import router as process_invoice_router
 from routes.process_invoice_google import router as process_invoice_google_router
+
+# Configuración del logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+app_logger = logging.getLogger("app_logger")
 
 # Configuración básica de la API - título, versión y docs
 app = FastAPI(
@@ -29,6 +41,14 @@ app = FastAPI(
         },
     ],
 )
+
+# Middleware para logging de solicitudes
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    app_logger.info(f"Solicitud entrante: {request.method} {request.url}")
+    response = await call_next(request)
+    app_logger.info(f"Respuesta saliente: {request.method} {request.url} - Estado: {response.status_code}")
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,35 +70,13 @@ async def startup_event():
         asyncio.create_task(orchestrator.worker())
 
 
-@app.get(
-    "/",
-    summary="Redirección a la interfaz de Ticket AI",
-    tags=["General"],
-    response_description="Redirige al frontend de la aplicación Ticket AI.",
-)
-async def read_root():
-    """
-    Endpoint raíz que redirige al frontend de Ticket AI.
-    """
-    return RedirectResponse(url="https://ticket-ai-ui.vercel.app/")
-
-
 # API Endpoints
 @app.get(
-    "/api",
+    "/",
     summary="Chequeo de salud",
     tags=["General"],
     response_description="Mensaje de bienvenida y estado de la API.",
 )
 async def read_root():
-    """
-    Endpoint raíz para chequeo de salud de la API.
-
-    Devuelve un mensaje de bienvenida y confirma que la API está operativa.
-
-    **Ejemplo de respuesta:**
-    {
-        "message": "Bienvenido a la API de Invoicy. Documentación disponible en /docs y /redoc."
-    }
-    """
+    app_logger.info("Acceso al endpoint raíz.")
     return {"message": "Bienvenido a la API de Invoicy. 📈"}

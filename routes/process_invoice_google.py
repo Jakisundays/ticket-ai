@@ -1,5 +1,8 @@
 # FastAPI imports
 from fastapi import Form, APIRouter, HTTPException, UploadFile, File
+import logging
+
+app_logger = logging.getLogger("app_logger")
 
 # Standard library imports
 import os
@@ -42,7 +45,7 @@ def pdf_to_base64(file_path: str) -> Union[str, None]:
             base64_string = base_64_encoded_data.decode("utf-8")
         return base64_string
     except Exception as e:
-        print(f"An error occurred: {e}")
+        app_logger.error(f"An error occurred: {e}")
         return None
 
 
@@ -131,28 +134,28 @@ class InvoiceOrchestrator:
     async def worker(self):
         while True:
             item = await self.task_queue.get()
-            print(f"Procesando item {item}")
+            app_logger.info(f"Procesando item {item}")
             try:
                 self.active_comparisons[item["process_id"]] = item
-                print(f"Procesando item: {item['process_id']}")
+                app_logger.info(f"Procesando item: {item['process_id']}")
                 # Procesa la factura y notifica resultado
                 factura = await self.process_item(item)
-                print("Factura procesada")
+                app_logger.info("Factura procesada")
                 webhook_response = await self.fire_webhook(factura)
                 if webhook_response:
-                    print("Webhook delivered successfully")
+                    app_logger.info("Webhook delivered successfully")
                 else:
-                    print("Error sending webhook")
+                    app_logger.error("Error sending webhook")
             except Exception as e:
                 # Si hay error, notifica con webhook
-                print(f"An error occurred: {e}")
+                app_logger.error(f"An error occurred: {e}")
                 item["error"] = e
                 item["saved_sheet"] = False
                 webhook_response = await self.fire_webhook(item)
                 if webhook_response:
-                    print("Webhook delivered successfully")
+                    app_logger.info("Webhook delivered successfully")
                 else:
-                    print("Error sending webhook")
+                    app_logger.error("Error sending webhook")
             finally:
                 if item["process_id"] in self.active_comparisons:
                     del self.active_comparisons[item["process_id"]]
@@ -160,7 +163,7 @@ class InvoiceOrchestrator:
                 try:
                     os.remove(item["file_path"])
                 except OSError as e:
-                    print(f"Error deleting file {file_path}: {e}")
+                    app_logger.error(f"Error deleting file {item['file_path']}: {e}")
                 self.task_queue.task_done()
 
     # Envía resultados vía webhook
@@ -171,28 +174,28 @@ class InvoiceOrchestrator:
                 json=data,
                 timeout=10,
             )
-            print(res.status_code)
+            app_logger.info(f"Webhook status code: {res.status_code}")
             return True
         except Exception as e:
-            print(f"An error occurred: {e}")
+            app_logger.error(f"An error occurred while sending webhook: {e}")
             return False
 
     # Procesa un item según su tipo (imagen o PDF)
     async def process_item(self, item: QueueItem):
         try:
             async with self.semaphore:
-                print(f"Procesando item {item}")
+                app_logger.info(f"Procesando item {item}")
                 if item["media_type"].startswith("image"):
                     respuestas = await self.run_image_toolchain(item)
                 elif item["media_type"] == "application/pdf":
                     respuestas = await self.run_pdf_toolchain(item)
 
-                print("Tenemos las respuestas")
+                app_logger.info("Tenemos las respuestas")
                 # Guarda en sheets y formatea respuesta
                 saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
                     respuestas["data"]
                 )
-                print(
+                app_logger.info(
                     "Guardamos la factura"
                     if saved_sheet
                     else "No guardamos la factura, error"
@@ -204,7 +207,7 @@ class InvoiceOrchestrator:
 
                 return factura
         except Exception as e:
-            print(f"An error occurred: {e}")
+            app_logger.error(f"An error occurred while processing item: {e}")
             raise ValueError(f"Error processing item: {e}")
 
     # Hace requests a la API con reintentos
@@ -223,9 +226,10 @@ class InvoiceOrchestrator:
                             return await response.json()
                         elif response.status in [429, 529, 503]:
                             sleep_time = 15 * (i + 1)  # Espera incremental en segundos
+                            app_logger.warning(f"API request failed with status {response.status}. Retrying in {sleep_time} seconds...")
                             await asyncio.sleep(sleep_time)
                         else:
-                            print(f"Error: {response.status} - {await response.text()}")
+                            app_logger.error(f"API request failed with status {response.status} - {await response.text()}")
                             raise ValueError(
                                 f"Request failed with status {response.status}"
                             )
@@ -288,7 +292,7 @@ class InvoiceOrchestrator:
                 usage = response["usage"]
 
                 validate(instance=tool_output, schema=schema)
-                print("✅ Validation passed.")
+                app_logger.info("✅ Validation passed.")
                 return {
                     "content": [
                         {
@@ -307,7 +311,7 @@ class InvoiceOrchestrator:
                 # return {"content": tool_output, "usage": usage, "tool_name": tool_name}
             except ValidationError as e:
                 # Notifica error de validación
-                print(f"❌ Validation error for '{tool_name}': {e.message}")
+                app_logger.error(f"❌ Validation error for '{tool_name}': {e.message}")
                 error_message = {
                     "tool_name": tool_name,
                     "tool_output": tool_output,
@@ -321,18 +325,18 @@ class InvoiceOrchestrator:
                     json=error_message,
                     timeout=10,
                 )
-                print(f"Webhook Status Code: {error_response.status_code}")
+                app_logger.error(f"Webhook Status Code: {error_response.status_code}")
                 if attempt < max_retries:
-                    print("🔄 Retrying...")
+                    app_logger.warning("🔄 Retrying...")
                     continue
                 else:
-                    print("❌ Max retries exceeded.")
+                    app_logger.error("❌ Max retries exceeded.")
                     raise ValueError(
                         f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
                     )
             except Exception as e:
                 # Notifica error general
-                print(f"❌ Unexpected error: {e}")
+                app_logger.error(f"❌ Unexpected error: {e}")
                 error_message = {
                     "tool_name": tool_name,
                     "tool_output": tool_output,
@@ -346,12 +350,12 @@ class InvoiceOrchestrator:
                     json=error_message,
                     timeout=10,
                 )
-                print(f"Webhook Status Code: {error_response.status_code}")
+                app_logger.error(f"Webhook Status Code: {error_response.status_code}")
                 if attempt < max_retries:
-                    print("🔄 Retrying...")
+                    app_logger.warning("🔄 Retrying...")
                     continue
                 else:
-                    print("❌ Max retries exceeded.")
+                    app_logger.error("❌ Max retries exceeded.")
                     raise ValueError(
                         f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
                     )
@@ -489,11 +493,11 @@ class InvoiceOrchestrator:
         Toma los datos de una factura ya formateada y los guarda como una fila en Google Sheets.
         """
         try:
-            print("Preparando datos para guardar en Google Sheets...")
+            app_logger.info("Preparando datos para guardar en Google Sheets...")
 
             sheet_id = os.getenv("SHEET_ID")
             if not sheet_id:
-                print("No se encontró el ID de la hoja de cálculo.")
+                app_logger.error("No se encontró el ID de la hoja de cálculo.")
                 return None
 
             # --- Lógica de Extracción de Datos (Ahora mucho más simple) ---
@@ -560,15 +564,15 @@ class InvoiceOrchestrator:
             # Envolvemos la fila en otra lista porque la API espera una lista de filas
             valores_para_api = [fila_para_sheets]
 
-            print("\nFila a enviar a Google Sheets:")
-            print(valores_para_api)
+            app_logger.info("\nFila a enviar a Google Sheets:")
+            app_logger.info(valores_para_api)
 
             # --- Conexión y Escritura en Google Sheets (Sin cambios) ---
 
             # NOTA: La siguiente sección es para la ejecución real.
             # Si solo quieres probar la lógica de formateo, puedes detenerte aquí.
 
-            print("\nConectando con Google Sheets API...")
+            app_logger.info("\nConectando con Google Sheets API...")
             scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 
             # Carga de credenciales desde variables de entorno (o un archivo de secretos)
@@ -577,11 +581,11 @@ class InvoiceOrchestrator:
             # )
             client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
             if not client_email:
-                print("No se encontró el correo electrónico del servicio.")
+                app_logger.error("No se encontró el correo electrónico del servicio.")
                 return None
             private_key = os.getenv("GOOGLE_PRIVATE_KEY")
             if not private_key:
-                print("No se encontró la clave privada.")
+                app_logger.error("No se encontró la clave privada.")
                 return None
             private_key = private_key.replace("\\n", "\n")
 
@@ -612,15 +616,15 @@ class InvoiceOrchestrator:
                 )
                 .execute()
             )
-            print("¡Factura guardada con éxito en Google Sheets!")
-            print(response)
+            app_logger.info("¡Factura guardada con éxito en Google Sheets!")
+            app_logger.info(response)
             return True
 
         except Exception as e:
-            print(f"Error al guardar la factura en Google Sheets: {e}")
+            app_logger.error(f"Error al guardar la factura en Google Sheets: {e}")
             # En caso de error, es útil imprimir la fila que se intentó guardar
             if "fila_para_sheets" in locals():
-                print("Datos que fallaron:", fila_para_sheets)
+                app_logger.error("Datos que fallaron:", fila_para_sheets)
             return False
         # Formatea los datos de la factura para la respuesta
 
@@ -629,7 +633,7 @@ class InvoiceOrchestrator:
         Formatea una lista de respuestas de la API en un único diccionario
         estructurado con los datos de la factura y el total de tokens utilizados.
         """
-        print("Formateando factura...")
+        app_logger.info("Formateando factura...")
         datos_factura = {}
         total_tokens = {
             "input_tokens": 0,
@@ -663,7 +667,7 @@ class InvoiceOrchestrator:
                 ):
                     datos_factura["impuestos"] = tool_content.get("input", {})
 
-        print("Formateo completado.")
+        app_logger.info("Formateo completado.")
         return {
             "data": datos_factura,
             "tokens": total_tokens,
@@ -799,6 +803,7 @@ async def process_invoice(
         description="Archivo de la factura a procesar. Puede ser PDF o imagen (png, jpg, jpeg, webp, gif).",
     ),  # El archivo de la factura a procesar
 ):
+    app_logger.info("Process Invoice Google")
     try:
         # Chequea que estén todos los campos requeridos
         if not all([id, secret_key, file]):
@@ -841,8 +846,10 @@ async def process_invoice(
 
             # Procesa según tipo
             if kind.mime.startswith("image"):
+                app_logger.info("Tenemos una imagen")
                 respuestas = await orchestrator.run_image_toolchain(item)
             elif kind.mime == "application/pdf":
+                app_logger.info("Tenemos un PDF")
                 respuestas = await orchestrator.run_pdf_toolchain(item)
 
             factura = orchestrator.formatear_factura(respuestas["data"])
@@ -859,6 +866,7 @@ async def process_invoice(
 
         # Procesa ZIP
         elif kind.mime == "application/zip":
+            app_logger.info("Tenemos un ZIP")
             supported_extensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"]
 
             # Extrae y procesa cada archivo
@@ -914,7 +922,7 @@ async def process_invoice(
         }
 
     except Exception as e:
-        print(f"Error: {e}")
+        app_logger.info(f"Error: {e}")
         raise HTTPException(
             status_code=500, detail=f"Error interno del servidor: {str(e)}"
         )
