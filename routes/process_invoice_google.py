@@ -122,6 +122,7 @@ class InvoiceOrchestrator:
         self.SECRET = secret
         self.WEBHOOK_URL = webhook_url
         self.api_key = api_key
+        print(f"API KEY: {api_key}")
         self.active_comparisons = {}
 
         self.task_queue = asyncio.Queue()  # Cola async para procesar facturas
@@ -249,7 +250,7 @@ class InvoiceOrchestrator:
         url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {os.getenv('GEMINI_API_KEY')}",
+            "Authorization": f"Bearer {self.api_key}",
         }
         data = {
             "model": model,
