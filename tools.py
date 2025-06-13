@@ -32,7 +32,18 @@ tools = [
                                     "Para consumidores finales y exentos",
                                     "Emitida por monotributistas",
                                 ],
-                                "description": "Subtipo del comprobante basado en el régimen fiscal del receptor.",
+                                "description": """Extraé el valor de "subtipo" según el régimen fiscal del receptor indicado en el comprobante. Buscá palabras clave como: "Responsable Inscripto", "Consumidor Final", "Exento", o "Monotributista".
+
+                                                Asigná uno de estos valores exactos:
+                                                - "Para operaciones entre responsables inscriptos"
+                                                - "Para consumidores finales y exentos"
+                                                - "Emitida por monotributistas"
+
+                                                Reglas:
+                                                - Si menciona "Responsable Inscripto" → "Para operaciones entre responsables inscriptos"
+                                                - Si menciona "Consumidor Final" o "Exento" → "Para consumidores finales y exentos"
+                                                - Si menciona "Monotributista" → "Emitida por monotributistas"
+                                                """,
                             },
                             "jurisdiccion_fiscal": {
                                 "type": "string",
