@@ -376,20 +376,20 @@ class InvoiceOrchestrator:
             except ValidationError as e:
                 # Notifica error de validación
                 app_logger.error(f"❌ Validation error for '{tool_name}': {e.message}")
-                error_message = {
-                    "tool_name": tool_name,
-                    "tool_output": tool_output,
-                    "tool": next(
-                        (tool for tool in tools if tool["name"] == tool_name), None
-                    ),
-                    "error": e.message,
-                }
-                error_response = requests.post(
-                    self.WEBHOOK_URL,
-                    json=error_message,
-                    timeout=10,
-                )
-                app_logger.info(f"Webhook Status Code: {error_response.status_code}")
+                # error_message = {
+                #     "tool_name": tool_name,
+                #     "tool_output": tool_output,
+                #     "tool": next(
+                #         (tool for tool in tools if tool["name"] == tool_name), None
+                #     ),
+                #     "error": e.message,
+                # }
+                # error_response = requests.post(
+                #     self.WEBHOOK_URL,
+                #     json=error_message,
+                #     timeout=10,
+                # )
+                # app_logger.info(f"Webhook Status Code: {error_response.status_code}")
                 if attempt < max_retries:
                     app_logger.warning("🔄 Retrying...")
                     continue
@@ -401,20 +401,20 @@ class InvoiceOrchestrator:
             except Exception as e:
                 # Notifica error general
                 app_logger.error(f"❌ Unexpected error: {e}")
-                error_message = {
-                    "tool_name": tool_name,
-                    "tool_output": tool_output,
-                    "tool": next(
-                        (tool for tool in tools if tool["name"] == tool_name), None
-                    ),
-                    "error": e.message,
-                }
-                error_response = requests.post(
-                    self.WEBHOOK_URL,
-                    json=error_message,
-                    timeout=10,
-                )
-                app_logger.info(f"Webhook Status Code: {error_response.status_code}")
+                # error_message = {
+                #     "tool_name": tool_name,
+                #     "tool_output": tool_output,
+                #     "tool": next(
+                #         (tool for tool in tools if tool["name"] == tool_name), None
+                #     ),
+                #     "error": e.message,
+                # }
+                # error_response = requests.post(
+                #     self.WEBHOOK_URL,
+                #     json=error_message,
+                #     timeout=10,
+                # )
+                # app_logger.info(f"Webhook Status Code: {error_response.status_code}")
                 if attempt < max_retries:
                     app_logger.warning("🔄 Retrying...")
                     continue
@@ -500,20 +500,20 @@ class InvoiceOrchestrator:
             except ValidationError as e:
                 # Notifica error de validación
                 app_logger.error(f"❌ Validation error for '{tool_name}': {e.message}")
-                error_message = {
-                    "tool_name": tool_name,
-                    "tool_output": tool_output,
-                    "tool": next(
-                        (tool for tool in tools if tool["name"] == tool_name), None
-                    ),
-                    "error": e.message,
-                }
-                error_response = requests.post(
-                    self.WEBHOOK_URL,
-                    json=error_message,
-                    timeout=10,
-                )
-                app_logger.info(f"Webhook Status Code: {error_response.status_code}")
+                # error_message = {
+                #     "tool_name": tool_name,
+                #     "tool_output": tool_output,
+                #     "tool": next(
+                #         (tool for tool in tools if tool["name"] == tool_name), None
+                #     ),
+                #     "error": e.message,
+                # }
+                # error_response = requests.post(
+                #     self.WEBHOOK_URL,
+                #     json=error_message,
+                #     timeout=10,
+                # )
+                # app_logger.info(f"Webhook Status Code: {error_response.status_code}")
                 if attempt < max_retries:
                     app_logger.warning("🔄 Retrying...")
                     continue
@@ -525,20 +525,20 @@ class InvoiceOrchestrator:
             except Exception as e:
                 # Notifica error general
                 app_logger.error(f"❌ Unexpected error: {e}")
-                error_message = {
-                    "tool_name": tool_name,
-                    "tool_output": tool_output,
-                    "tool": next(
-                        (tool for tool in tools if tool["name"] == tool_name), None
-                    ),
-                    "error": e.message,
-                }
-                error_response = requests.post(
-                    self.WEBHOOK_URL,
-                    json=error_message,
-                    timeout=10,
-                )
-                app_logger.info(f"Webhook Status Code: {error_response.status_code}")
+                # error_message = {
+                #     "tool_name": tool_name,
+                #     "tool_output": tool_output,
+                #     "tool": next(
+                #         (tool for tool in tools if tool["name"] == tool_name), None
+                #     ),
+                #     "error": e.message,
+                # }
+                # error_response = requests.post(
+                #     self.WEBHOOK_URL,
+                #     json=error_message,
+                #     timeout=10,
+                # )
+                # app_logger.info(f"Webhook Status Code: {error_response.status_code}")
                 if attempt < max_retries:
                     app_logger.warning("🔄 Retrying...")
                     continue
