@@ -135,6 +135,7 @@ class InvoiceOrchestrator:
 
     # Worker que procesa items de la cola continuamente
     async def worker(self):
+        app_logger.info("Iniciando worker")
         while True:
             item = await self.task_queue.get()
             app_logger.info(f"Procesando item {item}")
@@ -193,17 +194,19 @@ class InvoiceOrchestrator:
                 elif item["media_type"] == "application/pdf":
                     respuestas = await self.run_pdf_toolchain(item)
 
+                app_logger.info(f"Respuestas: {respuestas}")
+
                 app_logger.info("Tenemos las respuestas")
+
+                factura = orchestrator.formatear_factura(respuestas["data"])
+
                 # Guarda en sheets y formatea respuesta
-                saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
-                    respuestas["data"]
-                )
+                saved_sheet = orchestrator.guardar_factura_completa_en_sheets(factura["data"])
                 app_logger.info(
                     "Guardamos la factura"
                     if saved_sheet
                     else "No guardamos la factura, error"
                 )
-                factura = orchestrator.formatear_factura(respuestas["data"])
                 factura["id"] = item["process_id"]
                 factura["saved_sheet"] = bool(saved_sheet)
                 factura["error"] = ""

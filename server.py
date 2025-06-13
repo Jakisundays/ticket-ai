@@ -9,7 +9,8 @@ from fastapi.responses import RedirectResponse
 from fastapi.routing import APIRoute
 
 # Local application imports
-from routes.process_invoice import orchestrator
+from routes.process_invoice import orchestrator as invoice_orchestrator
+from routes.process_invoice_google import orchestrator as google_orchestrator
 from routes.process_invoice import router as process_invoice_router
 from routes.process_invoice_google import router as process_invoice_google_router
 
@@ -17,9 +18,7 @@ from routes.process_invoice_google import router as process_invoice_google_route
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()],
 )
 app_logger = logging.getLogger("app_logger")
 
@@ -42,13 +41,17 @@ app = FastAPI(
     ],
 )
 
+
 # Middleware para logging de solicitudes
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     app_logger.info(f"Solicitud entrante: {request.method} {request.url}")
     response = await call_next(request)
-    app_logger.info(f"Respuesta saliente: {request.method} {request.url} - Estado: {response.status_code}")
+    app_logger.info(
+        f"Respuesta saliente: {request.method} {request.url} - Estado: {response.status_code}"
+    )
     return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,7 +70,9 @@ app.include_router(process_invoice_google_router)
 async def startup_event():
     # Crea 5 workers al iniciar para procesar facturas en paralelo
     for _ in range(5):
-        asyncio.create_task(orchestrator.worker())
+        asyncio.create_task(invoice_orchestrator.worker())
+        asyncio.create_task(google_orchestrator.worker())
+
 
 @app.get(
     "/",
@@ -80,6 +85,7 @@ async def read_root():
     Endpoint raíz que redirige al frontend de Ticket AI.
     """
     return RedirectResponse(url="https://ticket-ai-ui.vercel.app/")
+
 
 # API Endpoints
 @app.get(
