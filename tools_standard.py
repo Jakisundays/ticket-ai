@@ -139,7 +139,17 @@ tools = [
                             "properties": {
                                 "forma_pago": {
                                     "type": "string",
-                                    "description": "Método de pago utilizado. Ejemplos: 'Efectivo', 'Transferencia', 'Tarjeta de crédito'.",
+                                    "description": """Identificá el método de pago que se usó para concretar la operación en este comprobante.
+
+                                        Ignorá frases que indican formas de pago posibles o disponibles (por ejemplo: 'puede pagar con...', 'se aceptan...').  
+                                        Solo considerá frases que confirmen el pago, como:  
+                                        - "Pagado en efectivo"  
+                                        - "Abonado por transferencia"  
+                                        - "Pagado con tarjeta"  
+                                        - "Se realizó el pago vía Mercado Pago"
+
+                                        Devolvé el nombre de la forma de pago utilizada. Si no hay ninguna confirmación, no devuelvas nada.
+                                        """,
                                     "nullable": True,
                                 },
                                 "CAE": {
