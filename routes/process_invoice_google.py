@@ -201,7 +201,9 @@ class InvoiceOrchestrator:
                 factura = orchestrator.formatear_factura(respuestas["data"])
 
                 # Guarda en sheets y formatea respuesta
-                saved_sheet = orchestrator.guardar_factura_completa_en_sheets(factura["data"])
+                saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
+                    factura["data"]
+                )
                 app_logger.info(
                     "Guardamos la factura"
                     if saved_sheet
@@ -843,6 +845,8 @@ async def process_invoice(
         with open(file_location, "rb") as f:
             kind = filetype.guess(f.read(262))
 
+        print("Mime type:", kind.mime)
+        
         # Procesa imagen o PDF
         if kind.mime.startswith("image") or kind.mime == "application/pdf":
             # Prepara info del archivo
@@ -875,7 +879,7 @@ async def process_invoice(
             return factura
 
         # Procesa ZIP
-        elif kind.mime == "application/zip":
+        elif kind.mime == "application/zip" or kind.mime == "application/x-zip-compressed":
             app_logger.info("Tenemos un ZIP")
             supported_extensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"]
 

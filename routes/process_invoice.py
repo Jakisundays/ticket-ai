@@ -869,6 +869,8 @@ async def process_invoice(
             shutil.copyfileobj(file.file, buffer)
         with open(file_location, "rb") as f:
             kind = filetype.guess(f.read(262))
+            
+        print("Mime type:", kind.mime)
 
         # Procesa imagen o PDF
         if kind.mime.startswith("image") or kind.mime == "application/pdf":
@@ -901,7 +903,7 @@ async def process_invoice(
             return factura
 
         # Procesa ZIP
-        elif kind.mime == "application/zip":
+        elif kind.mime == "application/zip" or kind.mime == "application/x-zip-compressed":
             supported_extensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"]
 
             # Extrae y procesa cada archivo
