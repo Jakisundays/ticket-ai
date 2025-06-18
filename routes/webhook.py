@@ -7,30 +7,33 @@ router = APIRouter(prefix="/webhook")
 WEBHOOK_FILE = "webhooks.json"
 
 
-@router.post("/")
+@router.post("")
 async def webhook_receiver(request: Request):
     payload = await request.json()
 
-    # Cargar contenido existente o crear lista vacía
+    data = []
     if os.path.exists(WEBHOOK_FILE):
-        with open(WEBHOOK_FILE, "r") as f:
-            data = json.load(f)
-    else:
-        data = []
+        try:
+            with open(WEBHOOK_FILE, "r") as f:
+                if os.path.getsize(WEBHOOK_FILE) > 0:
+                    data = json.load(f)
+        except json.JSONDecodeError:
+            data = []
 
-    # Agregar nuevo webhook con timestamp
     data.append({"timestamp": datetime.utcnow().isoformat(), "payload": payload})
 
-    # Guardar actualizado
     with open(WEBHOOK_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
     return {"status": "ok", "received": payload}
 
 
-@router.get("/")
+@router.get("")
 def get_webhooks():
     if os.path.exists(WEBHOOK_FILE):
+        if os.path.getsize(WEBHOOK_FILE) == 0:
+            # Archivo vacío, devolvemos lista vacía
+            return []
         with open(WEBHOOK_FILE, "r") as f:
             data = json.load(f)
         return data
