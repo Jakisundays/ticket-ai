@@ -606,6 +606,7 @@ class InvoiceOrchestrator:
                     comprobante.get("tipo", ""),
                     comprobante.get("subtipo", ""),
                     comprobante.get("jurisdiccion_fiscal", ""),
+                    comprobante.get("punto_de_venta", ""),
                     comprobante.get("numero", ""),
                     comprobante.get("fecha_emision", ""),
                     comprobante.get("moneda", ""),
@@ -869,7 +870,7 @@ async def process_invoice(
             shutil.copyfileobj(file.file, buffer)
         with open(file_location, "rb") as f:
             kind = filetype.guess(f.read(262))
-            
+
         print("Mime type:", kind.mime)
 
         # Procesa imagen o PDF
@@ -903,7 +904,10 @@ async def process_invoice(
             return factura
 
         # Procesa ZIP
-        elif kind.mime == "application/zip" or kind.mime == "application/x-zip-compressed":
+        elif (
+            kind.mime == "application/zip"
+            or kind.mime == "application/x-zip-compressed"
+        ):
             supported_extensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"]
 
             # Extrae y procesa cada archivo

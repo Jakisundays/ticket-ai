@@ -547,6 +547,7 @@ class InvoiceOrchestrator:
                 comprobante.get("tipo", ""),
                 comprobante.get("subtipo", ""),
                 comprobante.get("jurisdiccion_fiscal", ""),
+                comprobante.get("punto_de_venta", ""),
                 comprobante.get("numero", ""),
                 comprobante.get("fecha_emision", ""),
                 comprobante.get("moneda", ""),
