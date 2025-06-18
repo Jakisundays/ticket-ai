@@ -32,9 +32,14 @@ async def webhook_receiver(request: Request):
 def get_webhooks():
     if os.path.exists(WEBHOOK_FILE):
         if os.path.getsize(WEBHOOK_FILE) == 0:
-            # Archivo vacío, devolvemos lista vacía
             return []
         with open(WEBHOOK_FILE, "r") as f:
             data = json.load(f)
-        return data
+
+        # Ordenar por timestamp descendente (más reciente primero)
+        data_sorted = sorted(
+            data, key=lambda x: datetime.fromisoformat(x["timestamp"]), reverse=True
+        )
+        return data_sorted
+
     return {"error": "No webhooks yet"}
