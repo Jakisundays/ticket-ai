@@ -13,6 +13,7 @@ from routes.process_invoice import orchestrator as invoice_orchestrator
 from routes.process_invoice_google import orchestrator as google_orchestrator
 from routes.process_invoice import router as process_invoice_router
 from routes.process_invoice_google import router as process_invoice_google_router
+from routes.webhook import router as webhook_router
 
 # Configuración del logger
 logging.basicConfig(
@@ -64,6 +65,7 @@ app.add_middleware(
 # Conecta las rutas de facturas a la app
 app.include_router(process_invoice_router)
 app.include_router(process_invoice_google_router)
+app.include_router(webhook_router)
 
 
 @app.on_event("startup")
