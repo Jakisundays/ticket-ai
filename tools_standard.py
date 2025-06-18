@@ -118,7 +118,7 @@ tools = [
                                 },
                                 "id_fiscal": {
                                     "type": "string",
-                                    "description": "CUIT o CUIL del receptor.",
+                                    "description": "Número de CUIT o CUIL que identifica fiscalmente al receptor del comprobante. Si no se encuentra explícitamente en el documento, no devuelvas ningún valor.",
                                 },
                                 "direccion": {
                                     "type": "string",
