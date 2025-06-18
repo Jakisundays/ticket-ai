@@ -55,7 +55,7 @@ tools = [
                                     "type": "string",
                                     "description": "Número de la factura/comprobante fiscal. Este es el número único identificatorio del comprobante que aparece impreso en el documento. Busca líneas que contengan 'Nro:', 'Número:', 'N°:' seguido del número, o el número que aparece directamente después del tipo y código de comprobante. Formatos típicos: 'XX-XXXXX', 'XX-XXXXX', 'XXXXX-XXXXX'. EXTRAE EXACTAMENTE como está impreso: mantén todos los dígitos, guiones, ceros iniciales y formato original. NO modifiques, no reformatees, no agregues ni quites caracteres - copia literal el número de factura completo",
                                 },
-                                "punto_de _venta": {
+                                "punto_de_venta": {
                                     "type": "string",
                                     "description": "Número que identifica el punto de venta desde donde se emitió el comprobante. Representa la sucursal, terminal o caja que generó la factura. El valor debe extraerse tal como aparece en el documento, sin interpretaciones ni modificaciones.",
                                 },
