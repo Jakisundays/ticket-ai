@@ -24,7 +24,7 @@ app_logger = logging.getLogger("app_logger")
 
 # Configuración básica de la API - título, versión y docs
 app = FastAPI(
-    title="API de Invoicy",
+    title="API de Ticket AI",
     description="API para procesar facturas electrónicas e imágenes de comprobantes utilizando Claude AI y otras utilidades. Documentación completa en español para facilitar la integración y el uso.",
     version="1.0.0",
     docs_url="/docs",  # URL para la doc swagger
@@ -74,26 +74,13 @@ async def startup_event():
         asyncio.create_task(google_orchestrator.worker())
 
 
-@app.get(
-    "/",
-    summary="Redirección a la interfaz de Ticket AI",
-    tags=["General"],
-    response_description="Redirige al frontend de la aplicación Ticket AI.",
-)
-async def read_root():
-    """
-    Endpoint raíz que redirige al frontend de Ticket AI.
-    """
-    return RedirectResponse(url="https://ticket-ai-ui.vercel.app/")
-
-
 # API Endpoints
 @app.get(
-    "/api",
+    "/",
     summary="Chequeo de salud",
     tags=["General"],
     response_description="Mensaje de bienvenida y estado de la API.",
 )
 async def read_root():
     app_logger.info("Acceso al endpoint raíz.")
-    return {"message": "Bienvenido a la API de Invoicy. 🥸"}
+    return {"message": "Bienvenido a la API de Ticket AI 📄"}
