@@ -5,6 +5,7 @@ tools = [
             "Incluye el domicilio comercial del emisor y del receptor, "
             "priorizando siempre el Domicilio Comercial sobre el Legal o Fiscal. "
             "SE MUY CRÍTICO PARA NÚMERO DE FACTURA - Identifica el número único de esta factura/comprobante"
+            "NO INFIERAS DATOS FISCALES: si el número de CUIT o CUIL del receptor no está explícitamente escrito en el documento, no devuelvas ningún valor."
         ),
         "data": {
             "type": "function",
