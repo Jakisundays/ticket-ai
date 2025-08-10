@@ -847,7 +847,7 @@ async def process_invoice(
             kind = filetype.guess(f.read(262))
 
         print("Mime type:", kind.mime)
-        
+
         # Procesa imagen o PDF
         if kind.mime.startswith("image") or kind.mime == "application/pdf":
             # Prepara info del archivo
@@ -880,7 +880,10 @@ async def process_invoice(
             return factura
 
         # Procesa ZIP
-        elif kind.mime == "application/zip" or kind.mime == "application/x-zip-compressed":
+        elif (
+            kind.mime == "application/zip"
+            or kind.mime == "application/x-zip-compressed"
+        ):
             app_logger.info("Tenemos un ZIP")
             supported_extensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"]
 
@@ -971,3 +974,15 @@ async def get_queue_status():
         }
     """
     return {"queue_size": orchestrator.active_comparisons}
+
+
+@router.post(
+    "/webhook",
+    summary="Receive webhook notifications",
+    description="Endpoints to receive webhook notifications from external services",
+    response_description="A dictionary containing details about active comparisons in the processing queue",
+)
+async def webhook_endpoint(request: Request):
+    data = await request.json()
+    app_logger.info(f"Webhook received: {data}")
+    return {"success": True}

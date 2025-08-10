@@ -5,8 +5,6 @@ import logging
 # Third-party imports
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
-from fastapi.routing import APIRoute
 
 # Local application imports
 from routes.process_invoice import orchestrator as invoice_orchestrator
