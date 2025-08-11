@@ -12,6 +12,8 @@ import base64
 import asyncio
 import ssl
 import mimetypes
+import uuid
+import datetime
 from pathlib import Path
 from typing import Dict, Optional, Union, TypedDict
 import fitz  # PyMuPDF
@@ -111,70 +113,156 @@ class QueueItem(TypedDict):
 
 
 class InvoiceOrchestrator:
-    # Inicializa la clase con las credenciales y configs necesarias para procesar facturas
     def __init__(
         self,
-        secret: str,  # Clave secreta para autenticar
-        webhook_url: str,  # URL para notificar resultados
-        api_key: str,  # API key de Anthropic
-        recharge_cooldown: int,  # Tiempo entre recargas
-        queue_check_cooldown: int,  # Tiempo entre checks de cola
-        model: str,  # Modelo de Claude a usar
-        semaphore: int,  # Límite de procesos paralelos
+        secret: str,
+        webhook_url: str,
+        api_key: str,
+        recharge_cooldown: int,
+        queue_check_cooldown: int,
+        model: str,
+        semaphore: int,
     ):
-        self.SECRET = secret
-        self.WEBHOOK_URL = webhook_url
+        self.secret = secret
+        self.webhook_url = webhook_url
         self.api_key = api_key
-        self.active_comparisons = {}
-
-        self.task_queue = asyncio.Queue()  # Cola async para procesar facturas
-        self.semaphore = asyncio.Semaphore(semaphore)  # Control de concurrencia
-
+        self.recharge_cooldown = recharge_cooldown
+        self.queue_check_cooldown = queue_check_cooldown
         self.model = model
-        self.tool_with_prompts = tools  # Herramientas para procesar facturas
+        self.semaphore = asyncio.Semaphore(semaphore)
+        self.queue = asyncio.Queue()
+        self.active_comparisons = {}
+        self.processed_jobs = set()  # Para idempotencia
+        self.job_queue = asyncio.Queue()  # Cola para jobs
+        asyncio.create_task(self.worker())
 
-    # Worker que procesa items de la cola continuamente
     async def worker(self):
         app_logger.info("Iniciando worker")
         while True:
-            item = await self.task_queue.get()
-            app_logger.info(f"Procesando item {item}")
+            job = await self.job_queue.get()
+            process_id = job["process_id"]
+            if process_id in self.processed_jobs:
+                app_logger.info(f"Job {process_id} ya procesado, skipping")
+                self.job_queue.task_done()
+                continue
+            self.processed_jobs.add(process_id)
+
+            items_to_process = job["items_to_process"]
+            total_items = len(items_to_process)
+            app_logger.info(
+                f"Iniciando procesamiento del job {process_id} - {total_items} archivos en cola"
+            )
+
             try:
-                self.active_comparisons[item["process_id"]] = item
-                app_logger.info(f"Procesando item: {item['process_id']}")
-                # Procesa la factura y notifica resultado
-                factura = await self.process_item(item)
-                app_logger.info("Factura procesada")
-                webhook_response = await self.fire_webhook(factura)
-                if webhook_response:
-                    app_logger.info("Webhook delivered successfully")
-                else:
-                    app_logger.error("Error sending webhook")
+                self.active_comparisons[process_id] = job
+                processed_count = 0
+
+                for i, item in enumerate(items_to_process, 1):
+                    file_name = item["file_name"]
+                    media_type = item["media_type"]
+                    app_logger.info(
+                        f"[{process_id}] Procesando archivo {i}/{total_items}: {file_name} (tipo: {media_type})"
+                    )
+
+                    try:
+                        # Procesamiento según tipo de archivo
+                        if item["media_type"].startswith("image/"):
+                            app_logger.info(
+                                f"[{process_id}] Ejecutando toolchain de imagen para {file_name}"
+                            )
+                            respuestas = await self.run_image_toolchain(item)
+                        else:
+                            app_logger.info(
+                                f"[{process_id}] Ejecutando toolchain de PDF para {file_name}"
+                            )
+                            respuestas = await self.run_pdf_toolchain(item)
+
+                        app_logger.info(
+                            f"[{process_id}] Toolchain completado para {file_name}, formateando factura"
+                        )
+                        factura = self.formatear_factura(respuestas["data"])
+
+                        # Guardar factura como JSON en el directorio temporal
+                        # temp_dir = job["temp_dir"]
+                        # json_filename = (
+                        #     f"factura_{process_id}.json"
+                        # )
+                        # json_path = os.path.join(temp_dir, json_filename)
+                        # try:
+                        #     with open(json_filename, "w", encoding="utf-8") as f:
+                        #         json.dump(
+                        #             {"factura": factura},
+                        #             f,
+                        #             ensure_ascii=False,
+                        #             indent=2,
+                        #         )
+                        #     app_logger.info(
+                        #         f"[{process_id}] Factura guardada como JSON: {json_path}"
+                        #     )
+                        # except Exception as e:
+                        #     app_logger.error(
+                        #         f"[{process_id}] Error guardando JSON para {file_name}: {e}"
+                        #     )
+
+                        app_logger.info(
+                            f"[{process_id}] Guardando factura en sheets para {file_name}"
+                        )
+                        saved = self.guardar_factura_completa_en_sheets(factura["data"])
+
+                        result = {
+                            "id": process_id,
+                            "file_name": item["file_name"],
+                            "factura": factura,
+                            "saved": saved,
+                            "status": "procesada",
+                            "success": True,
+                        }
+
+                        app_logger.info(
+                            f"[{process_id}] Enviando webhook para {file_name}"
+                        )
+                        await self.fire_webhook(result)
+
+                        processed_count += 1
+                        app_logger.info(
+                            f"[{process_id}] ✅ Archivo {file_name} procesado exitosamente ({processed_count}/{total_items})"
+                        )
+
+                    except Exception as e:
+                        app_logger.error(
+                            f"[{process_id}] ❌ Error procesando {file_name}: {e}"
+                        )
+                        await self.fire_webhook(
+                            {
+                                "process_id": process_id,
+                                "file_name": item["file_name"],
+                                "error": str(e),
+                                "status": "error",
+                                "success": False,
+                            }
+                        )
+
+                # Cleanup
+                app_logger.info(
+                    f"[{process_id}] Limpiando directorio temporal: {job['temp_dir']}"
+                )
+                shutil.rmtree(job["temp_dir"])
+                app_logger.info(
+                    f"[{process_id}] 🎉 Job completado - {processed_count}/{total_items} archivos procesados exitosamente"
+                )
+
             except Exception as e:
-                # Si hay error, notifica con webhook
-                app_logger.error(f"An error occurred: {e}")
-                item["error"] = e
-                item["saved_sheet"] = False
-                webhook_response = await self.fire_webhook(item)
-                if webhook_response:
-                    app_logger.info("Webhook delivered successfully")
-                else:
-                    app_logger.error("Error sending webhook")
+                app_logger.error(f"[{process_id}] ❌ Error crítico en job: {e}")
             finally:
-                if item["process_id"] in self.active_comparisons:
-                    del self.active_comparisons[item["process_id"]]
-                # Limpia archivos temporales
-                try:
-                    os.remove(item["file_path"])
-                except OSError as e:
-                    app_logger.error(f"Error deleting file {item['file_path']}: {e}")
-                self.task_queue.task_done()
+                if process_id in self.active_comparisons:
+                    del self.active_comparisons[process_id]
+                self.job_queue.task_done()
 
     # Envía resultados vía webhook
     async def fire_webhook(self, data):
         try:
             res = requests.post(
-                self.WEBHOOK_URL,
+                self.webhook_url,
                 json=data,
                 timeout=10,
             )
@@ -1012,27 +1100,9 @@ async def get_queue_status():
     response_description="A dictionary containing details about active comparisons in the processing queue",
 )
 async def webhook_endpoint(request: Request):
-    """
-    Endpoint para recibir notificaciones de webhook desde servicios externos.
-
-    Este endpoint procesa payloads de webhooks que contienen información de emails con attachments.
-    Determina el tipo de archivo adjunto (PDF o ZIP), lo procesa accordingly, y devuelve un estado.
-
-    Parameters:
-    - request (Request): La solicitud entrante con el payload JSON.
-
-    Returns:
-    - dict: Un diccionario con el estado del procesamiento, como {'success': True, ...}.
-
-    Raises:
-    - HTTPException: Si ocurre un error durante el procesamiento.
-    """
     try:
         data = await request.json()
-        app_logger.info(f"Webhook received: {data}")
-        # {'from_email': 'jacob@dinardi.com.ar', 'from_name': 'Jacob Dominguez', 'subject': 'Doc adj', 'body': 'argentium\r\n', 'attachments': 'https://zapier-dev-files.s3.amazonaws.com/cli-platform/20310/SQ5YJBcis7zH4D-mm_kkDBv5k_Rlcdq15adwp4dEXf-dFe37Ag5AmrWnX8TS3fe7n-6v1CHTbUcEidkj-gvKVwEX4SR8ndYy1KfU5I9pLUwCgkce5XhCyfYShU4ftBOZBD7DPt6u88bgxXlPMENwZBP7k8gFXw4Grv0mWCaKnvc', 'to_email': 'jacob.553wf4@zapiermail.com','file_name': 'facturas2.zip,Eden.pdf'}
-
-        # Extract data from webhook payload
+        app_logger.info(f"📨 Webhook recibido: {data}")
         from_email = data.get("from_email")
         from_name = data.get("from_name")
         subject = data.get("subject")
@@ -1042,94 +1112,201 @@ async def webhook_endpoint(request: Request):
         file_name = data.get("file_name")
 
         file_type = orchestrator.get_file_type_from_url(attachments)
-        app_logger.info(f"File type: {file_type}")
-        if file_type in [
-            "application/pdf",
-            "application/zip",
-            "application/x-zip-compressed",
-        ]:
-            if file_type in ["application/zip", "application/x-zip-compressed"]:
-                file_names = orchestrator.parse_filenames(file_name)
-                if isinstance(file_names, list):
-                    app_logger.info(
-                        f"Multiple files found in email: {file_names}. Processing will be sent via webhook."
+        app_logger.info(f"📄 Tipo de archivo detectado: {file_type}")
+
+        process_id = subject if subject else str(uuid.uuid4())
+        temp_dir = f"./downloads/{process_id}"
+        app_logger.info(f"🆔 Process ID generado: {process_id}")
+        app_logger.info(f"📁 Creando directorio temporal: {temp_dir}")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        file_location = f"{temp_dir}/{file_name}"
+        app_logger.info(f"⬇️ Descargando archivo desde: {attachments}")
+        doc_saved = orchestrator.download_file_from_url(attachments, file_location)
+        if not doc_saved:
+            app_logger.error(
+                f"❌ Error al descargar archivo para process_id: {process_id}"
+            )
+            shutil.rmtree(temp_dir)
+            return {
+                "success": False,
+                "status": "error",
+                "message": "Error al descargar el archivo",
+                "id": process_id,
+            }
+        app_logger.info(f"✅ Archivo descargado exitosamente: {file_location}")
+
+        files_to_process = []
+        files_skipped = []
+        total_count = 0
+        type_ = "unknown"
+
+        if file_type in ["application/zip", "application/x-zip-compressed"]:
+            type_ = "zip"
+            app_logger.info(f"📦 Procesando archivo ZIP: {file_name}")
+            try:
+                with zipfile.ZipFile(file_location, "r") as zip_ref:
+                    if zip_ref.testzip() is not None:
+                        raise ValueError("ZIP corrupto")
+                    total_count = len(
+                        [name for name in zip_ref.namelist() if not name.endswith("/")]
                     )
-                    return {
-                        "success": True,
-                        "status": "procesando",
-                        "type": "multiples_archivos",
-                        "message": "Se detectaron múltiples archivos. El procesamiento ha comenzado y los resultados se enviarán vía webhook.",
-                        "file_count": len(
-                            file_names
-                        ),  # cantidad de archivos detectados
-                        "files": file_names,  # lista con los nombres o URLs de los archivos
-                        "timestamp": datetime.utcnow().isoformat()
-                        + "Z",  # marca de tiempo en formato ISO
-                    }
-                    # Quiero que etse mensaje diga cuales docs vamos a correr y cuales no, solo se pueden fotos y pdfs
-                else:
-                    app_logger.info("solo mandaron un zip")
-                    return {
-                        "success": True,
-                        "status": "procesando",
-                        "type": "archivo_unico",
-                        "message": "Se detectó un único archivo ZIP. El procesamiento ha comenzado y los resultados se enviarán vía webhook.",
-                        "file_count": 1,
-                        "files": [file_names],  # lista con un solo archivo
-                        "timestamp": datetime.utcnow().isoformat()
-                        + "Z",  # marca de tiempo en formato ISO
-                    }
-            else:
-                app_logger.info("mandaron un archivo en el email, procesando")
-                file_location = f"./downloads/{file_name}"
-                doc_saved = orchestrator.download_file_from_url(
-                    attachments, file_location
-                )
-                if not doc_saved:
-                    return {
-                        "success": False,
-                        "status": "error",
-                        "message": "Error al descargar el archivo",
-                        "id": subject,
-                    }
+                    app_logger.info(f"📊 ZIP contiene {total_count} archivos")
+                    zip_ref.extractall(temp_dir)
+                    app_logger.info(f"📂 ZIP extraído en: {temp_dir}")
+                os.remove(file_location)  # Eliminar ZIP después de extracción
+                app_logger.info(f"🗑️ ZIP original eliminado: {file_location}")
 
-                item = {
-                    "file_name": file_name,
-                    "file_extension": ".pdf",
-                    "file_path": file_location,
-                    "media_type": file_type,
-                    "process_id": subject,
+                app_logger.info(f"🔍 Analizando archivos extraídos...")
+                for root, _, files in os.walk(temp_dir):
+                    for f in files:
+                        file_path = os.path.join(root, f)
+                        file_size = os.path.getsize(file_path)
+                        app_logger.info(
+                            f"📄 Analizando: {f} (tamaño: {file_size} bytes)"
+                        )
+
+                        if file_size == 0:
+                            app_logger.info(f"⚠️ Archivo vacío omitido: {f}")
+                            files_skipped.append({"name": f, "reason": "empty_file"})
+                            os.remove(file_path)
+                            continue
+
+                        mime, _ = mimetypes.guess_type(file_path)
+                        if mime == "application/pdf" or mime.startswith("image/"):
+                            app_logger.info(
+                                f"✅ Archivo válido para procesar: {f} (tipo: {mime})"
+                            )
+                            files_to_process.append(
+                                {"name": f, "path": file_path, "mime": mime}
+                            )
+                        else:
+                            app_logger.info(
+                                f"❌ Tipo no soportado, omitiendo: {f} (tipo: {mime})"
+                            )
+                            files_skipped.append(
+                                {"name": f, "reason": "unsupported_type", "mime": mime}
+                            )
+                            os.remove(file_path)
+
+            except zipfile.LargeZipFile:
+                app_logger.error(f"❌ ZIP demasiado grande: {file_name}")
+                shutil.rmtree(temp_dir)
+                return {
+                    "success": False,
+                    "status": "error",
+                    "message": "ZIP demasiado grande",
+                    "id": process_id,
                 }
-                respuestas = await orchestrator.run_pdf_toolchain(item)
-                factura = orchestrator.formatear_factura(respuestas["data"])
-                saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
-                    factura["data"]
-                )
-                factura["id"] = subject
-                factura["saved_sheet"] = bool(saved_sheet)
-                factura["status_code"] = 200
+            except Exception as e:
+                app_logger.error(f"❌ Error procesando ZIP {file_name}: {str(e)}")
+                shutil.rmtree(temp_dir)
+                return {
+                    "success": False,
+                    "status": "error",
+                    "message": f"Error procesando ZIP: {str(e)}",
+                    "id": process_id,
+                }
 
-                factura["status"] = "procesada"
-                factura["message"] = "Factura procesada correctamente"
-                factura["success"] = True
-                factura["type"] = ".pdf"
+        elif file_type == "application/pdf" or file_type.startswith("image/"):
+            type_ = "pdf" if file_type == "application/pdf" else "image"
+            total_count = 1
+            app_logger.info(
+                f"📄 Archivo individual detectado: {file_name} (tipo: {type_})"
+            )
+            files_to_process.append(
+                {"name": file_name, "path": file_location, "mime": file_type}
+            )
+        else:
+            app_logger.error(f"❌ Tipo de archivo no válido: {file_type}")
+            os.remove(file_location)
+            shutil.rmtree(temp_dir)
+            return {
+                "success": False,
+                "status": "error",
+                "message": f"Invalid file type: {file_type}",
+                "id": process_id,
+            }
 
-                os.remove(file_location)
+        if not files_to_process:
+            app_logger.error(
+                f"❌ No se encontraron archivos válidos para procesar en {process_id}"
+            )
+            shutil.rmtree(temp_dir)
+            return {
+                "success": False,
+                "status": "error",
+                "message": "No files to process",
+                "id": process_id,
+            }
 
-                return factura
+        app_logger.info(f"📋 Resumen de clasificación:")
+        app_logger.info(f"   ✅ Archivos para procesar: {len(files_to_process)}")
+        app_logger.info(f"   ⚠️ Archivos omitidos: {len(files_skipped)}")
 
-        return {
-            "success": False,
-            "status": "error",
-            "message": f"Invalid file type. Only PDF and zip files are allowed. Received file type: {file_type}",
-            "id": subject,
+        # Preparar items para el job
+        items_to_process = []
+        app_logger.info(f"🔧 Preparando items para el job...")
+        for file_info in files_to_process:
+            ext = os.path.splitext(file_info["name"])[1]
+            item = {
+                "file_name": file_info["name"],
+                "file_extension": ext,
+                "file_path": file_info["path"],
+                "media_type": file_info["mime"],
+                "process_id": process_id,
+            }
+            items_to_process.append(item)
+            app_logger.info(
+                f"   📄 Item preparado: {file_info['name']} ({file_info['mime']})"
+            )
+
+        # Encolar job
+        job = {
+            "process_id": process_id,
+            "from_email": from_email,
+            "subject": subject,
+            "temp_dir": temp_dir,
+            "items_to_process": items_to_process,
         }
+        app_logger.info(
+            f"📤 Encolando job {process_id} con {len(items_to_process)} items"
+        )
+        await orchestrator.job_queue.put(job)
+        app_logger.info(f"✅ Job {process_id} encolado exitosamente")
+
+        # Respuesta inmediata
+        response_type = type_ if len(files_to_process) == 1 else "mixed"
+        response = {
+            "success": True,
+            "status": "enqueued",
+            "process_id": process_id,
+            "type": response_type,
+            "total_count": total_count,
+            "to_process_count": len(files_to_process),
+            "skipped_count": len(files_skipped),
+            "files_to_process": files_to_process,
+            "files_skipped": files_skipped,
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+
+        app_logger.info(f"📤 Enviando respuesta inmediata para {process_id}:")
+        app_logger.info(f"   🆔 Process ID: {process_id}")
+        app_logger.info(f"   📊 Tipo: {response_type}")
+        app_logger.info(f"   📈 Total archivos: {total_count}")
+        app_logger.info(f"   ✅ Para procesar: {len(files_to_process)}")
+        app_logger.info(f"   ⚠️ Omitidos: {len(files_skipped)}")
+
+        return response
+
     except Exception as e:
-        app_logger.error(f"Error processing webhook: {str(e)}")
+        app_logger.error(f"❌ Error crítico procesando webhook: {str(e)}")
+        if "temp_dir" in locals():
+            app_logger.info(f"🧹 Limpiando directorio temporal por error: {temp_dir}")
+            shutil.rmtree(temp_dir)
         return {
             "success": False,
             "status": "error",
             "message": "Error interno al procesar el webhook",
-            "id": subject,
+            "id": process_id if "process_id" in locals() else "unknown",
         }
-        # raise HTTPException(status_code=500, detail="Error interno al procesar el webhook")
