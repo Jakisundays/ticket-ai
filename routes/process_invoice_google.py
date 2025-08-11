@@ -710,9 +710,10 @@ class InvoiceOrchestrator:
         if response.status_code == 200:
             with open(file_path, "wb") as f:
                 f.write(response.content)
-            print(f"File downloaded to {file_path}")
+            return True
         else:
-            print(f"Failed to download file: {response.status_code}")
+            app_logger.error(f"Failed to download file: {response.status_code}")
+            return False
 
 
 # Inicializa el orquestador principal - es el cerebro de todo el sistema
@@ -1081,6 +1082,17 @@ async def webhook_endpoint(request: Request):
             else:
                 app_logger.info("mandaron un archivo en el email, procesando")
                 file_location = f"./downloads/{file_name}"
+                doc_saved = orchestrator.download_file_from_url(
+                    attachments, file_location
+                )
+                if not doc_saved:
+                    return {
+                        "success": False,
+                        "status": "error",
+                        "message": "Error al descargar el archivo",
+                        "id": subject,
+                    }
+
                 item = {
                     "file_name": file_name,
                     "file_extension": ".pdf",
