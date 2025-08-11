@@ -686,6 +686,34 @@ class InvoiceOrchestrator:
             "tokens": total_tokens,
         }
 
+    def get_file_type_from_url(self, url: str) -> str:
+        try:
+            response = requests.get(url, stream=True)
+            if response.status_code == 200:
+                content = next(response.iter_content(262))
+                kind = filetype.guess(content)
+                if kind:
+                    return kind.mime
+            return None
+        except Exception as e:
+            return None
+
+    def parse_filenames(self, file_string):
+        # Si hay coma, devolvemos lista
+        if "," in file_string:
+            return [f.strip() for f in file_string.split(",")]
+        # Si no hay coma, devolvemos el string tal cual
+        return file_string
+
+    def download_file_from_url(self, url: str, file_path: str):
+        response = requests.get(url)
+        if response.status_code == 200:
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+            print(f"File downloaded to {file_path}")
+        else:
+            print(f"Failed to download file: {response.status_code}")
+
 
 # Inicializa el orquestador principal - es el cerebro de todo el sistema
 # secret: clave para autenticar las requests
@@ -983,6 +1011,113 @@ async def get_queue_status():
     response_description="A dictionary containing details about active comparisons in the processing queue",
 )
 async def webhook_endpoint(request: Request):
-    data = await request.json()
-    app_logger.info(f"Webhook received: {data}")
-    return {"success": True}
+    """
+    Endpoint para recibir notificaciones de webhook desde servicios externos.
+
+    Este endpoint procesa payloads de webhooks que contienen información de emails con attachments.
+    Determina el tipo de archivo adjunto (PDF o ZIP), lo procesa accordingly, y devuelve un estado.
+
+    Parameters:
+    - request (Request): La solicitud entrante con el payload JSON.
+
+    Returns:
+    - dict: Un diccionario con el estado del procesamiento, como {'success': True, ...}.
+
+    Raises:
+    - HTTPException: Si ocurre un error durante el procesamiento.
+    """
+    try:
+        data = await request.json()
+        app_logger.info(f"Webhook received: {data}")
+        # {'from_email': 'jacob@dinardi.com.ar', 'from_name': 'Jacob Dominguez', 'subject': 'Doc adj', 'body': 'argentium\r\n', 'attachments': 'https://zapier-dev-files.s3.amazonaws.com/cli-platform/20310/SQ5YJBcis7zH4D-mm_kkDBv5k_Rlcdq15adwp4dEXf-dFe37Ag5AmrWnX8TS3fe7n-6v1CHTbUcEidkj-gvKVwEX4SR8ndYy1KfU5I9pLUwCgkce5XhCyfYShU4ftBOZBD7DPt6u88bgxXlPMENwZBP7k8gFXw4Grv0mWCaKnvc', 'to_email': 'jacob.553wf4@zapiermail.com','file_name': 'facturas2.zip,Eden.pdf'}
+
+        # Extract data from webhook payload
+        from_email = data.get("from_email")
+        from_name = data.get("from_name")
+        subject = data.get("subject")
+        body = data.get("body")
+        attachments = data.get("attachments")
+        to_email = data.get("to_email")
+        file_name = data.get("file_name")
+
+        file_type = orchestrator.get_file_type_from_url(attachments)
+        app_logger.info(f"File type: {file_type}")
+        if file_type in [
+            "application/pdf",
+            "application/zip",
+            "application/x-zip-compressed",
+        ]:
+            if file_type in ["application/zip", "application/x-zip-compressed"]:
+                file_names = orchestrator.parse_filenames(file_name)
+                if isinstance(file_names, list):
+                    app_logger.info(
+                        f"Multiple files found in email: {file_names}. Processing will be sent via webhook."
+                    )
+                    return {
+                        "success": True,
+                        "status": "procesando",
+                        "type": "multiples_archivos",
+                        "message": "Se detectaron múltiples archivos. El procesamiento ha comenzado y los resultados se enviarán vía webhook.",
+                        "file_count": len(
+                            file_names
+                        ),  # cantidad de archivos detectados
+                        "files": file_names,  # lista con los nombres o URLs de los archivos
+                        "timestamp": datetime.utcnow().isoformat()
+                        + "Z",  # marca de tiempo en formato ISO
+                    }
+                    # Quiero que etse mensaje diga cuales docs vamos a correr y cuales no, solo se pueden fotos y pdfs
+                else:
+                    app_logger.info("solo mandaron un zip")
+                    return {
+                        "success": True,
+                        "status": "procesando",
+                        "type": "archivo_unico",
+                        "message": "Se detectó un único archivo ZIP. El procesamiento ha comenzado y los resultados se enviarán vía webhook.",
+                        "file_count": 1,
+                        "files": [file_names],  # lista con un solo archivo
+                        "timestamp": datetime.utcnow().isoformat()
+                        + "Z",  # marca de tiempo en formato ISO
+                    }
+            else:
+                app_logger.info("mandaron un archivo en el email, procesando")
+                file_location = f"./downloads/{file_name}"
+                item = {
+                    "file_name": file_name,
+                    "file_extension": ".pdf",
+                    "file_path": file_location,
+                    "media_type": file_type,
+                    "process_id": subject,
+                }
+                respuestas = await orchestrator.run_pdf_toolchain(item)
+                factura = orchestrator.formatear_factura(respuestas["data"])
+                saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
+                    factura["data"]
+                )
+                factura["id"] = subject
+                factura["saved_sheet"] = bool(saved_sheet)
+                factura["status_code"] = 200
+
+                factura["status"] = "procesada"
+                factura["message"] = "Factura procesada correctamente"
+                factura["success"] = True
+                factura["type"] = ".pdf"
+
+                os.remove(file_location)
+
+                return factura
+
+        return {
+            "success": False,
+            "status": "error",
+            "message": f"Invalid file type. Only PDF and zip files are allowed. Received file type: {file_type}",
+            "id": subject,
+        }
+    except Exception as e:
+        app_logger.error(f"Error processing webhook: {str(e)}")
+        return {
+            "success": False,
+            "status": "error",
+            "message": "Error interno al procesar el webhook",
+            "id": subject,
+        }
+        # raise HTTPException(status_code=500, detail="Error interno al procesar el webhook")
