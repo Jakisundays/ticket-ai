@@ -943,7 +943,7 @@ async def process_invoice(
             )
 
         # Valida la clave secreta
-        if secret_key != orchestrator.SECRET:
+        if secret_key != os.getenv("SECRET_KEY"):
             raise HTTPException(status_code=401, detail="Invalid secret key")
 
         # Valida la extensión del archivo
