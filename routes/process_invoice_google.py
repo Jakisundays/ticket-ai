@@ -1,6 +1,9 @@
 # FastAPI imports
 from fastapi import Form, APIRouter, HTTPException, UploadFile, File, Request
 import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app_logger = logging.getLogger("app_logger")
 
@@ -140,7 +143,20 @@ class InvoiceOrchestrator:
         app_logger.info("Iniciando worker")
         while True:
             job = await self.job_queue.get()
+            from_email = job["from_email"]
+            subject = job["subject"]
+            temp_dir = job["temp_dir"]
             process_id = job["process_id"]
+
+            app_logger.info(f"From email: {from_email}")
+            app_logger.info(f"Subject: {subject}")
+
+            file_name = temp_dir.split("/")[-1]
+            app_logger.info(f"File name: {file_name}")
+
+            subject_for_file = f"{subject} terminamos con el archivo {file_name}"
+            app_logger.info(f"Subject for file: {subject_for_file}")
+
             if process_id in self.processed_jobs:
                 app_logger.info(f"Job {process_id} ya procesado, skipping")
                 self.job_queue.task_done()
@@ -208,6 +224,13 @@ class InvoiceOrchestrator:
                             f"[{process_id}] Guardando factura en sheets para {file_name}"
                         )
                         saved = self.guardar_factura_completa_en_sheets(factura["data"])
+                        app_logger.info(
+                            f"[{process_id}] Factura guardada en sheets para {file_name}"
+                        )
+
+                        html_body = self.generar_html_factura(factura["data"])
+
+                        self.enviar_email(from_email, subject_for_file, html_body)
 
                         result = {
                             "id": process_id,
@@ -244,9 +267,9 @@ class InvoiceOrchestrator:
 
                 # Cleanup
                 app_logger.info(
-                    f"[{process_id}] Limpiando directorio temporal: {job['temp_dir']}"
+                    f"[{process_id}] Limpiando directorio temporal: {os.path.dirname(job['temp_dir'])}"
                 )
-                shutil.rmtree(job["temp_dir"])
+                shutil.rmtree(os.path.dirname(job["temp_dir"]))
                 app_logger.info(
                     f"[{process_id}] 🎉 Job completado - {processed_count}/{total_items} archivos procesados exitosamente"
                 )
@@ -803,6 +826,119 @@ class InvoiceOrchestrator:
             app_logger.error(f"Failed to download file: {response.status_code}")
             return False
 
+    def generar_html_factura(self, data):
+        receptor = data.get("emisor_receptor", {}).get("receptor", {})
+        emisor = data.get("emisor_receptor", {}).get("emisor", {})
+        comprobante = data.get("emisor_receptor", {}).get("comprobante", {})
+        otros = data.get("emisor_receptor", {}).get("otros", {})
+        items = data.get("items", {}).get("detalles", [])
+        subtotal = data.get("items", {}).get("subtotal")
+        total = data.get("items", {}).get("total")
+
+        html = f"""
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    color: #333;
+                    padding: 20px;
+                }}
+                .factura {{
+                    max-width: 700px;
+                    margin: auto;
+                    border: 1px solid #ccc;
+                    padding: 20px;
+                    border-radius: 10px;
+                }}
+                h1 {{
+                    text-align: center;
+                    margin-bottom: 30px;
+                }}
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-bottom: 20px;
+                }}
+                th, td {{
+                    border: 1px solid #ccc;
+                    padding: 8px;
+                    text-align: left;
+                }}
+                th {{
+                    background-color: #f2f2f2;
+                }}
+                .total {{
+                    text-align: right;
+                    font-size: 1.2em;
+                    font-weight: bold;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="factura">
+                <h1>{comprobante["tipo"]} N° {comprobante["numero"]}</h1>
+                <p><strong>Fecha de emisión:</strong> {comprobante["fecha_emision"]}</p>
+                <p><strong>Moneda:</strong> {comprobante["moneda"]} | <strong>Jurisdicción:</strong> {comprobante["jurisdiccion_fiscal"]}</p>
+
+                <h2>Emisor</h2>
+                <p>{emisor["nombre"]}</p>
+                <p>{emisor["direccion"]}</p>
+                <p><strong>Condición IVA:</strong> {emisor["condicion_iva"]}</p>
+                <p><strong>ID Fiscal:</strong> {emisor["id_fiscal"]}</p>
+
+                <h2>Receptor</h2>
+                <p>{receptor["nombre"]}</p>
+                <p>{receptor["direccion"]}</p>
+                <p><strong>Condición IVA:</strong> {receptor["condicion_iva"]}</p>
+
+                <h2>Detalles</h2>
+                <table>
+                    <tr>
+                        <th>Descripción</th>
+                        <th>Cantidad</th>
+                        <th>Precio Unitario</th>
+                        <th>Total</th>
+                    </tr>
+                    {''.join(f"<tr><td>{item['descripcion']}</td><td>{item['cantidad']}</td><td>${item['precio_unitario']:.2f}</td><td>${item['precio_total']:.2f}</td></tr>" for item in items)}
+                </table>
+
+                <p class="total">Subtotal: ${f"{subtotal:.2f}" if subtotal is not None else ""}</p>
+                <p class="total">Total: ${f"{total:.2f}" if total is not None else ""}</p>
+
+                <p><strong>CAE:</strong> {otros.get("CAE", "")} | <strong>Vencimiento CAE:</strong> {otros.get("vencimiento_CAE", "")}</p>
+            </div>
+        </body>
+        </html>
+        """
+        return html
+
+    def enviar_email(self, destinatario, asunto, cuerpo):
+        GMAIL_USER = os.getenv("GOOGLE_APP_EMAIL")  # tu correo
+        GMAIL_PASS = os.getenv("GOOGLE_APP_PASSWORD")  # tu contraseña de aplicación
+
+        try:
+            # Crear el mensaje
+            mensaje = MIMEMultipart()
+            mensaje["From"] = GMAIL_USER
+            mensaje["To"] = destinatario
+            mensaje["Subject"] = asunto
+
+            # Cuerpo del mensaje
+            mensaje.attach(MIMEText(cuerpo, "html"))
+
+            # Conectar al servidor SMTP de Gmail
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(GMAIL_USER, GMAIL_PASS)
+                server.sendmail(GMAIL_USER, destinatario, mensaje.as_string())
+
+            app_logger.info(f"✅ Email sent successfully to {destinatario}")
+            return True
+
+        except Exception as e:
+            app_logger.error(f"❌ Error sending email to {destinatario}: {str(e)}")
+            return False
+
 
 # Inicializa el orquestador principal - es el cerebro de todo el sistema
 # secret: clave para autenticar las requests
@@ -963,7 +1099,7 @@ async def process_invoice(
         with open(file_location, "rb") as f:
             kind = filetype.guess(f.read(262))
 
-        print("Mime type:", kind.mime)
+        app_logger.info(f"Mime type: {kind.mime}")
 
         # Procesa imagen o PDF
         if kind.mime.startswith("image") or kind.mime == "application/pdf":
@@ -1114,7 +1250,7 @@ async def webhook_endpoint(request: Request):
         file_type = orchestrator.get_file_type_from_url(attachments)
         app_logger.info(f"📄 Tipo de archivo detectado: {file_type}")
 
-        process_id = subject if subject else str(uuid.uuid4())
+        process_id = str(uuid.uuid4())
         temp_dir = f"./downloads/{process_id}"
         app_logger.info(f"🆔 Process ID generado: {process_id}")
         app_logger.info(f"📁 Creando directorio temporal: {temp_dir}")
@@ -1266,7 +1402,7 @@ async def webhook_endpoint(request: Request):
             "process_id": process_id,
             "from_email": from_email,
             "subject": subject,
-            "temp_dir": temp_dir,
+            "temp_dir": file_location,
             "items_to_process": items_to_process,
         }
         app_logger.info(
