@@ -1,0 +1,181 @@
+{
+   "data": {
+      "emisor_receptor": {
+         "comprobante": {
+            "moneda": "ARS",
+            "fecha_emision": "2025-05-21",
+            "tipo": "Factura",
+            "jurisdiccion_fiscal": "Argentina",
+            "punto_de_venta": "0081",
+            "numero": "0081-50240726/1",
+            "subtipo": "Para consumidores finales y exentos"
+         },
+         "otros": {
+            "vencimiento_CAE": "2023-12-06",
+            "CAE": "80851302407260000114881520620231206202517"
+         },
+         "emisor": {
+            "condicion_iva": "Responsable Inscripto",
+            "direccion": "Av. Carballo 181 (S2000DOQ) Rosario",
+            "nombre": "Litoral Gas S.A.",
+            "id_fiscal": "30-68165842-9"
+         },
+         "receptor": {
+            "nombre": "GOMEZ ANDREA Silvana",
+            "id_fiscal": "32279524",
+            "condicion_iva": "Consumidor Final",
+            "direccion": "SEGUNDO GARCIA R. 426 (2900) SAN NICOLAS"
+         }
+      },
+      "items": {
+         "observaciones": "NO EXISTEN DEUDAS EXIGIBLES PENDIENTES. El monto de IVA discriminado no puede computarse como credito fiscal. IMPORTANTE! Si genera deuda, regularizala y evit\u00e1 inconvenientes. Ingres\u00e1 en www.litoral-gas.com.ar en Oficina Virtual ->Pagos y Deudas ->Consulta de Deuda para saber cu\u00e1nto y cu\u00e1ndo pagar o bien comunicate al 0800-777-5421. El servicio de Distribuci\u00f3n y el Servicio de Transporte son de conexi\u00f3n. Previo a la rehabilitaci\u00f3n efectuaremos una inspecci\u00f3n en la instalaci\u00f3n interna. Si es necesario reemplazarla por falla o rotura ser\u00e1 a cargo del usuario. Pod\u00e9s obtener informaci\u00f3n sobre el beneficio, ingres\u00e1 a https://www.enargas.gob.ar/secciones/ informacional/beneficios-disposicion-3092-2023-enargas-di.php",
+         "detalles": [
+            {
+               "precio_total": -6133.6,
+               "precio_unitario": -6133.6,
+               "descripcion": "Cargo fijo",
+               "cantidad": 1
+            },
+            {
+               "descripcion": "Subsidio Zona fr\u00eda (Ley 27637)",
+               "precio_unitario": 1200,
+               "cantidad": 1,
+               "precio_total": 1200
+            },
+            {
+               "precio_total": -7356.41,
+               "precio_unitario": -7356.41,
+               "cantidad": 1,
+               "descripcion": "Subsidio Ley 24065/2014 Dto 202/04"
+            },
+            {
+               "cantidad": 1,
+               "precio_total": 950.2,
+               "precio_unitario": 950.2,
+               "descripcion": "TSN-San Nicolas-DP 10625/2024"
+            },
+            {
+               "descripcion": "TSN-San Nicolas-DP 10625/2024 a\u00f1o anterior",
+               "precio_unitario": 0,
+               "cantidad": 1,
+               "precio_total": 0
+            },
+            {
+               "precio_total": 1600,
+               "descripcion": "TSN-R\u00edo Luj\u00e1n-DP 10625/2024",
+               "cantidad": 1,
+               "precio_unitario": 1600
+            },
+            {
+               "descripcion": "Imp.sdo.Brutos (Transporte)",
+               "precio_unitario": 325.21,
+               "precio_total": 325.21,
+               "cantidad": 1
+            },
+            {
+               "cantidad": 1,
+               "precio_unitario": 2500,
+               "descripcion": "Otros imp.s/Cr\u00e9d.y Deb.en Cta.Cte",
+               "precio_total": 2500
+            },
+            {
+               "precio_total": 12.53,
+               "precio_unitario": 12.53,
+               "cantidad": 1,
+               "descripcion": "Imp.s/Cr\u00e9d. y Deb.en Cta.Cte.-Transporte"
+            },
+            {
+               "descripcion": "Imp.s/Cr\u00e9d. y Deb.en Cta.Cte.-Energ\u00eda",
+               "precio_total": 2.65,
+               "precio_unitario": 2.65,
+               "cantidad": 1
+            },
+            {
+               "cantidad": 1,
+               "descripcion": "Imp.s/Cr\u00e9d. y Deb.en Cta.Cte.-Transp. y Dist.",
+               "precio_unitario": 0,
+               "precio_total": 0
+            },
+            {
+               "precio_total": 1879.35,
+               "precio_unitario": 1879.35,
+               "descripcion": "Imp.s/Consumo gas (Ley 25413)",
+               "cantidad": 1
+            },
+            {
+               "descripcion": "IVA (21%) s/Gas (41.439,00)",
+               "precio_total": 8620,
+               "precio_unitario": 8620,
+               "cantidad": 1
+            },
+            {
+               "precio_total": 554.58,
+               "descripcion": "IVA (27%) s/Fijo (2.054,00)",
+               "cantidad": 1,
+               "precio_unitario": 554.58
+            },
+            {
+               "descripcion": "IVA (21%) s/Imp. y Rec. Ley 24065/2014 Dto 202/04",
+               "precio_unitario": 0,
+               "cantidad": 1,
+               "precio_total": 0
+            },
+            {
+               "precio_total": 319.19,
+               "precio_unitario": 319.19,
+               "descripcion": "Fdo.Fdo.Art.75 Leyes25053 y 27637 (4%)",
+               "cantidad": 1
+            },
+            {
+               "precio_unitario": 3092,
+               "cantidad": 1,
+               "descripcion": "Cargo por aviso de deuda",
+               "precio_total": 3092
+            },
+            {
+               "precio_total": 2399,
+               "cantidad": 1,
+               "precio_unitario": 2399,
+               "descripcion": "Cargo por reconexi\u00f3n"
+            }
+         ],
+         "total": 11488.18,
+         "subtotal": 890.92
+      },
+      "impuestos": {
+         "impuestos": [
+            {
+               "importe": 1818.66,
+               "tipo": "IVA",
+               "alicuota": 21,
+               "base_imponible": 8660.3,
+               "descripcion": "IVA 21% sobre 8660.3"
+            },
+            {
+               "importe": 6.56,
+               "tipo": "IVA",
+               "alicuota": 27,
+               "base_imponible": 24.31,
+               "descripcion": "IVA 27% sobre 24.31"
+            },
+            {
+               "importe": 58.21,
+               "descripcion": "IVA 10.5% sobre 554.43",
+               "base_imponible": 554.43,
+               "alicuota": 10.5,
+               "tipo": "IVA"
+            }
+         ],
+         "retenciones": []
+      }
+   },
+   "tokens": {
+      "input_tokens": 8015,
+      "output_tokens": 1693,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+   },
+   "id": "id_value",
+   "saved_sheet": true,
+   "status_code": 200
+}
