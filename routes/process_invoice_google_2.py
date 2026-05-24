@@ -343,22 +343,8 @@ class InvoiceOrchestrator:
                     else "No guardamos la factura, error"
                 )
                 
-                # Subir archivo a Google Drive
-                app_logger.info(f"[{item['process_id']}] Iniciando subida a Google Drive para el archivo: {item['file_name']}")
-                drive_file_id = self.subir_archivo_a_drive(
-                    file_path=item["file_path"],
-                    file_name=item["file_name"],
-                    mime_type=item["media_type"]
-                )
-                
-                if drive_file_id:
-                    app_logger.info(f"[{item['process_id']}] ✅ Archivo subido exitosamente a Drive. ID: {drive_file_id}")
-                else:
-                    app_logger.error(f"[{item['process_id']}] ❌ Falló la subida del archivo a Google Drive.")
-                
                 factura["id"] = item["process_id"]
                 factura["saved_sheet"] = bool(saved_sheet)
-                factura["drive_file_id"] = drive_file_id
                 factura["error"] = ""
 
                 return factura
