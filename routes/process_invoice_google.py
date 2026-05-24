@@ -63,11 +63,13 @@ def formatear_retenciones(retenciones):
         return ""
     resultado = []
     for i, r in enumerate(retenciones, start=1):
+        base_imponible = r.get('base_imponible')
+        base_imponible_str = f"${base_imponible:.2f}" if base_imponible is not None else "No especificada"
         texto = (
             f"Retención #{i}:\n"
             f"  - Tipo: {r['tipo']}\n"
             f"  - Descripción: {r.get('description', 'No especificada')}\n"
-            f"  - Base Imponible: ${r['base_imponible']:.2f}\n"
+            f"  - Base Imponible: {base_imponible_str}\n"
         )
         resultado.append(texto)
     return "\n".join(resultado)
@@ -79,16 +81,21 @@ def formatear_impuestos(impuestos):
         return ""
     resultado = []
     for i, imp in enumerate(impuestos, start=1):
+        base_imponible = imp.get('base_imponible')
+        base_imponible_str = f"${base_imponible:.2f}" if base_imponible is not None else "No especificada"
+        importe = imp.get('importe')
+        importe_str = f"${importe:.2f}" if importe is not None else "No especificado"
+        
         # Construye el texto base con campos requeridos
         texto = (
             f"Impuesto #{i}:\n"
             f"  - Tipo: {imp['tipo']}\n"
-            f"  - Base Imponible: ${imp['base_imponible']:.2f}\n"
-            f"  - Importe: ${imp['importe']:.2f}\n"
+            f"  - Base Imponible: {base_imponible_str}\n"
+            f"  - Importe: {importe_str}\n"
         )
 
         # Agrega descripción si está presente
-        if "descripcion" in imp:
+        if "descripcion" in imp and imp["descripcion"] is not None:
             texto = texto.replace(
                 f"  - Tipo: {imp['tipo']}\n",
                 f"  - Tipo: {imp['tipo']}\n" f"  - Descripción: {imp['descripcion']}\n",
@@ -97,8 +104,8 @@ def formatear_impuestos(impuestos):
         # Agrega alícuota si está presente
         if "alicuota" in imp and imp["alicuota"] is not None:
             texto = texto.replace(
-                f"  - Base Imponible: ${imp['base_imponible']:.2f}\n",
-                f"  - Base Imponible: ${imp['base_imponible']:.2f}\n"
+                f"  - Base Imponible: {base_imponible_str}\n",
+                f"  - Base Imponible: {base_imponible_str}\n"
                 f"  - Alícuota: {imp['alicuota']:.2f}%\n",
             )
 

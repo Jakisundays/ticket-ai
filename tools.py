@@ -141,31 +141,28 @@ tools = [
                         "description": "Otros datos relevantes del comprobante.",
                         "properties": {
                             "forma_pago": {
-                                "type": "string",
-                                "description": """Identificá el método de pago que se usó para concretar la operación en este comprobante.
+                                    "type": ["string", "null"],
+                                    "description": """Identificá el método de pago que se usó para concretar la operación en este comprobante.
 
-                                Ignorá frases que indican formas de pago posibles o disponibles (por ejemplo: 'puede pagar con...', 'se aceptan...').  
-                                Solo considerá frases que confirmen el pago, como:  
-                                - "Pagado en efectivo"  
-                                - "Abonado por transferencia"  
-                                - "Pagado con tarjeta"  
-                                - "Se realizó el pago vía Mercado Pago"
+                                        Ignorá frases que indican formas de pago posibles o disponibles (por ejemplo: 'puede pagar con...', 'se aceptan...').  
+                                        Solo considerá frases que confirmen el pago, como:  
+                                        - "Pagado en efectivo"  
+                                        - "Abonado por transferencia"  
+                                        - "Pagado con tarjeta"  
+                                        - "Se realizó el pago vía Mercado Pago"
 
-                                Devolvé el nombre de la forma de pago utilizada. Si no hay ninguna confirmación, no devuelvas nada.
-                                """,
-                                "nullable": True,
-                            },
-                            "CAE": {
-                                "type": "string",
-                                "description": "Código de Autorización Electrónico emitido por AFIP.",
-                                "nullable": True,
-                            },
-                            "vencimiento_CAE": {
-                                "type": "string",
-                                "format": "date",
-                                "description": "Fecha de vencimiento del CAE en formato YYYY-MM-DD.",
-                                "nullable": True,
-                            },
+                                        Devolvé el nombre de la forma de pago utilizada. Si no hay ninguna confirmación, no devuelvas nada.
+                                        """,
+                                },
+                                "CAE": {
+                                    "type": ["string", "null"],
+                                    "description": "Código de Autorización Electrónico emitido por AFIP.",
+                                },
+                                "vencimiento_CAE": {
+                                    "type": ["string", "null"],
+                                    "format": "date",
+                                    "description": "Fecha de vencimiento del CAE en formato YYYY-MM-DD.",
+                                },
                             "additionalProperties": False,
                         },
                     },
@@ -258,21 +255,19 @@ tools = [
                                     "description": "Tipo de impuesto aplicado (e.g., IVA, Percepción, Impuesto Municipal).",
                                 },
                                 "descripcion": {
-                                    "type": "string",
+                                    "type": ["string", "null"],
                                     "description": "Descripción detallada del impuesto.",
-                                    "nullable": True,
                                 },
                                 "base_imponible": {
-                                    "type": "number",
+                                    "type": ["number", "null"],
                                     "description": "Monto base sobre el que se calcula el impuesto.",
                                 },
                                 "alicuota": {
-                                    "type": "number",
+                                    "type": ["number", "null"],
                                     "description": "Porcentaje de alícuota aplicada.",
-                                    "nullable": True,
                                 },
                                 "importe": {
-                                    "type": "number",
+                                    "type": ["number", "null"],
                                     "description": "Importe del impuesto calculado.",
                                 },
                             },
@@ -295,12 +290,11 @@ tools = [
                                     "description": "Tipo de retención (e.g., Ganancias, IVA, IIBB). No usar para descuentos o promociones.",
                                 },
                                 "description": {
-                                    "type": "string",
+                                    "type": ["string", "null"],
                                     "description": "Detalle adicional de la retención. No incluir información de descuentos ni promociones.",
-                                    "nullable": True,
                                 },
                                 "base_imponible": {
-                                    "type": "number",
+                                    "type": ["number", "null"],
                                     "description": "Monto base sobre el que se aplica la retención.",
                                 },
                             },
