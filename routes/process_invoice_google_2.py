@@ -1310,7 +1310,7 @@ async def get_queue_status():
     response_description="A dictionary containing details about active comparisons in the processing queue",
 )
 async def webhook_endpoint(request: Request):
-    logger.info(f"📨 Webhook recibido: {request.url}")
+    app_logger.info(f"📨 Webhook recibido: {request.url}")
     try:
         data = await request.json()
         app_logger.info(f"📨 Webhook recibido: {data}")
