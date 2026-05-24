@@ -236,6 +236,19 @@ class InvoiceOrchestrator:
                             f"[{process_id}] Factura guardada en sheets para {file_name}"
                         )
 
+                        # Subir archivo a Google Drive
+                        app_logger.info(f"[{process_id}] Iniciando subida a Google Drive para el archivo: {file_name}")
+                        drive_file_id = self.subir_archivo_a_drive(
+                            file_path=item["file_path"],
+                            file_name=file_name,
+                            mime_type=media_type
+                        )
+                        
+                        if drive_file_id:
+                            app_logger.info(f"[{process_id}] ✅ Archivo subido exitosamente a Drive. ID: {drive_file_id}")
+                        else:
+                            app_logger.error(f"[{process_id}] ❌ Falló la subida del archivo a Google Drive.")
+
                         html_body = self.generar_html_factura(factura["data"])
 
                         self.enviar_email(from_email, subject_for_file, html_body)
@@ -245,6 +258,7 @@ class InvoiceOrchestrator:
                             "file_name": item["file_name"],
                             "factura": factura,
                             "saved": saved,
+                            "drive_file_id": drive_file_id,
                             "status": "procesada",
                             "success": True,
                         }
