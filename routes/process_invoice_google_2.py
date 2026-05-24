@@ -394,7 +394,8 @@ class InvoiceOrchestrator:
             file = service.files().create(
                 body=file_metadata,
                 media_body=media,
-                fields="id"
+                fields="id",
+                supportsAllDrives=True
             ).execute()
             
             return file.get("id")
