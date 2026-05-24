@@ -330,11 +330,17 @@ class InvoiceOrchestrator:
                 )
                 
                 # Subir archivo a Google Drive
+                app_logger.info(f"[{item['process_id']}] Iniciando subida a Google Drive para el archivo: {item['file_name']}")
                 drive_file_id = self.subir_archivo_a_drive(
                     file_path=item["file_path"],
                     file_name=item["file_name"],
                     mime_type=item["media_type"]
                 )
+                
+                if drive_file_id:
+                    app_logger.info(f"[{item['process_id']}] ✅ Archivo subido exitosamente a Drive. ID: {drive_file_id}")
+                else:
+                    app_logger.error(f"[{item['process_id']}] ❌ Falló la subida del archivo a Google Drive.")
                 
                 factura["id"] = item["process_id"]
                 factura["saved_sheet"] = bool(saved_sheet)
@@ -351,7 +357,7 @@ class InvoiceOrchestrator:
         Sube un archivo a Google Drive usando la cuenta de servicio.
         """
         try:
-            app_logger.info(f"Subiendo {file_name} a Google Drive...")
+            app_logger.info(f"Preparando credenciales para subir {file_name} a Google Drive...")
             scopes = ["https://www.googleapis.com/auth/drive.file"]
             
             client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
@@ -359,7 +365,7 @@ class InvoiceOrchestrator:
             folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
             
             if not client_email or not private_key or not folder_id:
-                app_logger.error("Faltan credenciales o el ID de la carpeta de Google Drive (GOOGLE_DRIVE_FOLDER_ID).")
+                app_logger.error("❌ Faltan credenciales o el ID de la carpeta de Google Drive (GOOGLE_DRIVE_FOLDER_ID).")
                 return None
                 
             private_key = private_key.replace("\\n", "\n")
@@ -374,6 +380,7 @@ class InvoiceOrchestrator:
                 scopes=scopes,
             )
 
+            app_logger.info("Conectando con la API de Google Drive...")
             service = build("drive", "v3", credentials=credentials)
             
             file_metadata = {
@@ -381,6 +388,7 @@ class InvoiceOrchestrator:
                 "parents": [folder_id]
             }
             
+            app_logger.info(f"Iniciando transferencia del archivo {file_path}...")
             media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
             
             file = service.files().create(
@@ -389,11 +397,10 @@ class InvoiceOrchestrator:
                 fields="id"
             ).execute()
             
-            app_logger.info(f"Archivo subido exitosamente con ID: {file.get('id')}")
             return file.get("id")
             
         except Exception as e:
-            app_logger.error(f"Error al subir archivo a Google Drive: {e}")
+            app_logger.error(f"❌ Excepción al subir archivo a Google Drive: {str(e)}")
             return None
 
     # Hace requests a la API con reintentos
