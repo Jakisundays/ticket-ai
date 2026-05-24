@@ -366,7 +366,7 @@ class InvoiceOrchestrator:
         messages: list,
         tool_name: str,
         process_id: str,
-        model: str = "gemini-2.5-flash-preview-05-20",
+        model: str = "gemini-3.5-flash",
         max_retries: int = 6,
     ):
         url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
@@ -952,10 +952,10 @@ class InvoiceOrchestrator:
 orchestrator = InvoiceOrchestrator(
     secret=os.getenv("SECRET_KEY"),
     webhook_url=os.getenv("WEBHOOK_URL"),
-    api_key=os.getenv("GEMINI_API_KEY"),
+    api_key=os.getenv("GOOGLE_API_KEY"),
     recharge_cooldown=45,
     queue_check_cooldown=20,
-    model="gemini-2.5-flash-preview-05-20",
+    model="gemini-3.5-flash",
     semaphore=3,
 )
 
