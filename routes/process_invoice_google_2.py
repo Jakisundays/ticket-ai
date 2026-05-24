@@ -33,6 +33,7 @@ import zipfile
 from jsonschema import validate, ValidationError
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 # Local imports
 from tools import tools
@@ -327,14 +328,73 @@ class InvoiceOrchestrator:
                     if saved_sheet
                     else "No guardamos la factura, error"
                 )
+                
+                # Subir archivo a Google Drive
+                drive_file_id = self.subir_archivo_a_drive(
+                    file_path=item["file_path"],
+                    file_name=item["file_name"],
+                    mime_type=item["media_type"]
+                )
+                
                 factura["id"] = item["process_id"]
                 factura["saved_sheet"] = bool(saved_sheet)
+                factura["drive_file_id"] = drive_file_id
                 factura["error"] = ""
 
                 return factura
         except Exception as e:
             app_logger.error(f"An error occurred while processing item: {e}")
             raise ValueError(f"Error processing item: {e}")
+
+    def subir_archivo_a_drive(self, file_path: str, file_name: str, mime_type: str):
+        """
+        Sube un archivo a Google Drive usando la cuenta de servicio.
+        """
+        try:
+            app_logger.info(f"Subiendo {file_name} a Google Drive...")
+            scopes = ["https://www.googleapis.com/auth/drive.file"]
+            
+            client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+            private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+            folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+            
+            if not client_email or not private_key or not folder_id:
+                app_logger.error("Faltan credenciales o el ID de la carpeta de Google Drive (GOOGLE_DRIVE_FOLDER_ID).")
+                return None
+                
+            private_key = private_key.replace("\\n", "\n")
+
+            credentials = service_account.Credentials.from_service_account_info(
+                {
+                    "type": "service_account",
+                    "client_email": client_email,
+                    "private_key": private_key,
+                    "token_uri": "https://accounts.google.com/o/oauth2/token",
+                },
+                scopes=scopes,
+            )
+
+            service = build("drive", "v3", credentials=credentials)
+            
+            file_metadata = {
+                "name": file_name,
+                "parents": [folder_id]
+            }
+            
+            media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+            
+            file = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id"
+            ).execute()
+            
+            app_logger.info(f"Archivo subido exitosamente con ID: {file.get('id')}")
+            return file.get("id")
+            
+        except Exception as e:
+            app_logger.error(f"Error al subir archivo a Google Drive: {e}")
+            return None
 
     # Hace requests a la API con reintentos
     async def make_api_request(
