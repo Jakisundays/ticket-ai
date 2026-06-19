@@ -45,6 +45,27 @@ load_dotenv()
 router = APIRouter(prefix="/gemini2")
 
 
+# Encabezados de la pestaña de ítems (una fila por ítem de factura).
+# El orden DEBE coincidir con el de _construir_filas_items().
+ITEMS_SHEET_HEADERS = [
+    "process_id",
+    "fecha_registro",
+    "numero_comprobante",
+    "fecha_emision",
+    "tipo_comprobante",
+    "emisor_nombre",
+    "emisor_id_fiscal",
+    "receptor_nombre",
+    "receptor_id_fiscal",
+    "moneda",
+    "linea",
+    "descripcion",
+    "cantidad",
+    "precio_unitario",
+    "precio_total",
+]
+
+
 # Convierte un archivo PDF a string base64
 def pdf_to_base64(file_path: str) -> Union[str, None]:
     try:
@@ -144,6 +165,7 @@ class InvoiceOrchestrator:
         self.queue = asyncio.Queue()
         self.active_comparisons = {}
         self.processed_jobs = set()  # Para idempotencia
+        self._ensured_item_tabs = set()  # Cache de pestañas de ítems ya verificadas
         self.job_queue = asyncio.Queue()  # Cola para jobs
         asyncio.create_task(self.worker())
 
@@ -236,6 +258,15 @@ class InvoiceOrchestrator:
                             f"[{process_id}] Factura guardada en sheets para {file_name}"
                         )
 
+                        # Guardar los ítems (una fila por ítem) en su pestaña.
+                        # Aislado: si falla, no rompe el resto del procesamiento.
+                        saved_items = self.guardar_items_en_sheets(
+                            factura["data"], process_id
+                        )
+                        app_logger.info(
+                            f"[{process_id}] Ítems guardados en sheets: {saved_items}"
+                        )
+
                         # Subir archivo a Google Drive
                         app_logger.info(f"[{process_id}] Iniciando subida a Google Drive para el archivo: {file_name}")
                         drive_file_id = self.subir_archivo_a_drive(
@@ -258,6 +289,7 @@ class InvoiceOrchestrator:
                             "file_name": item["file_name"],
                             "factura": factura,
                             "saved": saved,
+                            "saved_items": saved_items,
                             "drive_file_id": drive_file_id,
                             "status": "procesada",
                             "success": True,
@@ -825,7 +857,157 @@ class InvoiceOrchestrator:
             if "fila_para_sheets" in locals():
                 app_logger.error("Datos que fallaron:", fila_para_sheets)
             return False
-        # Formatea los datos de la factura para la respuesta
+
+    # === Persistencia de ítems (una fila por ítem en su propia pestaña) ===
+
+    def _get_sheets_service(self):
+        """Construye el cliente de Google Sheets a partir de las credenciales de servicio."""
+        try:
+            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+            client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+            private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+            if not client_email or not private_key:
+                app_logger.error("Faltan credenciales de Google para conectar con Sheets.")
+                return None
+            private_key = private_key.replace("\\n", "\n")
+            credentials = service_account.Credentials.from_service_account_info(
+                {
+                    "type": "service_account",
+                    "client_email": client_email,
+                    "private_key": private_key,
+                    "token_uri": "https://accounts.google.com/o/oauth2/token",
+                },
+                scopes=scopes,
+            )
+            return build("sheets", "v4", credentials=credentials)
+        except Exception as e:
+            app_logger.error(f"Error al construir el servicio de Google Sheets: {e}")
+            return None
+
+    def _asegurar_pestana_items(self, service, sheet_id: str, tab_name: str) -> bool:
+        """
+        Garantiza que la pestaña de ítems exista (con encabezados).
+        Si no existe, la crea. Cachea el resultado para no repetir la verificación.
+        """
+        cache_key = f"{sheet_id}:{tab_name}"
+        if cache_key in self._ensured_item_tabs:
+            return True
+
+        metadata = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        existentes = {
+            s["properties"]["title"] for s in metadata.get("sheets", [])
+        }
+
+        if tab_name not in existentes:
+            app_logger.info(f"La pestaña '{tab_name}' no existe; creándola...")
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
+            ).execute()
+            service.spreadsheets().values().update(
+                spreadsheetId=sheet_id,
+                range=f"{tab_name}!A1",
+                valueInputOption="RAW",
+                body={"values": [ITEMS_SHEET_HEADERS]},
+            ).execute()
+            app_logger.info(f"✅ Pestaña '{tab_name}' creada con encabezados.")
+
+        self._ensured_item_tabs.add(cache_key)
+        return True
+
+    def _construir_filas_items(self, factura_data: dict, process_id: str, timestamp: str):
+        """
+        Función pura: transforma los datos formateados de una factura en una lista
+        de filas (una por ítem) para la pestaña de ítems. Devuelve [] si no hay ítems.
+        """
+        emisor_receptor = factura_data.get("emisor_receptor", {})
+        comprobante = emisor_receptor.get("comprobante", {})
+        emisor = emisor_receptor.get("emisor", {})
+        receptor = emisor_receptor.get("receptor", {})
+        detalles = factura_data.get("items", {}).get("detalles", []) or []
+
+        filas = []
+        for i, item in enumerate(detalles, start=1):
+            filas.append(
+                [
+                    process_id or "",
+                    timestamp,
+                    comprobante.get("numero", ""),
+                    comprobante.get("fecha_emision", ""),
+                    comprobante.get("tipo", ""),
+                    emisor.get("nombre", ""),
+                    emisor.get("id_fiscal", ""),
+                    receptor.get("nombre", ""),
+                    receptor.get("id_fiscal", ""),
+                    comprobante.get("moneda", ""),
+                    i,
+                    item.get("descripcion", ""),
+                    item.get("cantidad", ""),
+                    item.get("precio_unitario", ""),
+                    item.get("precio_total", ""),
+                ]
+            )
+        return filas
+
+    def guardar_items_en_sheets(
+        self,
+        factura_data: dict,
+        process_id: str,
+        tab_name: str = None,
+    ) -> bool:
+        """
+        Guarda los ítems de una factura como filas individuales en una pestaña aparte,
+        manteniendo el enlace con la factura (process_id + clave compuesta).
+
+        Aislado a propósito: cualquier fallo aquí NO debe afectar el guardado de la
+        factura principal, el email ni el webhook. Devuelve True/False.
+        """
+        try:
+            tab_name = tab_name or os.getenv("SHEET_TAB_ITEMS", "Detalle_Items")
+            sheet_id = os.getenv("SHEET_ID_2")
+            if not sheet_id:
+                app_logger.error("No se encontró SHEET_ID_2 para guardar los ítems.")
+                return False
+
+            timestamp = datetime.datetime.utcnow().isoformat() + "Z"
+            filas = self._construir_filas_items(factura_data, process_id, timestamp)
+            if not filas:
+                app_logger.info(
+                    "La factura no tiene ítems; no se escribe nada en la pestaña de ítems."
+                )
+                return True
+
+            service = self._get_sheets_service()
+            if service is None:
+                return False
+
+            self._asegurar_pestana_items(service, sheet_id, tab_name)
+
+            response = (
+                service.spreadsheets()
+                .values()
+                .append(
+                    spreadsheetId=sheet_id,
+                    range=f"{tab_name}!A1",
+                    valueInputOption="USER_ENTERED",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": filas},
+                )
+                .execute()
+            )
+            app_logger.info(
+                f"✅ {len(filas)} ítem(s) guardados en la pestaña '{tab_name}'."
+            )
+            app_logger.info(response)
+            return True
+
+        except Exception as e:
+            app_logger.error(f"❌ Error al guardar los ítems en Google Sheets: {e}")
+            if "filas" in locals():
+                app_logger.error(f"Filas de ítems que fallaron: {filas}")
+            return False
+
+    # Formatea los datos de la factura para la respuesta
 
     def formatear_factura(self, factura_completa):
         """
@@ -1199,8 +1381,10 @@ async def process_invoice(
             saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
                 factura["data"]
             )
+            saved_items = orchestrator.guardar_items_en_sheets(factura["data"], id)
             factura["id"] = id
             factura["saved_sheet"] = bool(saved_sheet)
+            factura["saved_items"] = bool(saved_items)
             factura["status_code"] = 200
 
             os.remove(file_location)
