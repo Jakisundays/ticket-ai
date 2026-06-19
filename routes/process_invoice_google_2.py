@@ -17,6 +17,7 @@ import ssl
 import mimetypes
 import uuid
 import datetime
+import unicodedata
 from pathlib import Path
 from typing import Dict, Optional, Union, TypedDict
 import fitz  # PyMuPDF
@@ -64,6 +65,27 @@ ITEMS_SHEET_HEADERS = [
     "precio_unitario",
     "precio_total",
 ]
+
+# Palabras clave (normalizadas: minúsculas, sin acentos) para detectar líneas
+# de descuento/bonificación que el modelo a veces extrae como un ítem más.
+# Editar esta lista si aparecen falsos positivos/negativos.
+DISCOUNT_KEYWORDS = (
+    "descuento",
+    "descto",
+    "bonif",        # cubre "bonificación", "bonif."
+    "rebaja",
+    "promocion",
+    "promo",
+)
+
+
+def _normalizar_texto(texto: str) -> str:
+    """Minúsculas y sin acentos, para comparar descripciones de forma robusta."""
+    if not texto:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", str(texto))
+    sin_acentos = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return sin_acentos.lower().strip()
 
 
 # Convierte un archivo PDF a string base64
@@ -915,10 +937,27 @@ class InvoiceOrchestrator:
         self._ensured_item_tabs.add(cache_key)
         return True
 
+    def _es_descuento(self, item: dict) -> bool:
+        """
+        Determina si una línea de `detalles` es en realidad un descuento/bonificación
+        (no un ítem real). Usa dos señales: monto negativo o descripción con palabra
+        clave de descuento.
+        """
+        # Señal 1: importe negativo (el descuento se resta del total).
+        for campo in ("precio_total", "precio_unitario", "cantidad"):
+            valor = item.get(campo)
+            if isinstance(valor, (int, float)) and valor < 0:
+                return True
+
+        # Señal 2: la descripción coincide con una palabra clave de descuento.
+        descripcion = _normalizar_texto(item.get("descripcion", ""))
+        return any(kw in descripcion for kw in DISCOUNT_KEYWORDS)
+
     def _construir_filas_items(self, factura_data: dict, process_id: str, timestamp: str):
         """
         Función pura: transforma los datos formateados de una factura en una lista
         de filas (una por ítem) para la pestaña de ítems. Devuelve [] si no hay ítems.
+        Las líneas de descuento/bonificación se omiten (ver _es_descuento).
         """
         emisor_receptor = factura_data.get("emisor_receptor", {})
         comprobante = emisor_receptor.get("comprobante", {})
@@ -927,7 +966,13 @@ class InvoiceOrchestrator:
         detalles = factura_data.get("items", {}).get("detalles", []) or []
 
         filas = []
-        for i, item in enumerate(detalles, start=1):
+        descartados = 0
+        linea = 0
+        for item in detalles:
+            if self._es_descuento(item):
+                descartados += 1
+                continue
+            linea += 1
             filas.append(
                 [
                     process_id or "",
@@ -940,12 +985,18 @@ class InvoiceOrchestrator:
                     receptor.get("nombre", ""),
                     receptor.get("id_fiscal", ""),
                     comprobante.get("moneda", ""),
-                    i,
+                    linea,
                     item.get("descripcion", ""),
                     item.get("cantidad", ""),
                     item.get("precio_unitario", ""),
                     item.get("precio_total", ""),
                 ]
+            )
+
+        if descartados:
+            app_logger.info(
+                f"Pestaña de ítems: se omitieron {descartados} línea(s) de "
+                f"descuento/bonificación."
             )
         return filas
 
