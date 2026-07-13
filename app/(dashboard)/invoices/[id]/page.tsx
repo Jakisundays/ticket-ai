@@ -3,8 +3,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createServerClient, ClientResponseError } from "@/lib/pocketbase-server";
 import StatusBadge from "@/components/StatusBadge";
+import ReopenButton from "./ReopenButton";
+import InvoiceFileViewer from "./InvoiceFileViewer";
+import InvoiceReviewForm from "./InvoiceReviewForm";
 import {
   Collections,
+  type BasCategoryMapRecord,
   type InvoiceItemsRecord,
   type InvoiceWithItemsExpand,
 } from "@/lib/pocketbase-types";
@@ -25,7 +29,7 @@ export default async function InvoiceDetailPage({
     invoice = await pb
       .collection<InvoiceWithItemsExpand>(Collections.Invoices)
       .getOne(id, {
-        expand: "invoice_items_via_invoice,bas_processing_status_via_invoice",
+        expand: "invoice_items_via_invoice,bas_processing_status_via_invoice,confirmed_by",
       });
   } catch (error) {
     if (error instanceof ClientResponseError && error.status === 404) {
@@ -38,7 +42,53 @@ export default async function InvoiceDetailPage({
   // Relation `unique` (1:1) -- PocketBase expande esto como un objeto único,
   // no un array (a diferencia de invoice_items_via_invoice).
   const basStatus = invoice.expand?.bas_processing_status_via_invoice;
+  const isConfirmed = invoice.review_status === "confirmed";
+
+  if (!isConfirmed) {
+    const [categoriesResult, queueResult] = await Promise.all([
+      pb.collection<BasCategoryMapRecord>(Collections.BasCategoryMap).getFullList({ sort: "categoria" }),
+      pb.collection<{ id: string }>(Collections.Invoices).getFullList({
+        filter: 'status = "completed" && review_status != "confirmed"',
+        sort: "+created",
+        fields: "id",
+      }),
+    ]);
+    const queueIds = queueResult.map((row) => row.id);
+    const position = queueIds.indexOf(invoice.id);
+    const prevInvoiceId = position > 0 ? queueIds[position - 1] : null;
+    const nextInvoiceId = position >= 0 && position < queueIds.length - 1 ? queueIds[position + 1] : null;
+
+    return (
+      <div className="flex h-[calc(100vh-8rem)] flex-col">
+        <div className="mb-4">
+          <Link href="/queue" className="text-sm text-gray-500 hover:underline">
+            ← Cola de revisión
+          </Link>
+          <h1 className="mt-1 text-lg font-semibold text-gray-900">
+            {invoice.numero_comprobante || invoice.process_id}
+          </h1>
+        </div>
+        {invoice.status === "error" && invoice.error_message && (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            {invoice.error_message}
+          </div>
+        )}
+        <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-2">
+          <InvoiceFileViewer processId={invoice.process_id} />
+          <InvoiceReviewForm
+            invoice={invoice}
+            items={items}
+            categories={categoriesResult}
+            prevInvoiceId={prevInvoiceId}
+            nextInvoiceId={nextInvoiceId}
+          />
+        </div>
+      </div>
+    );
+  }
+
   const driveUrl = driveFileUrl(invoice.drive_file_id);
+  const confirmedByEmail = invoice.expand?.confirmed_by?.email;
 
   return (
     <div className="space-y-6">
@@ -51,13 +101,16 @@ export default async function InvoiceDetailPage({
             {invoice.numero_comprobante || invoice.process_id}
           </h1>
         </div>
+        <div className="flex items-center gap-2">
+          <StatusBadge status="confirmed" />
+          <ReopenButton invoiceId={invoice.id} />
+        </div>
       </div>
 
-      {invoice.status === "error" && invoice.error_message && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {invoice.error_message}
-        </div>
-      )}
+      <p className="text-sm text-gray-500">
+        Confirmada{confirmedByEmail ? ` por ${confirmedByEmail}` : ""}
+        {invoice.confirmed_at ? ` el ${formatDate(invoice.confirmed_at)}` : ""}.
+      </p>
 
       <section className="grid grid-cols-1 gap-4 rounded-lg border border-gray-200 bg-white p-4 text-sm sm:grid-cols-3">
         <Field label="Estado">

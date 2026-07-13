@@ -66,4 +66,18 @@ export async function requireUserSession(): Promise<PocketBase> {
   return pb;
 }
 
+/**
+ * Misma validación que requireUserSession(), pero para Route Handlers
+ * (app/api/**): redirect() lanza un NEXT_REDIRECT pensado para render de
+ * páginas, no para una respuesta JSON de API -- acá el caller decide qué
+ * responder (típicamente NextResponse.json(..., {status: 401})) en vez de
+ * redirigir. Devuelve null si no hay sesión válida de "users".
+ */
+export async function getApiUserSession(): Promise<PocketBase | null> {
+  const pb = await createServerClient();
+  const hasUserSession =
+    pb.authStore.isValid && pb.authStore.record?.collectionName === "users";
+  return hasUserSession ? pb : null;
+}
+
 export { ClientResponseError };

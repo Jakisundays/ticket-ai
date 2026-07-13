@@ -20,6 +20,9 @@ export default async function DashboardLayout({
             <span className="mr-2 text-sm font-semibold text-gray-900">
               Ticket AI
             </span>
+            <Link href="/queue" className="hover:text-gray-900">
+              Cola de revisión
+            </Link>
             <Link href="/invoices" className="hover:text-gray-900">
               Facturas
             </Link>
