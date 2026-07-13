@@ -70,6 +70,8 @@ INVOICE_ITEMS_COLLECTION = "invoice_items"
 PROCESSING_JOBS_COLLECTION = "processing_jobs"
 BAS_PROCESSING_STATUS_COLLECTION = "bas_processing_status"
 BAS_PROVIDERS_COLLECTION = "bas_providers"
+BAS_PAYMENT_METHODS_COLLECTION = "bas_payment_methods"
+PAYMENT_ORDERS_COLLECTION = "payment_orders"
 
 
 class PocketBaseApiError(Exception):
@@ -472,6 +474,85 @@ class PocketBaseClient:
             )
         except Exception as e:
             app_logger.warning(f"PocketBase: error en get_bas_processing_status({process_id}): {e}")
+            return None
+
+    def get_invoice_items(self, invoice_id: str) -> list:
+        """
+        Lista todos los invoice_items de una factura (por el id de PocketBase,
+        no process_id -- mismo criterio que bulk_create_invoice_items). []
+        si no hay items o si PocketBase no responde. Usado por
+        /payment-orders/{process_id}/create para reconstruir el payload de
+        ComprobantesCompra con los valores ACTUALES (potencialmente editados
+        durante la revisión humana), no con los de la extracción original.
+        """
+        try:
+            if not invoice_id:
+                return []
+            resp = self._request(
+                "GET",
+                f"/api/collections/{INVOICE_ITEMS_COLLECTION}/records",
+                params={"filter": _pb_filter_eq("invoice", invoice_id), "perPage": 200, "sort": "linea"},
+            )
+            data = _json_o_error(resp, f"/api/collections/{INVOICE_ITEMS_COLLECTION}/records", ok=(200,))
+            return (data or {}).get("items") or []
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_invoice_items({invoice_id}): {e}")
+            return []
+
+    def get_payment_method(self, metodo_pago: str) -> Optional[dict]:
+        """Lee el código BAS configurado para un método de pago (efectivo/
+        cheque/transferencia) desde bas_payment_methods. None si no hay
+        mapeo o si PocketBase no responde -- el caller debe tratar eso como
+        "no se puede crear la orden con este método todavía", no adivinar."""
+        try:
+            if not metodo_pago:
+                return None
+            return self._find_one(
+                BAS_PAYMENT_METHODS_COLLECTION, _pb_filter_eq("metodo_pago", metodo_pago)
+            )
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_payment_method({metodo_pago}): {e}")
+            return None
+
+    def get_payment_order(self, process_id: str) -> Optional[dict]:
+        try:
+            if not process_id:
+                return None
+            return self._find_one(PAYMENT_ORDERS_COLLECTION, _pb_filter_eq("process_id", process_id))
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_payment_order({process_id}): {e}")
+            return None
+
+    def upsert_payment_order(
+        self, process_id: str, *, invoice: Optional[str] = None, **campos
+    ) -> Optional[dict]:
+        """
+        Upsert del intento de Orden de Pago para un process_id, en
+        PAYMENT_ORDERS_COLLECTION. Mismo patrón exacto que
+        upsert_bas_processing_status (ver ese docstring para el detalle de
+        por qué `invoice` es requerido solo en la creación, no en updates
+        subsiguientes) -- a propósito, para no duplicar el razonamiento.
+        """
+        try:
+            if not process_id:
+                return None
+            existente = self._find_one(
+                PAYMENT_ORDERS_COLLECTION, _pb_filter_eq("process_id", process_id)
+            )
+            if existente:
+                return self._update(PAYMENT_ORDERS_COLLECTION, existente["id"], campos)
+            if not invoice:
+                app_logger.warning(
+                    f"PocketBase: upsert_payment_order({process_id}) es una creación nueva pero "
+                    "falta `invoice` (campo requerido) -- se omite."
+                )
+                return None
+            payload = dict(campos)
+            payload["process_id"] = process_id
+            payload["invoice"] = invoice
+            return self._create(PAYMENT_ORDERS_COLLECTION, payload)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en upsert_payment_order({process_id}): {e}")
             return None
 
 

@@ -54,3 +54,19 @@ BAS_NUMERO_IMPOSITIVO_TIPO_CUIT = "80"
 # de hardcodear -- por ahora, valores reales confirmados con un 201 real.
 BAS_PREFIJO_TALONARIO_MA = "00001"  # talonario de Factura de Compra A
 BAS_PREFIJO_TALONARIO_OP = "00001"  # talonario de Orden de Pago (distinto talonario, mismo prefijo)
+
+# --- Métodos de pago (Orden de Pago humana, ver /payment-orders/{id}/create) ---
+# Qué ARRAY de "pagos" de OrdenDePago usar por método es forma de payload
+# (estructura de código), no dato de negocio descubrible con el tiempo, así
+# que vive hardcodeado acá -- a diferencia del CÓDIGO de MedioPago y, para
+# transferencia, la CuentaBancaria, que SÍ son datos de negocio del ERP y
+# viven en bas_payment_methods (ver PocketBaseClient.get_payment_method).
+# "cheque" -> ChequesPropios (cheque PROPIO emitido para pagar, no un cheque
+# de terceros recibido/endosado) es una inferencia razonable, NO confirmada
+# -- docs/bas-orden-de-pago-research.md marca toda esta sección "DIFERIDO".
+# Confirmar con el admin de BAS antes de usar esto para un pago real.
+METODO_PAGO_ARRAY_BAS = {
+    "efectivo": "Efectivos",
+    "cheque": "ChequesPropios",
+    "transferencia": "PagosPorBanco",
+}

@@ -1,5 +1,7 @@
 # FastAPI imports
-from fastapi import Form, APIRouter, HTTPException, UploadFile, File, Request
+from fastapi import Form, APIRouter, HTTPException, UploadFile, File, Request, Header
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 import logging
 import smtplib
 from email.mime.text import MIMEText
@@ -56,7 +58,9 @@ from utils.bas_config import (
     BAS_TRAT_IMPOSITIVO_PROV_RI,
     BAS_PREFIJO_TALONARIO_MA,
     BAS_PREFIJO_TALONARIO_OP,
+    METODO_PAGO_ARRAY_BAS,
 )
+import google.auth.transport.requests as google_auth_requests
 
 load_dotenv()
 
@@ -2481,4 +2485,262 @@ async def retry_orden_pago(process_id: str):
         "orden_pago": resultado["orden_pago"],
         "error": resultado["error"],
         "bas_processing_status": actualizado or status,
+    }
+
+
+def _verificar_secreto_invoicy(x_invoicy_secret: Optional[str]) -> None:
+    """Mismo SECRET_KEY que ya protege /process-invoice, pero vía header en
+    vez de Form: estos dos endpoints son JSON/streaming, no multipart
+    upload. Pensados para ser llamados EXCLUSIVAMENTE server-side desde el
+    dashboard Next.js (que ya valida la sesión de "users" antes de reenviar
+    acá) -- nunca directo desde el navegador, a diferencia de /retry-op."""
+    if not x_invoicy_secret or x_invoicy_secret != os.getenv("SECRET_KEY"):
+        raise HTTPException(status_code=401, detail="Invalid secret key")
+
+
+def _drive_credentials():
+    """Mismas credenciales/scope que InvoiceOrchestrator.subir_archivo_a_drive
+    -- drive.file alcanza para leer de vuelta un archivo que este mismo
+    service account subió (el scope es "por-archivo creado/abierto por la
+    app", no hace falta escalar a drive.readonly)."""
+    client_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+    private_key = (os.getenv("GOOGLE_PRIVATE_KEY") or "").replace("\\n", "\n")
+    if not client_email or not private_key:
+        return None
+    return service_account.Credentials.from_service_account_info(
+        {
+            "type": "service_account",
+            "client_email": client_email,
+            "private_key": private_key,
+            "token_uri": "https://accounts.google.com/o/oauth2/token",
+        },
+        scopes=["https://www.googleapis.com/auth/drive.file"],
+    )
+
+
+@router.get(
+    "/invoices/{process_id}/file",
+    summary="Proxy del archivo original de una factura (Google Drive)",
+    tags=["Procesamiento de facturas"],
+)
+async def obtener_archivo_factura(
+    process_id: str,
+    x_invoicy_secret: Optional[str] = Header(default=None, alias="X-Invoicy-Secret"),
+):
+    """Streamea el archivo original (imagen/PDF) de una factura desde Drive,
+    para el panel de revisión del dashboard. El archivo se sube con scope
+    drive.file y sin permissions().create() (verificado: es privado al
+    service account) -- por eso hace falta este proxy en vez de un iframe
+    directo a drive.google.com."""
+    _verificar_secreto_invoicy(x_invoicy_secret)
+
+    invoice = orchestrator._pb_client.get_invoice_by_process_id(process_id)
+    if invoice is None or not invoice.get("drive_file_id"):
+        raise HTTPException(status_code=404, detail=f"No hay archivo para process_id={process_id}.")
+
+    credentials = _drive_credentials()
+    if credentials is None:
+        raise HTTPException(status_code=500, detail="Faltan credenciales de Google Drive en el servidor.")
+    credentials.refresh(google_auth_requests.Request())
+
+    upstream = requests.get(
+        f"https://www.googleapis.com/drive/v3/files/{invoice['drive_file_id']}",
+        params={"alt": "media", "supportsAllDrives": "true"},
+        headers={"Authorization": f"Bearer {credentials.token}"},
+        stream=True,
+        timeout=30,
+    )
+    if upstream.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Drive respondió {upstream.status_code} para {invoice['drive_file_id']}.",
+        )
+
+    return StreamingResponse(
+        upstream.iter_content(chunk_size=65536),
+        media_type=upstream.headers.get("Content-Type", "application/octet-stream"),
+        headers={"Content-Disposition": "inline"},
+    )
+
+
+class CrearOrdenPagoBody(BaseModel):
+    metodo_pago: str
+    monto: Optional[float] = None
+    requested_by: str  # id de PocketBase (colección "users"), lo resuelve el dashboard Next.js
+
+
+@router.post(
+    "/payment-orders/{process_id}/create",
+    summary="Crear la Orden de Pago real en BAS para una factura confirmada",
+    tags=["Procesamiento de facturas"],
+)
+async def crear_orden_pago(
+    process_id: str,
+    body: CrearOrdenPagoBody,
+    x_invoicy_secret: Optional[str] = Header(default=None, alias="X-Invoicy-Secret"),
+):
+    """
+    ÚNICO lugar del sistema donde `dry_run` finalmente pasa a False. Exige
+    invoices.review_status == "confirmed" -- se revalida server-side, no se
+    confía en que el caller ya lo haya chequeado (pb_hooks/invoices.pb.js
+    protege el dato, pero la decisión de negocio de "esto ya se puede pagar"
+    se revalida acá también).
+
+    NO reusa bas_processing_status.comprobante_registrado a ciegas: ese flag
+    puede venir de un intento dry_run=True de la ingesta automática (que
+    nunca escribió nada real en BAS -- procesar_factura_en_bas nunca pasa
+    dry_run explícito, así que corre siempre con el default True). Se arma
+    el comprobante_compra_payload completo igual que procesar_factura_en_bas
+    y se deja que crear_orden_de_pago_desde_factura haga su propio chequeo
+    real (GET) antes de decidir si hace falta registrar.
+
+    Lee invoice_items DE POCKETBASE (no de la extracción original) para que
+    correcciones hechas durante la revisión humana se reflejen en el pago.
+
+    Sincrónico de punta a punta (mismo patrón que retry_orden_pago): escribe
+    un row "processing" en payment_orders ANTES de llamar a BAS -- sobrevive
+    a un crash/timeout de este proceso -- y lo actualiza a success/failed al
+    terminar.
+    """
+    _verificar_secreto_invoicy(x_invoicy_secret)
+
+    if body.metodo_pago not in METODO_PAGO_ARRAY_BAS:
+        raise HTTPException(status_code=422, detail=f"metodo_pago inválido: {body.metodo_pago}")
+
+    invoice = orchestrator._pb_client.get_invoice_by_process_id(process_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail=f"No se encontró la factura para process_id={process_id}.")
+    if invoice.get("review_status") != "confirmed":
+        raise HTTPException(status_code=409, detail="La factura todavía no fue confirmada.")
+
+    status_bas = orchestrator._pb_client.get_bas_processing_status(process_id) or {}
+    proveedor_codigo = status_bas.get("proveedor_codigo")
+    if not proveedor_codigo:
+        raise HTTPException(status_code=422, detail="Falta proveedor_codigo (bas_processing_status).")
+
+    metodo_bas = orchestrator._pb_client.get_payment_method(body.metodo_pago)
+    if metodo_bas is None or not metodo_bas.get("bas_medio_pago_codigo"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"No hay código BAS configurado para '{body.metodo_pago}' (bas_payment_methods).",
+        )
+
+    monto = body.monto if body.monto is not None else invoice.get("total")
+
+    item_pago = {
+        "MedioPago": metodo_bas["bas_medio_pago_codigo"],
+        "Importe": monto,
+        "IngresooEgreso": "E",
+    }
+    if body.metodo_pago == "transferencia":
+        if not metodo_bas.get("bas_cuenta_bancaria"):
+            raise HTTPException(status_code=422, detail="Falta bas_cuenta_bancaria para transferencia.")
+        item_pago["CuentaBancaria"] = metodo_bas["bas_cuenta_bancaria"]
+    pagos = {METODO_PAGO_ARRAY_BAS[body.metodo_pago]: [item_pago]}
+
+    # Mismo armado de Items/comprobante_compra_payload que
+    # InvoiceOrchestrator.procesar_factura_en_bas, pero leyendo invoice_items
+    # DE POCKETBASE en vez de la extracción original de Gemini.
+    items = orchestrator._pb_client.get_invoice_items(invoice["id"])
+    items_bas = [
+        {
+            "CodigoItem": it.get("bas_codigo_item"),
+            "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
+            "NumeroUnidadMedida": "1",
+            "CantidadPrimeraUnidad": it.get("cantidad", 1),
+            "PrecioUnitario": it.get("precio_unitario", 0),
+            "ImporteGravado": it.get("precio_total", 0),
+            "ImporteTotal": it.get("precio_total", 0),
+            "TasaIva": 21,
+            "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
+            "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
+        }
+        for it in items
+    ]
+    prefijo_externo = status_bas.get("comprobante_prefijo")
+    numero_externo = status_bas.get("comprobante_numero")
+    comprobante_compra_payload = {
+        "Comprobante": "MA",
+        "Prefijo": BAS_PREFIJO_TALONARIO_MA,
+        "Fecha": invoice.get("fecha_emision"),
+        "Total": invoice.get("total"),
+        "TotalGravado": invoice.get("total"),
+        "EmitidoPor": BAS_EMITIDO_POR_CAE,
+        "Empresa": BAS_EMPRESA,
+        "Sucursal": BAS_SUCURSAL,
+        "Deposito": BAS_DEPOSITO,
+        "Caja": BAS_CAJA,
+        "MetodoPago": BAS_METODO_PAGO_CTA_CTE,
+        "Proveedor": proveedor_codigo,
+        "PrefijoComprobanteExterno": prefijo_externo,
+        "NumeroComprobanteExterno": numero_externo,
+        "FechaComprobanteExterno": invoice.get("fecha_emision"),
+        "NumeroCAIoCAE": invoice.get("cae"),
+        "VencimientoCAIoCAE": invoice.get("cae_vencimiento"),
+        "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": invoice.get("total")}],
+        "Items": items_bas,
+    }
+
+    existente = orchestrator._pb_client.get_payment_order(process_id)
+    retry_count = 0 if existente is None else (existente.get("retry_count") or 0) + 1
+    ahora = datetime.datetime.utcnow().isoformat() + "Z"
+
+    orchestrator._pb_client.upsert_payment_order(
+        process_id,
+        invoice=invoice["id"],
+        metodo_pago=body.metodo_pago,
+        monto=monto,
+        status="processing",
+        retry_count=retry_count,
+        requested_by=body.requested_by,
+        requested_at=ahora,
+        last_attempt_at=ahora,
+    )
+
+    resultado = {"orden_pago": None, "error": None}
+    try:
+        flujo = orchestrator._bas_client.crear_orden_de_pago_desde_factura(
+            empresa=BAS_EMPRESA,
+            sucursal=BAS_SUCURSAL,
+            comprobante_factura="MA",
+            prefijo_externo=prefijo_externo,
+            numero_externo=numero_externo,
+            importe=monto,
+            fecha_externo=invoice.get("fecha_emision"),
+            prefijo_op=BAS_PREFIJO_TALONARIO_OP,
+            caja_op=BAS_CAJA,
+            prefijo_ctacte="P",
+            codigo_ctacte=proveedor_codigo,
+            pagos=pagos,
+            comprobante_compra_payload=comprobante_compra_payload,
+            registrar_si_no_existe=True,
+            dry_run=False,
+        )
+        resultado["orden_pago"] = flujo.get("orden_pago")
+        if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
+            resultado["error"] = f"Orden de pago falló: {resultado['orden_pago'].get('detail')}"
+    except BasApiError as e:
+        resultado["error"] = f"BasApiError {e.status_code} en {e.path}: {e.detail}"
+        app_logger.error(f"[{process_id}] crear-orden-pago: fallo BAS: {resultado['error']}")
+    except Exception as e:
+        resultado["error"] = str(e)
+        app_logger.error(f"[{process_id}] crear-orden-pago: error inesperado: {e}")
+
+    op = resultado["orden_pago"] if isinstance(resultado["orden_pago"], dict) else {}
+    op_cmp = (op.get("Comprobantes") or [{}])[0] if op.get("Comprobantes") else {}
+    actualizado = orchestrator._pb_client.upsert_payment_order(
+        process_id,
+        status="failed" if resultado["error"] else "success",
+        bas_op_prefijo=op_cmp.get("Prefijo"),
+        bas_op_numero=op_cmp.get("Numero"),
+        bas_error=resultado["error"],
+        last_attempt_at=datetime.datetime.utcnow().isoformat() + "Z",
+    )
+
+    return {
+        "success": resultado["error"] is None,
+        "process_id": process_id,
+        "orden_pago": resultado["orden_pago"],
+        "error": resultado["error"],
+        "payment_order": actualizado,
     }
