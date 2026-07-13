@@ -6,9 +6,11 @@ import StatusBadge from "@/components/StatusBadge";
 import ReopenButton from "./ReopenButton";
 import InvoiceFileViewer from "./InvoiceFileViewer";
 import InvoiceReviewForm from "./InvoiceReviewForm";
+import PaymentOrderPanel from "./PaymentOrderPanel";
 import {
   Collections,
   type BasCategoryMapRecord,
+  type BasPaymentMethodsRecord,
   type InvoiceItemsRecord,
   type InvoiceWithItemsExpand,
 } from "@/lib/pocketbase-types";
@@ -29,7 +31,8 @@ export default async function InvoiceDetailPage({
     invoice = await pb
       .collection<InvoiceWithItemsExpand>(Collections.Invoices)
       .getOne(id, {
-        expand: "invoice_items_via_invoice,bas_processing_status_via_invoice,confirmed_by",
+        expand:
+          "invoice_items_via_invoice,bas_processing_status_via_invoice,confirmed_by,payment_orders_via_invoice",
       });
   } catch (error) {
     if (error instanceof ClientResponseError && error.status === 404) {
@@ -89,6 +92,9 @@ export default async function InvoiceDetailPage({
 
   const driveUrl = driveFileUrl(invoice.drive_file_id);
   const confirmedByEmail = invoice.expand?.confirmed_by?.email;
+  const paymentMethods = await pb
+    .collection<BasPaymentMethodsRecord>(Collections.BasPaymentMethods)
+    .getFullList({ sort: "metodo_pago" });
 
   return (
     <div className="space-y-6">
@@ -195,6 +201,13 @@ export default async function InvoiceDetailPage({
         <h2 className="mb-3 text-sm font-semibold text-gray-900">Ítems</h2>
         <ItemsTable items={items} moneda={invoice.moneda} />
       </section>
+
+      <PaymentOrderPanel
+        processId={invoice.process_id}
+        invoiceTotal={invoice.total}
+        paymentMethods={paymentMethods}
+        existingOrder={invoice.expand?.payment_orders_via_invoice ?? null}
+      />
     </div>
   );
 }

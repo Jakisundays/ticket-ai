@@ -29,6 +29,12 @@ export default async function DashboardLayout({
             <Link href="/category-map" className="hover:text-gray-900">
               Categorías BAS
             </Link>
+            <Link href="/payment-methods" className="hover:text-gray-900">
+              Métodos de pago
+            </Link>
+            <Link href="/payment-orders" className="hover:text-gray-900">
+              Órdenes de pago
+            </Link>
           </nav>
           <div className="flex items-center gap-3 text-sm text-gray-500">
             {email && <span className="hidden sm:inline">{email}</span>}
