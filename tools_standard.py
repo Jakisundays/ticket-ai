@@ -1,3 +1,5 @@
+from utils.bas_config import CATEGORIAS_ITEM_BAS
+
 tools = [
     {
         "prompt": (
@@ -195,6 +197,11 @@ tools = [
                                         "type": "string",
                                         "description": "Descripción del producto o servicio facturado.",
                                     },
+                                    "categoria": {
+                                        "type": "string",
+                                        "enum": CATEGORIAS_ITEM_BAS,
+                                        "description": "Categoría de gasto para imputar contablemente este ítem. Elegí la que mejor describa el producto o servicio; si ninguna aplica claramente, usá 'Gastos Generales'.",
+                                    },
                                     "cantidad": {
                                         "type": "number",
                                         "description": "Cantidad facturada.",
@@ -210,6 +217,7 @@ tools = [
                                 },
                                 "required": [
                                     "descripcion",
+                                    "categoria",
                                     "cantidad",
                                     "precio_unitario",
                                     "precio_total",

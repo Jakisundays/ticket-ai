@@ -39,6 +39,24 @@ from googleapiclient.http import MediaFileUpload
 # Local imports
 from tools import tools
 from tools_standard import tools as tools_standard
+from utils.bas import BasClient, BasApiError
+from utils.pocketbase_client import PocketBaseClient
+from utils.rate_limit import limiter
+from utils.bas_config import (
+    codigo_item_de_categoria,
+    BAS_EMPRESA,
+    BAS_SUCURSAL,
+    BAS_DEPOSITO,
+    BAS_CAJA,
+    BAS_METODO_PAGO_CTA_CTE,
+    BAS_TIPO_ENTREGA_SIN_STOCK,
+    BAS_CENTRO_APROPIACION_SD,
+    BAS_EMITIDO_POR_CAE,
+    BAS_TRAT_IMPOSITIVO_RI,
+    BAS_TRAT_IMPOSITIVO_PROV_RI,
+    BAS_PREFIJO_TALONARIO_MA,
+    BAS_PREFIJO_TALONARIO_OP,
+)
 
 load_dotenv()
 
@@ -77,6 +95,22 @@ DISCOUNT_KEYWORDS = (
     "promocion",
     "promo",
 )
+
+
+def _extraer_prefijo_numero_comprobante_externo(comprobante: dict):
+    """
+    Extrae (prefijo_externo, numero_externo) del número de comprobante con
+    formato "PPPPP-NNNNNNNN", tal como lo espera BAS (PrefijoComprobanteExterno /
+    NumeroComprobanteExterno). Misma lógica de parseo que usa internamente
+    InvoiceOrchestrator.procesar_factura_en_bas() -- duplicada acá (en vez de
+    leerla de ahí) para no tener que tocar la firma/retorno de ese método
+    existente. Usada tanto para persistir en PocketBase como por el endpoint
+    de reintento de orden de pago.
+    """
+    numero_completo = ((comprobante or {}).get("numero") or "").replace(" ", "")
+    prefijo_externo, _, numero_externo_str = numero_completo.partition("-")
+    numero_externo = int(numero_externo_str) if numero_externo_str.isdigit() else 0
+    return prefijo_externo, numero_externo
 
 
 def _normalizar_texto(texto: str) -> str:
@@ -188,6 +222,9 @@ class InvoiceOrchestrator:
         self.active_comparisons = {}
         self.processed_jobs = set()  # Para idempotencia
         self._ensured_item_tabs = set()  # Cache de pestañas de ítems ya verificadas
+        self._bas_client = BasClient()
+        self._proveedores_bas_cache = {}  # Cache de proveedores BAS ya verificados/creados (key: CUIT normalizado)
+        self._pb_client = PocketBaseClient()  # Persistencia (facturas/items/jobs/estado BAS); ver utils/pocketbase_client.py
         self.job_queue = asyncio.Queue()  # Cola para jobs
         asyncio.create_task(self.worker())
 
@@ -213,6 +250,25 @@ class InvoiceOrchestrator:
                 app_logger.info(f"Job {process_id} ya procesado, skipping")
                 self.job_queue.task_done()
                 continue
+
+            # Respaldo de idempotencia que sobrevive un restart (self.processed_jobs
+            # es en memoria y se pierde). Fail open: si PocketBase no responde, no
+            # bloqueamos el procesamiento -- solo logueamos y seguimos con el
+            # chequeo en memoria de arriba.
+            try:
+                job_previo = self._pb_client.get_processing_job(process_id)
+                if job_previo is not None and job_previo.get("status") == "done":
+                    app_logger.info(
+                        f"Job {process_id} ya marcado 'done' en PocketBase (restart), skipping"
+                    )
+                    self.processed_jobs.add(process_id)
+                    self.job_queue.task_done()
+                    continue
+            except Exception as e:
+                app_logger.warning(
+                    f"PocketBase: error chequeando idempotencia de {process_id}: {e}"
+                )
+
             self.processed_jobs.add(process_id)
 
             items_to_process = job["items_to_process"]
@@ -220,6 +276,24 @@ class InvoiceOrchestrator:
             app_logger.info(
                 f"Iniciando procesamiento del job {process_id} - {total_items} archivos en cola"
             )
+
+            # Best-effort: registra el arranque del job. Aislado -- un fallo acá
+            # no debe impedir el procesamiento.
+            try:
+                # total_items no es un campo del schema de processing_jobs (ver
+                # contrato) -- se omite para no mandar un campo que PocketBase
+                # ignora silenciosamente. from_email/subject/file_name sí lo son
+                # y ya están disponibles acá -- se envían para no perder
+                # trazabilidad de origen del job.
+                self._pb_client.update_processing_job(
+                    process_id,
+                    status="processing",
+                    from_email=from_email,
+                    subject=subject,
+                    file_name=file_name,
+                )
+            except Exception as e:
+                app_logger.warning(f"PocketBase: error creando/actualizando processing_job {process_id}: {e}")
 
             try:
                 self.active_comparisons[process_id] = job
@@ -289,6 +363,122 @@ class InvoiceOrchestrator:
                             f"[{process_id}] Ítems guardados en sheets: {saved_items}"
                         )
 
+                        # Persistencia en PocketBase (invoice + items). Aislado a
+                        # propósito, mismo criterio que guardar_items_en_sheets: un
+                        # fallo acá NO debe afectar Sheets/BAS/Drive/email.
+                        #
+                        # Nombres de campo alineados EXACTO con el schema real de
+                        # ticket-ai-infra/pocketbase/pb_migrations/ (no improvisar
+                        # nombres nuevos -- "status" es requerido y "invoice" en
+                        # invoice_items/bas_processing_status es una relation
+                        # requerida al id del record de "invoices", no al process_id).
+                        _pb_invoice_record = None
+                        try:
+                            _er = factura["data"].get("emisor_receptor", {})
+                            _cmp = _er.get("comprobante", {})
+                            _emisor = _er.get("emisor", {})
+                            _receptor = _er.get("receptor", {})
+                            _otros = _er.get("otros", {})
+                            _items_info = factura["data"].get("items", {})
+                            _detalles = _items_info.get("detalles", []) or []
+
+                            _pb_invoice_record = self._pb_client.upsert_invoice(
+                                {
+                                    "process_id": process_id,
+                                    "numero_comprobante": _cmp.get("numero"),
+                                    "fecha_emision": _cmp.get("fecha_emision"),
+                                    "tipo_comprobante": _cmp.get("tipo"),
+                                    "subtipo_comprobante": _cmp.get("subtipo"),
+                                    "moneda": _cmp.get("moneda"),
+                                    "emisor_nombre": _emisor.get("nombre"),
+                                    "emisor_cuit": _emisor.get("id_fiscal"),
+                                    "receptor_nombre": _receptor.get("nombre"),
+                                    "receptor_cuit": _receptor.get("id_fiscal"),
+                                    "subtotal": _items_info.get("subtotal"),
+                                    "total": _items_info.get("total"),
+                                    "cae": _otros.get("CAE"),
+                                    "cae_vencimiento": _otros.get("vencimiento_CAE"),
+                                    "forma_pago": _otros.get("forma_pago"),
+                                    "sheets_saved": bool(saved),
+                                    "status": "processing",
+                                }
+                            )
+                            if _pb_invoice_record and _pb_invoice_record.get("id"):
+                                self._pb_client.bulk_create_invoice_items(
+                                    _pb_invoice_record["id"],
+                                    [
+                                        {
+                                            "process_id": process_id,
+                                            "linea": idx,
+                                            "descripcion": d.get("descripcion"),
+                                            "cantidad": d.get("cantidad"),
+                                            "precio_unitario": d.get("precio_unitario"),
+                                            "precio_total": d.get("precio_total"),
+                                            "categoria": d.get("categoria"),
+                                            "bas_codigo_item": codigo_item_de_categoria(
+                                                d.get("categoria", "")
+                                            ),
+                                        }
+                                        for idx, d in enumerate(_detalles, 1)
+                                    ],
+                                )
+                            else:
+                                app_logger.warning(
+                                    f"[{process_id}] PocketBase: upsert_invoice no devolvió "
+                                    "un record válido, se omiten los ítems y el estado BAS."
+                                )
+                        except Exception as e:
+                            app_logger.warning(
+                                f"[{process_id}] PocketBase: error persistiendo invoice/items: {e}"
+                            )
+
+                        # Integración con BAS (ERP): registra la factura de compra y
+                        # best-effort intenta la orden de pago. Aislado a propósito:
+                        # un fallo acá (incluido el bloqueador conocido de OrdenesPago)
+                        # NO debe impedir que se suba a Drive ni se mande el email.
+                        resultado_bas = self.procesar_factura_en_bas(
+                            factura["data"], process_id
+                        )
+                        app_logger.info(
+                            f"[{process_id}] Resultado integración BAS: {resultado_bas}"
+                        )
+
+                        # Persistencia en PocketBase del resultado de BAS. Aislado,
+                        # mismo criterio que el resto de las llamadas a PocketBase.
+                        # Requiere el id del record de "invoices" (relation
+                        # requerida) -- si el paso anterior no lo consiguió, no hay
+                        # forma de crear este record (PocketBase lo rechazaría de
+                        # todos modos), así que se omite entero.
+                        try:
+                            if _pb_invoice_record and _pb_invoice_record.get("id"):
+                                _cmp_bas = factura["data"].get("emisor_receptor", {}).get("comprobante", {})
+                                _prefijo_ext, _numero_ext = _extraer_prefijo_numero_comprobante_externo(_cmp_bas)
+                                _proveedor_info = resultado_bas.get("proveedor") or {}
+                                _orden_pago_info = resultado_bas.get("orden_pago")
+                                if _orden_pago_info is None:
+                                    # Schema solo acepta pending/success/failed -- "no
+                                    # intentado todavía" mapea a "pending".
+                                    _orden_pago_status = "pending"
+                                elif isinstance(_orden_pago_info, dict) and _orden_pago_info.get("_error"):
+                                    _orden_pago_status = "failed"
+                                else:
+                                    _orden_pago_status = "success"
+                                self._pb_client.upsert_bas_processing_status(
+                                    process_id,
+                                    invoice=_pb_invoice_record["id"],
+                                    proveedor_resuelto=bool(resultado_bas.get("proveedor")),
+                                    proveedor_codigo=_proveedor_info.get("codigo"),
+                                    comprobante_prefijo=_prefijo_ext,
+                                    comprobante_numero=_numero_ext,
+                                    comprobante_registrado=bool(resultado_bas.get("comprobante")),
+                                    orden_pago_status=_orden_pago_status,
+                                    orden_pago_error=resultado_bas.get("error"),
+                                )
+                        except Exception as e:
+                            app_logger.warning(
+                                f"[{process_id}] PocketBase: error persistiendo bas_processing_status: {e}"
+                            )
+
                         # Subir archivo a Google Drive
                         app_logger.info(f"[{process_id}] Iniciando subida a Google Drive para el archivo: {file_name}")
                         drive_file_id = self.subir_archivo_a_drive(
@@ -302,6 +492,23 @@ class InvoiceOrchestrator:
                         else:
                             app_logger.error(f"[{process_id}] ❌ Falló la subida del archivo a Google Drive.")
 
+                        # Cierra el ciclo de vida del record en PocketBase: recién acá
+                        # se conoce drive_file_id, así que el upsert inicial (arriba)
+                        # no podía incluirlo. Mismo aislamiento try/except de siempre.
+                        try:
+                            if _pb_invoice_record and _pb_invoice_record.get("id"):
+                                self._pb_client.upsert_invoice(
+                                    {
+                                        "process_id": process_id,
+                                        "drive_file_id": drive_file_id,
+                                        "status": "completed",
+                                    }
+                                )
+                        except Exception as e:
+                            app_logger.warning(
+                                f"[{process_id}] PocketBase: error actualizando drive_file_id/status: {e}"
+                            )
+
                         html_body = self.generar_html_factura(factura["data"])
 
                         self.enviar_email(from_email, subject_for_file, html_body)
@@ -312,6 +519,7 @@ class InvoiceOrchestrator:
                             "factura": factura,
                             "saved": saved,
                             "saved_items": saved_items,
+                            "bas": resultado_bas,
                             "drive_file_id": drive_file_id,
                             "status": "procesada",
                             "success": True,
@@ -350,8 +558,36 @@ class InvoiceOrchestrator:
                     f"[{process_id}] 🎉 Job completado - {processed_count}/{total_items} archivos procesados exitosamente"
                 )
 
+                try:
+                    # processed_count no es un campo del schema de processing_jobs
+                    # (ver contrato) -- se omite, mismo criterio que arriba.
+                    self._pb_client.update_processing_job(
+                        process_id,
+                        status="done",
+                        from_email=from_email,
+                        subject=subject,
+                        file_name=file_name,
+                    )
+                except Exception as e:
+                    app_logger.warning(
+                        f"[{process_id}] PocketBase: error marcando processing_job done: {e}"
+                    )
+
             except Exception as e:
                 app_logger.error(f"[{process_id}] ❌ Error crítico en job: {e}")
+                try:
+                    self._pb_client.update_processing_job(
+                        process_id,
+                        status="error",
+                        error_message=str(e),
+                        from_email=from_email,
+                        subject=subject,
+                        file_name=file_name,
+                    )
+                except Exception as pb_e:
+                    app_logger.warning(
+                        f"[{process_id}] PocketBase: error marcando processing_job error: {pb_e}"
+                    )
             finally:
                 if process_id in self.active_comparisons:
                     del self.active_comparisons[process_id]
@@ -1058,6 +1294,174 @@ class InvoiceOrchestrator:
                 app_logger.error(f"Filas de ítems que fallaron: {filas}")
             return False
 
+    # === Integración con BAS (ERP) ===
+
+    def _obtener_o_verificar_proveedor_bas(self, cuit: str, razon_social: str):
+        """
+        Envuelve BasClient.verificar_o_dar_de_alta_proveedor() con una cache en
+        memoria del orquestador (self._proveedores_bas_cache), key = CUIT
+        normalizado. Devuelve None si el CUIT viene vacío (no se puede resolver
+        proveedor sin CUIT) para que el caller decida cómo abortar.
+        """
+        cuit_normalizado = "".join(c for c in (cuit or "") if c.isdigit())
+        if not cuit_normalizado:
+            return None
+        if cuit_normalizado in self._proveedores_bas_cache:
+            return self._proveedores_bas_cache[cuit_normalizado]
+
+        # Cache persistente de 2do nivel (sobrevive un restart). Aislado: si
+        # PocketBase falla/no está configurado, no debe impedir resolver el
+        # proveedor contra BAS -- solo se pierde el ahorro de la consulta.
+        try:
+            proveedor_cacheado = self._pb_client.get_provider_cache(cuit_normalizado)
+        except Exception as e:
+            proveedor_cacheado = None
+            app_logger.warning(f"PocketBase: error consultando get_provider_cache({cuit_normalizado}): {e}")
+        if proveedor_cacheado is not None:
+            self._proveedores_bas_cache[cuit_normalizado] = proveedor_cacheado
+            return proveedor_cacheado
+
+        proveedor = self._bas_client.verificar_o_dar_de_alta_proveedor(
+            cuit=cuit_normalizado,
+            razon_social=razon_social,
+            empresa_alta=BAS_EMPRESA,
+            trat_impositivo=BAS_TRAT_IMPOSITIVO_RI,
+            trat_impositivo_prov=BAS_TRAT_IMPOSITIVO_PROV_RI,
+        )
+        self._proveedores_bas_cache[cuit_normalizado] = proveedor
+        try:
+            if proveedor is not None:
+                self._pb_client.set_provider_cache(cuit_normalizado, proveedor)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en set_provider_cache({cuit_normalizado}): {e}")
+        return proveedor
+
+    def procesar_factura_en_bas(self, factura_data: dict, process_id: str, dry_run: bool = True):
+        """
+        Orquesta el registro de la factura y (best-effort) la orden de pago en BAS.
+
+        Aislado a propósito, igual que guardar_items_en_sheets: cualquier fallo
+        (incluido el bloqueador conocido de OrdenesPago, ver
+        docs/bas-orden-de-pago-research.md) se loguea y se devuelve en el
+        resultado, pero NUNCA relanza -- no debe romper Sheets/Drive/email.
+
+        `dry_run=True` (default) arma los payloads y consulta BAS pero NO
+        escribe. Pasar dry_run=False solo tras validar en la verificación
+        end-to-end -- ver plan de integración.
+        """
+        resultado = {"proveedor": None, "comprobante": None, "orden_pago": None, "error": None}
+        try:
+            emisor_receptor = factura_data.get("emisor_receptor", {})
+            emisor = emisor_receptor.get("emisor", {})
+            comprobante = emisor_receptor.get("comprobante", {})
+            otros = emisor_receptor.get("otros", {})
+            items_info = factura_data.get("items", {})
+            detalles = items_info.get("detalles", []) or []
+            total = items_info.get("total")
+
+            cuit_emisor = emisor.get("id_fiscal", "")
+            if not cuit_emisor:
+                resultado["error"] = "Sin CUIT de emisor; no se puede resolver proveedor en BAS."
+                app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
+                return resultado
+
+            proveedor = self._obtener_o_verificar_proveedor_bas(cuit_emisor, emisor.get("nombre", ""))
+            if proveedor is None:
+                resultado["error"] = f"No se pudo resolver/crear proveedor para CUIT {cuit_emisor}."
+                app_logger.error(f"[{process_id}] BAS: {resultado['error']}")
+                return resultado
+            resultado["proveedor"] = {"codigo": proveedor.get("Codigo"), "nuevo": proveedor.get("_nuevo")}
+
+            items_bas = [
+                {
+                    "CodigoItem": codigo_item_de_categoria(item.get("categoria", "")),
+                    "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
+                    "NumeroUnidadMedida": "1",
+                    "CantidadPrimeraUnidad": item.get("cantidad", 1),
+                    "PrecioUnitario": item.get("precio_unitario", 0),
+                    "ImporteGravado": item.get("precio_total", 0),
+                    "ImporteTotal": item.get("precio_total", 0),
+                    "TasaIva": 21,
+                    "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
+                    "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
+                }
+                for item in detalles
+            ]
+
+            # Número de comprobante externo: "PPPPP-NNNNNNNN" -> prefijo/numero.
+            numero_completo = (comprobante.get("numero") or "").replace(" ", "")
+            prefijo_externo, _, numero_externo_str = numero_completo.partition("-")
+            numero_externo = int(numero_externo_str) if numero_externo_str.isdigit() else 0
+
+            comprobante_compra_payload = {
+                "Comprobante": "MA",
+                "Prefijo": BAS_PREFIJO_TALONARIO_MA,
+                "Fecha": comprobante.get("fecha_emision"),
+                "Total": total,
+                "TotalGravado": total,
+                "EmitidoPor": BAS_EMITIDO_POR_CAE,
+                "Empresa": BAS_EMPRESA,
+                "Sucursal": BAS_SUCURSAL,
+                "Deposito": BAS_DEPOSITO,
+                "Caja": BAS_CAJA,
+                "MetodoPago": BAS_METODO_PAGO_CTA_CTE,
+                "Proveedor": proveedor.get("Codigo"),
+                "PrefijoComprobanteExterno": prefijo_externo,
+                "NumeroComprobanteExterno": numero_externo,
+                "FechaComprobanteExterno": comprobante.get("fecha_emision"),
+                "NumeroCAIoCAE": otros.get("CAE"),
+                "VencimientoCAIoCAE": otros.get("vencimiento_CAE"),
+                "Vencimientos": [{"FechaVencimiento": comprobante.get("fecha_emision"), "Importe": total}],
+                "Items": items_bas,
+            }
+
+            flujo = self._bas_client.crear_orden_de_pago_desde_factura(
+                empresa=BAS_EMPRESA,
+                sucursal=BAS_SUCURSAL,
+                comprobante_factura="MA",
+                prefijo_externo=prefijo_externo,
+                numero_externo=numero_externo,
+                importe=total,
+                fecha_externo=comprobante.get("fecha_emision"),
+                prefijo_op=BAS_PREFIJO_TALONARIO_OP,
+                caja_op=BAS_CAJA,
+                prefijo_ctacte="P",
+                codigo_ctacte=proveedor.get("Codigo"),
+                # Medio de pago "1" (efectivo): candidato identificado en la
+                # investigación previa (pasó la validación de existencia contra
+                # BAS a diferencia de otros códigos probados). No hay endpoint
+                # que exponga el catálogo real -- ver docs/bas-orden-de-pago-research.md.
+                pagos={"Efectivos": [{"MedioPago": "1", "Importe": total, "IngresooEgreso": "E"}]},
+                comprobante_compra_payload=comprobante_compra_payload,
+                dry_run=dry_run,
+            )
+            resultado["comprobante"] = flujo.get("factura")
+            resultado["orden_pago"] = flujo.get("orden_pago")
+            if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
+                # Bloqueador conocido y documentado (docs/bas-orden-de-pago-research.md):
+                # OrdenesPago hoy responde "el comprobante no existe para aplicarlo".
+                # La factura SÍ quedó registrada (resultado["comprobante"] poblado);
+                # se loguea como advertencia esperada, no como error crítico.
+                resultado["error"] = f"Orden de pago falló: {resultado['orden_pago']['detail']}"
+                app_logger.warning(
+                    f"[{process_id}] BAS: factura registrada OK; OP falló (esperado hasta que BAS lo resuelva): {resultado['error']}"
+                )
+            else:
+                app_logger.info(f"[{process_id}] BAS: factura registrada; orden de pago creada.")
+
+        except BasApiError as e:
+            # El fallo esperado de OrdenesPago ya se maneja arriba (queda contenido
+            # dentro de crear_orden_de_pago_desde_factura). Si llegamos acá, falló
+            # algo ANTES de eso -- típicamente el registro de la propia factura
+            # (ComprobantesCompra) o la consulta previa -- y sí es un error real.
+            resultado["error"] = f"BasApiError {e.status_code} en {e.path}: {e.detail}"
+            app_logger.error(f"[{process_id}] BAS: fallo registrando la factura: {resultado['error']}")
+        except Exception as e:
+            resultado["error"] = str(e)
+            app_logger.error(f"[{process_id}] Error inesperado integrando con BAS: {e}")
+
+        return resultado
+
     # Formatea los datos de la factura para la respuesta
 
     def formatear_factura(self, factura_completa):
@@ -1268,6 +1672,155 @@ orchestrator = InvoiceOrchestrator(
 )
 
 
+async def _procesar_imagen_o_pdf(
+    file_location: str,
+    file_name: str,
+    extension: str,
+    media_type: str,
+    process_id: str,
+) -> dict:
+    """Procesa sincrónicamente una imagen o PDF de factura: extracción Gemini,
+    Sheets, integración BAS (dry_run por default) y persistencia en
+    PocketBase. Compartido por /process-invoice (protegido con secret_key) y
+    /website-upload (público, rate-limited) -- misma lógica de negocio, dos
+    puertas de entrada distintas. Borra el archivo local al terminar.
+    """
+    item = {
+        "file_name": file_name,
+        "file_extension": extension,
+        "file_path": file_location,
+        "media_type": media_type,
+        "process_id": process_id,
+    }
+
+    # Procesa según tipo
+    if media_type.startswith("image"):
+        app_logger.info("Tenemos una imagen")
+        respuestas = await orchestrator.run_image_toolchain(item)
+    else:
+        app_logger.info("Tenemos un PDF")
+        respuestas = await orchestrator.run_pdf_toolchain(item)
+
+    factura = orchestrator.formatear_factura(respuestas["data"])
+    saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
+        factura["data"]
+    )
+    saved_items = orchestrator.guardar_items_en_sheets(factura["data"], process_id)
+
+    # Integración con BAS (ERP): mismo patrón aislado que en worker().
+    resultado_bas = orchestrator.procesar_factura_en_bas(factura["data"], process_id)
+
+    # Persistencia en PocketBase (invoice + items + estado BAS). Mismo
+    # patrón y mismos nombres de campo que worker() (más abajo en esta
+    # clase) -- aislado a propósito, un fallo acá NO debe afectar
+    # Sheets/BAS ni la respuesta al llamador. Necesario para que las
+    # facturas subidas como archivo suelto (el caso real de uso -- a
+    # diferencia del branch ZIP, que encola vía job_queue/worker())
+    # también queden persistidas y visibles en el dashboard. A
+    # diferencia de worker(), este camino no sube a Drive ni manda
+    # email (ver el resto del endpoint), así que no hay drive_file_id
+    # que setear -- status se marca "completed" directo.
+    _pb_invoice_record = None
+    try:
+        _er = factura["data"].get("emisor_receptor", {})
+        _cmp = _er.get("comprobante", {})
+        _emisor = _er.get("emisor", {})
+        _receptor = _er.get("receptor", {})
+        _otros = _er.get("otros", {})
+        _items_info = factura["data"].get("items", {})
+        _detalles = _items_info.get("detalles", []) or []
+
+        _pb_invoice_record = orchestrator._pb_client.upsert_invoice(
+            {
+                "process_id": process_id,
+                "numero_comprobante": _cmp.get("numero"),
+                "fecha_emision": _cmp.get("fecha_emision"),
+                "tipo_comprobante": _cmp.get("tipo"),
+                "subtipo_comprobante": _cmp.get("subtipo"),
+                "moneda": _cmp.get("moneda"),
+                "emisor_nombre": _emisor.get("nombre"),
+                "emisor_cuit": _emisor.get("id_fiscal"),
+                "receptor_nombre": _receptor.get("nombre"),
+                "receptor_cuit": _receptor.get("id_fiscal"),
+                "subtotal": _items_info.get("subtotal"),
+                "total": _items_info.get("total"),
+                "cae": _otros.get("CAE"),
+                "cae_vencimiento": _otros.get("vencimiento_CAE"),
+                "forma_pago": _otros.get("forma_pago"),
+                "sheets_saved": bool(saved_sheet),
+                "status": "completed",
+            }
+        )
+        if _pb_invoice_record and _pb_invoice_record.get("id"):
+            orchestrator._pb_client.bulk_create_invoice_items(
+                _pb_invoice_record["id"],
+                [
+                    {
+                        "process_id": process_id,
+                        "linea": idx,
+                        "descripcion": d.get("descripcion"),
+                        "cantidad": d.get("cantidad"),
+                        "precio_unitario": d.get("precio_unitario"),
+                        "precio_total": d.get("precio_total"),
+                        "categoria": d.get("categoria"),
+                        "bas_codigo_item": codigo_item_de_categoria(
+                            d.get("categoria", "")
+                        ),
+                    }
+                    for idx, d in enumerate(_detalles, 1)
+                ],
+            )
+        else:
+            app_logger.warning(
+                f"[{process_id}] PocketBase: upsert_invoice no devolvió "
+                "un record válido, se omiten los ítems y el estado BAS."
+            )
+    except Exception as e:
+        app_logger.warning(
+            f"[{process_id}] PocketBase: error persistiendo invoice/items: {e}"
+        )
+
+    try:
+        if _pb_invoice_record and _pb_invoice_record.get("id"):
+            _cmp_bas = factura["data"].get("emisor_receptor", {}).get("comprobante", {})
+            _prefijo_ext, _numero_ext = _extraer_prefijo_numero_comprobante_externo(_cmp_bas)
+            _proveedor_info = resultado_bas.get("proveedor") or {}
+            _orden_pago_info = resultado_bas.get("orden_pago")
+            if _orden_pago_info is None:
+                # Schema solo acepta pending/success/failed -- "no
+                # intentado todavía" mapea a "pending".
+                _orden_pago_status = "pending"
+            elif isinstance(_orden_pago_info, dict) and _orden_pago_info.get("_error"):
+                _orden_pago_status = "failed"
+            else:
+                _orden_pago_status = "success"
+            orchestrator._pb_client.upsert_bas_processing_status(
+                process_id,
+                invoice=_pb_invoice_record["id"],
+                proveedor_resuelto=bool(resultado_bas.get("proveedor")),
+                proveedor_codigo=_proveedor_info.get("codigo"),
+                comprobante_prefijo=_prefijo_ext,
+                comprobante_numero=_numero_ext,
+                comprobante_registrado=bool(resultado_bas.get("comprobante")),
+                orden_pago_status=_orden_pago_status,
+                orden_pago_error=resultado_bas.get("error"),
+            )
+    except Exception as e:
+        app_logger.warning(
+            f"[{process_id}] PocketBase: error persistiendo bas_processing_status: {e}"
+        )
+
+    factura["id"] = process_id
+    factura["saved_sheet"] = bool(saved_sheet)
+    factura["saved_items"] = bool(saved_items)
+    factura["bas"] = resultado_bas
+    factura["status_code"] = 200
+
+    os.remove(file_location)
+
+    return factura
+
+
 @router.post(
     "/process-invoice",
     summary="Procesar factura - GEMINI",
@@ -1411,36 +1964,13 @@ async def process_invoice(
 
         # Procesa imagen o PDF
         if kind.mime.startswith("image") or kind.mime == "application/pdf":
-            # Prepara info del archivo
-            item = {
-                "file_name": file.filename,
-                "file_extension": extension,
-                "file_path": file_location,
-                "media_type": kind.mime,
-                "process_id": id,
-            }
-
-            # Procesa según tipo
-            if kind.mime.startswith("image"):
-                app_logger.info("Tenemos una imagen")
-                respuestas = await orchestrator.run_image_toolchain(item)
-            elif kind.mime == "application/pdf":
-                app_logger.info("Tenemos un PDF")
-                respuestas = await orchestrator.run_pdf_toolchain(item)
-
-            factura = orchestrator.formatear_factura(respuestas["data"])
-            saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
-                factura["data"]
+            return await _procesar_imagen_o_pdf(
+                file_location=file_location,
+                file_name=file.filename,
+                extension=extension,
+                media_type=kind.mime,
+                process_id=id,
             )
-            saved_items = orchestrator.guardar_items_en_sheets(factura["data"], id)
-            factura["id"] = id
-            factura["saved_sheet"] = bool(saved_sheet)
-            factura["saved_items"] = bool(saved_items)
-            factura["status_code"] = 200
-
-            os.remove(file_location)
-
-            return factura
 
         # Procesa ZIP
         elif (
@@ -1502,6 +2032,75 @@ async def process_invoice(
             "status_code": 201,
         }
 
+    except Exception as e:
+        app_logger.info(f"Error: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error interno del servidor: {str(e)}"
+        )
+
+
+@router.post(
+    "/website-upload",
+    summary="Procesar factura subida desde el formulario público del website",
+    tags=["Procesamiento de facturas"],
+    response_model=dict,
+    responses={
+        400: {"description": "Tipo de archivo no permitido."},
+        429: {"description": "Demasiadas subidas desde esta IP, reintentar más tarde."},
+        500: {"description": "Error interno del servidor."},
+    },
+)
+@limiter.limit("5/minute")
+async def website_upload(
+    request: Request,  # requerido por @limiter.limit para identificar al caller por IP
+    file: UploadFile = File(
+        ...,
+        description="Archivo de la factura a procesar. Imagen (png, jpg, jpeg, webp, gif) o PDF -- no se aceptan ZIP por este canal.",
+    ),
+):
+    """Puerta de entrada pública (sin secret_key) para el formulario de subida
+    del website -- ver Ticket AI Dashboard, página /subir-factura. Protegida
+    con rate limiting en vez del secreto compartido que usan wa-bot y el
+    webhook de email, porque el caller acá es un navegador anónimo, no un
+    backend de confianza que pueda guardar un secreto.
+    """
+    app_logger.info("Website upload")
+    try:
+        extensiones_permitidas = ["pdf", "png", "jpg", "jpeg", "webp", "gif"]
+        extension = file.filename.split(".")[-1].lower()
+        if extension not in extensiones_permitidas:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Tipo de archivo no permitido: .{extension}. Solo se aceptan: "
+                    f"{', '.join(extensiones_permitidas)}. Los ZIP no se aceptan por este canal."
+                ),
+            )
+
+        process_id = f"website-{uuid.uuid4()}"
+
+        os.makedirs("downloads", exist_ok=True)
+        file_location = f"./downloads/{file.filename.split('/')[-1]}"
+        with open(file_location, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        with open(file_location, "rb") as f:
+            kind = filetype.guess(f.read(262))
+
+        app_logger.info(f"Mime type: {kind.mime}")
+
+        if not (kind.mime.startswith("image") or kind.mime == "application/pdf"):
+            os.remove(file_location)
+            raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
+
+        return await _procesar_imagen_o_pdf(
+            file_location=file_location,
+            file_name=file.filename,
+            extension=extension,
+            media_type=kind.mime,
+            process_id=process_id,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         app_logger.info(f"Error: {e}")
         raise HTTPException(
@@ -1757,3 +2356,129 @@ async def webhook_endpoint(request: Request):
             "message": "Error interno al procesar el webhook",
             "id": process_id if "process_id" in locals() else "unknown",
         }
+
+
+@router.post(
+    "/retry-op/{process_id}",
+    summary="Reintentar la Orden de Pago en BAS para una factura ya procesada",
+    tags=["Procesamiento de facturas"],
+    response_description="Resultado del reintento de la orden de pago.",
+)
+async def retry_orden_pago(process_id: str):
+    """
+    Reintenta SOLO el paso de Orden de Pago en BAS para un `process_id` que ya
+    pasó por InvoiceOrchestrator.worker() (o por /process-invoice) y quedó con
+    la factura registrada pero la OP sin resolver.
+
+    Idempotente: si `orden_pago_status` ya es "success", NO se reintenta --
+    se devuelve 200 informando que ya estaba resuelta.
+
+    No reconstruye el payload completo de ComprobantesCompra (solo el mínimo:
+    proveedor_codigo, comprobante_prefijo/numero, total): asume que la factura
+    ya está registrada en BAS y llama a crear_orden_de_pago_desde_factura con
+    `registrar_si_no_existe=False`, así que si por algún motivo la factura NO
+    está en BAS, esto falla explícito en vez de registrar una factura
+    reconstruida a medias con datos incompletos.
+
+    `dry_run`: se usa el MISMO valor que hoy usa worker() al llamar
+    procesar_factura_en_bas() -- ese código NO pasa el argumento `dry_run`
+    explícito, por lo que corre con el default `True` de esa función (ver
+    docstring de InvoiceOrchestrator.procesar_factura_en_bas()). Replicamos
+    ese mismo default acá a propósito, para no cambiar de comportamiento
+    respecto al flujo de producción actual.
+    """
+    status = orchestrator._pb_client.get_bas_processing_status(process_id)
+    if status is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontró bas_processing_status para process_id={process_id}.",
+        )
+
+    invoice = orchestrator._pb_client.get_invoice_by_process_id(process_id)
+    if invoice is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontró la factura (invoices) relacionada a process_id={process_id}.",
+        )
+
+    if status.get("orden_pago_status") == "success":
+        return {
+            "success": True,
+            "process_id": process_id,
+            "already_resolved": True,
+            "message": "La orden de pago ya estaba resuelta (success); no se reintenta.",
+            "bas_processing_status": status,
+        }
+
+    proveedor_codigo = status.get("proveedor_codigo")
+    prefijo_externo = status.get("comprobante_prefijo")
+    numero_externo = status.get("comprobante_numero")
+    total = invoice.get("total")
+
+    faltantes = [
+        nombre
+        for nombre, valor in (
+            ("proveedor_codigo", proveedor_codigo),
+            ("comprobante_prefijo", prefijo_externo),
+            ("total", total),
+        )
+        if valor in (None, "")
+    ]
+    if faltantes:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"No se puede reintentar la orden de pago para process_id={process_id}: "
+                f"faltan datos mínimos en PocketBase: {', '.join(faltantes)}."
+            ),
+        )
+
+    resultado = {"orden_pago": None, "error": None}
+    try:
+        flujo = orchestrator._bas_client.crear_orden_de_pago_desde_factura(
+            empresa=BAS_EMPRESA,
+            sucursal=BAS_SUCURSAL,
+            comprobante_factura="MA",
+            prefijo_externo=prefijo_externo,
+            numero_externo=numero_externo,
+            importe=total,
+            fecha_externo=invoice.get("fecha_emision"),
+            prefijo_op=BAS_PREFIJO_TALONARIO_OP,
+            caja_op=BAS_CAJA,
+            prefijo_ctacte="P",
+            codigo_ctacte=proveedor_codigo,
+            pagos={"Efectivos": [{"MedioPago": "1", "Importe": total, "IngresooEgreso": "E"}]},
+            comprobante_compra_payload=None,
+            registrar_si_no_existe=False,
+            dry_run=True,
+        )
+        resultado["orden_pago"] = flujo.get("orden_pago")
+        if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
+            resultado["error"] = f"Orden de pago falló: {resultado['orden_pago'].get('detail')}"
+    except BasApiError as e:
+        resultado["error"] = f"BasApiError {e.status_code} en {e.path}: {e.detail}"
+        app_logger.error(f"[{process_id}] retry-op: fallo BAS: {resultado['error']}")
+    except Exception as e:
+        resultado["error"] = str(e)
+        app_logger.error(f"[{process_id}] retry-op: error inesperado: {e}")
+
+    # Schema de bas_processing_status.orden_pago_status solo acepta
+    # pending/success/failed (no "error").
+    nuevo_status = "failed" if resultado["error"] else "success"
+    retry_count_actual = status.get("retry_count") or 0
+    actualizado = orchestrator._pb_client.upsert_bas_processing_status(
+        process_id,
+        orden_pago_status=nuevo_status,
+        orden_pago_error=resultado["error"],
+        retry_count=retry_count_actual + 1,
+        last_attempt_at=datetime.datetime.utcnow().isoformat() + "Z",
+    )
+
+    return {
+        "success": resultado["error"] is None,
+        "process_id": process_id,
+        "already_resolved": False,
+        "orden_pago": resultado["orden_pago"],
+        "error": resultado["error"],
+        "bas_processing_status": actualizado or status,
+    }

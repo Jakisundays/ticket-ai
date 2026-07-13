@@ -4,7 +4,11 @@ import json
 import os
 
 router = APIRouter(prefix="/webhook")
-WEBHOOK_FILE = "webhooks.json"
+# En el directorio "data/" (no la raíz de /app) para poder montar un volumen
+# Docker sobre un directorio en vez de un archivo suelto -- montar un named
+# volume directo sobre un solo archivo resultó no ser confiable en este
+# Docker Engine (ver ticket-ai-infra/docker-compose.yml).
+WEBHOOK_FILE = os.path.join("data", "webhooks.json")
 
 
 @router.post("")

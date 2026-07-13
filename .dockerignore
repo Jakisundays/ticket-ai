@@ -1,0 +1,36 @@
+# Entornos virtuales y control de versiones — nunca deben viajar a la imagen
+venv/
+.git/
+.gitignore
+
+# Bytecode / cachés de Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Secrets — se inyectan en runtime vía environment/env_file, nunca vía COPY
+.env
+.env.*
+!.env.example
+
+# Scratch space de runtime (efímero, no debe hornearse en la imagen)
+downloads/
+
+# Archivos de prueba manuales, no son dependencia de runtime
+facturas/
+
+# Scripts sueltos de desarrollo local (ya están en .gitignore del repo)
+exp.py
+try.py
+spreadsheet.py
+qwert.py
+intenta.py
+batch_send.py
+
+# Se monta como volumen en runtime; no hace falta en el build context
+webhooks.json
+
+# Ruido de macOS / editores
+.DS_Store
+.vscode/
+.idea/
