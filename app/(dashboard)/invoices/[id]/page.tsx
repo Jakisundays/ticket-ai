@@ -7,6 +7,7 @@ import ReopenButton from "./ReopenButton";
 import InvoiceFileViewer from "./InvoiceFileViewer";
 import InvoiceReviewForm from "./InvoiceReviewForm";
 import PaymentOrderPanel from "./PaymentOrderPanel";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Collections,
   type BasCategoryMapRecord,
@@ -72,9 +73,10 @@ export default async function InvoiceDetailPage({
           </h1>
         </div>
         {invoice.status === "error" && invoice.error_message && (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-            {invoice.error_message}
-          </div>
+          <Alert variant="destructive" className="mb-4">
+            <AlertTitle>Error de procesamiento</AlertTitle>
+            <AlertDescription>{invoice.error_message}</AlertDescription>
+          </Alert>
         )}
         <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-2">
           <InvoiceFileViewer processId={invoice.process_id} />

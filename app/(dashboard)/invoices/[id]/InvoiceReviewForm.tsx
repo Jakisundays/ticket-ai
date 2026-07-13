@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState, type ChangeEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { getPocketBase } from "@/lib/pocketbase-browser";
 import {
   Collections,
@@ -10,6 +11,11 @@ import {
   type InvoiceItemsRecord,
   type InvoicesRecord,
 } from "@/lib/pocketbase-types";
+import { formatCurrency } from "@/lib/format";
+
+/** Tags donde j/k NO deben navegar (el usuario está escribiendo). Cmd/Ctrl+Enter
+ * para confirmar sí debe funcionar incluso con foco en un campo. */
+const TYPING_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 
 type InvoiceDraft = Pick<
   InvoicesRecord,
@@ -95,8 +101,22 @@ export default function InvoiceReviewForm({
   }
 
   function setItemField<K extends keyof ItemDraft>(itemId: string, field: K, value: ItemDraft[K]) {
-    setItemDrafts((prev) => ({ ...prev, [itemId]: { ...prev[itemId], [field]: value } }));
+    setItemDrafts((prev) => {
+      const current = { ...prev[itemId], [field]: value };
+      // Auto-recalcula el total del ítem al tocar cantidad o precio unitario
+      // -- reduce un error de corrección común. precio_total sigue siendo
+      // editable a mano después (ej. si hay un descuento); ese último valor
+      // manual es el que se guarda, esto solo autocompleta el caso simple.
+      if (field === "cantidad" || field === "precio_unitario") {
+        current.precio_total = Number((current.cantidad * current.precio_unitario).toFixed(2));
+      }
+      return { ...prev, [itemId]: current };
+    });
   }
+
+  const itemsTotal = items.reduce((sum, item) => sum + (itemDrafts[item.id]?.precio_total ?? 0), 0);
+  const itemsTotalMismatch =
+    items.length > 0 && Math.abs(itemsTotal - invoiceDraft.total) > 0.01;
 
   async function handleConfirm() {
     setStatus("saving");
@@ -135,12 +155,57 @@ export default function InvoiceReviewForm({
         confirmed_at: new Date().toISOString(),
       });
 
-      router.refresh();
+      toast.success("Factura confirmada.");
+      // Avanza directo a la siguiente pendiente en vez de quedarse en esta
+      // (ahora bloqueada) -- mantiene al revisor en flujo, no lo devuelve a
+      // la lista entre cada factura. Si era la última, vuelve a la cola.
+      router.push(nextInvoiceId ? `/invoices/${nextInvoiceId}` : "/queue");
     } catch (err) {
       setStatus("error");
-      setError(err instanceof Error ? err.message : "No se pudo confirmar la factura.");
+      const message = err instanceof Error ? err.message : "No se pudo confirmar la factura.";
+      setError(message);
+      toast.error(message);
     }
   }
+
+  // Navegación por teclado en la cola: j/k (o flechas) para moverse entre
+  // pendientes, Cmd/Ctrl+Enter para confirmar y avanzar. Nunca se anima --
+  // son acciones de teclado, se usan demasiado seguido para justificar una
+  // transición (ver principios de motion de Emil Kowalski).
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      // Algunos entornos (automatización, teclados no-US) reportan la tecla
+      // Enter como "Return" en vez de "Enter", o solo son fiables via
+      // `code` (posición física) -- se chequean las tres formas.
+      const isEnterKey =
+        event.key === "Enter" || event.key === "Return" || event.code === "Enter" || event.code === "NumpadEnter";
+      const isConfirmShortcut = (event.metaKey || event.ctrlKey) && isEnterKey;
+      if (isConfirmShortcut) {
+        event.preventDefault();
+        if (status !== "saving") handleConfirm();
+        return;
+      }
+
+      const isTyping = TYPING_TAGS.has((event.target as HTMLElement)?.tagName);
+      if (isTyping) return;
+
+      if (event.key === "j" || event.key === "ArrowDown") {
+        if (nextInvoiceId) {
+          event.preventDefault();
+          router.push(`/invoices/${nextInvoiceId}`);
+        }
+      } else if (event.key === "k" || event.key === "ArrowUp") {
+        if (prevInvoiceId) {
+          event.preventDefault();
+          router.push(`/invoices/${prevInvoiceId}`);
+        }
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, nextInvoiceId, prevInvoiceId]);
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto pb-4">
@@ -243,9 +308,17 @@ export default function InvoiceReviewForm({
           </table>
         </div>
         {items.length > 0 && (
-          <p className="mt-2 text-xs text-gray-400">
-            La categoría define el código BAS automáticamente al guardar.
-          </p>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-gray-400">
+              La categoría define el código BAS automáticamente al guardar.
+            </p>
+            {itemsTotalMismatch && (
+              <p className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
+                Los ítems suman {formatCurrency(itemsTotal, invoiceDraft.moneda)}, la factura dice{" "}
+                {formatCurrency(invoiceDraft.total, invoiceDraft.moneda)}
+              </p>
+            )}
+          </div>
         )}
       </section>
 
@@ -261,6 +334,9 @@ export default function InvoiceReviewForm({
               Siguiente →
             </Link>
           )}
+          <span className="hidden text-xs text-gray-400 sm:inline">
+            j/k para moverte · ⌘Enter para confirmar
+          </span>
         </div>
         <div className="flex items-center gap-3">
           {error && <span className="text-sm text-red-600">{error}</span>}
