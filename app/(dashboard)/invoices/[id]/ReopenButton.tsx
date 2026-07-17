@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { RotateCcw } from "lucide-react";
 import { getPocketBase } from "@/lib/pocketbase-browser";
 import { Collections } from "@/lib/pocketbase-types";
 import { Button } from "@/components/ui/button";
@@ -49,8 +50,9 @@ export default function ReopenButton({ invoiceId }: { invoiceId: string }) {
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
       <AlertDialogTrigger asChild>
-        <Button variant="outline" size="sm">
-          Reabrir para editar
+        <Button variant="outline" className="h-9 w-full justify-center gap-2">
+          <RotateCcw className="size-3.5" />
+          Reabrir factura
         </Button>
       </AlertDialogTrigger>
       <AlertDialogContent>

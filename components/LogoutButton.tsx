@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { LogOut } from "lucide-react";
 import { getPocketBase } from "@/lib/pocketbase-browser";
 
 export default function LogoutButton() {
@@ -16,8 +17,9 @@ export default function LogoutButton() {
     <button
       type="button"
       onClick={handleLogout}
-      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100"
+      className="flex w-full items-center gap-2 text-[13px] text-status-destructive-fg"
     >
+      <LogOut className="size-3.5" />
       Cerrar sesión
     </button>
   );

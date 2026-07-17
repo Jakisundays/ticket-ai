@@ -7,9 +7,10 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
+  --font-sans: var(--font-open-sans);
   --font-mono: var(--font-geist-mono);
-  --font-heading: var(--font-sans);
+  --font-heading: var(--font-montserrat);
+  --font-serif: var(--font-lora);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -39,82 +40,171 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+  --color-hairline: var(--hairline);
+  --color-oro: var(--oro);
+  --color-status-neutral-bg: var(--status-neutral-bg);
+  --color-status-neutral-fg: var(--status-neutral-fg);
+  --color-status-neutral-dot: var(--status-neutral-dot);
+  --color-status-info-bg: var(--status-info-bg);
+  --color-status-info-fg: var(--status-info-fg);
+  --color-status-info-dot: var(--status-info-dot);
+  --color-status-warning-bg: var(--status-warning-bg);
+  --color-status-warning-fg: var(--status-warning-fg);
+  --color-status-warning-dot: var(--status-warning-dot);
+  --color-status-success-bg: var(--status-success-bg);
+  --color-status-success-fg: var(--status-success-fg);
+  --color-status-success-dot: var(--status-success-dot);
+  --color-status-destructive-bg: var(--status-destructive-bg);
+  --color-status-destructive-fg: var(--status-destructive-fg);
+  --color-status-destructive-dot: var(--status-destructive-dot);
+  /* Mapeo Legado (Fase 1): 12px controles (rounded-lg), 16px contenedores
+     (rounded-xl, cards/tablas), 24px dialogs/modales/login-card (rounded-2xl).
+     sm/3xl/4xl quedan en la escala proporcional original para casos puntuales. */
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.5rem;
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  /* Diseño "Legado" — paleta light */
+  --background: #FAF7F0;
+  --foreground: #2E2C27;
+  --card: #FFFFFF;
+  --card-foreground: #2E2C27;
+  --popover: #FFFFFF;
+  --popover-foreground: #2E2C27;
+  --primary: #003863;
+  --primary-foreground: #FFFFFF;
+  --secondary: #FBF4E1;
+  --secondary-foreground: #2E2C27;
+  --muted: #FBF4E1;
+  --muted-foreground: #6E6B61;
+  --accent: #E7F1FB;
+  --accent-foreground: #003863;
+  --destructive: #B3362B;
+  --border: #DDD6C8;
+  --input: #A39D8E;
+  --ring: #1A5E99;
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: #0B2E4F;
+  --sidebar-foreground: rgba(251, 244, 225, 0.72);
+  --sidebar-primary: #FBF4E1;
+  --sidebar-primary-foreground: #0B2E4F;
+  --sidebar-accent: rgba(187, 223, 255, 0.14);
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: rgba(187, 223, 255, 0.14);
+  --sidebar-ring: #BBDFFF;
+
+  /* Divisor interno mas suave que --border (separadores de tabla/header) */
+  --hairline: #EDE8DC;
+  /* Acento ceremonial, uso minimo, nunca CTA/nav */
+  --oro: #A9812F;
+
+  /* Sombras */
+  --shadow-1: 0 0 0 1px rgba(11, 46, 79, 0.055), 0 1px 2px rgba(11, 46, 79, 0.04);
+  --shadow-2: 0 0 0 1px rgba(11, 46, 79, 0.06), 0 2px 4px rgba(11, 46, 79, 0.04), 0 8px 20px rgba(11, 46, 79, 0.07);
+  --shadow-3: 0 0 0 1px rgba(11, 46, 79, 0.07), 0 4px 10px rgba(11, 46, 79, 0.06), 0 16px 36px rgba(11, 46, 79, 0.10);
+  --shadow-4: 0 0 0 1px rgba(11, 46, 79, 0.07), 0 8px 20px rgba(11, 46, 79, 0.09), 0 32px 64px rgba(11, 46, 79, 0.16);
+
+  /* Focus ring */
+  --ring-shadow: 0 0 0 4px color-mix(in srgb, var(--ring) 16%, transparent);
+
+  /* Motion */
+  --dur-instant: 120ms;
+  --dur-fast: 180ms;
+  --dur-medium: 260ms;
+  --dur-slow: 400ms;
+  --ease-out: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Vocabulario de estado unificado (5 buckets, ver STATUS_META en cada
+     pantalla) — un único origen de verdad para StatusBadge. */
+  --status-neutral-bg: #F1E8D2;
+  --status-neutral-fg: #4D4B44;
+  --status-neutral-dot: #6E6B61;
+  --status-info-bg: #E7F1FB;
+  --status-info-fg: #003863;
+  --status-info-dot: #1A5E99;
+  --status-warning-bg: #FBF1DC;
+  --status-warning-fg: #8F6A1F;
+  --status-warning-dot: #8F6A1F;
+  --status-success-bg: #E8F4EC;
+  --status-success-fg: #1E7A46;
+  --status-success-dot: #1E7A46;
+  --status-destructive-bg: #FAEAE8;
+  --status-destructive-fg: #B3362B;
+  --status-destructive-dot: #B3362B;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  /* Diseño "Legado" — paleta dark ("Noche en el Home"). No es inversion
+     mecanica: el primario se invierte ceremonialmente (crema/navy). */
+  --background: #0C1B2B;
+  --foreground: #F4F0E6;
+  --card: #13273B;
+  --card-foreground: #F4F0E6;
+  --popover: #1B3450;
+  --popover-foreground: #F4F0E6;
+  --primary: #FBF4E1;
+  --primary-foreground: #0B2E4F;
+  --secondary: #122336;
+  --secondary-foreground: #F4F0E6;
+  --muted: #122336;
+  --muted-foreground: #A8A498;
+  --accent: rgba(187, 223, 255, 0.10);
+  --accent-foreground: #F4F0E6;
+  --destructive: #E07568;
+  --border: rgba(187, 223, 255, 0.16);
+  --input: rgba(187, 223, 255, 0.32);
+  --ring: #8FC1EE;
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar: #081724;
+  --sidebar-foreground: rgba(251, 244, 225, 0.72);
+  --sidebar-primary: #FBF4E1;
+  --sidebar-primary-foreground: #0B2E4F;
+  --sidebar-accent: rgba(187, 223, 255, 0.14);
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: rgba(187, 223, 255, 0.14);
+  --sidebar-ring: #BBDFFF;
+
+  --hairline: rgba(187, 223, 255, 0.09);
+  --oro: #D4B36A;
+
+  --shadow-1: 0 0 0 1px rgba(187, 223, 255, 0.08), 0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-2: 0 0 0 1px rgba(187, 223, 255, 0.09), 0 2px 4px rgba(0, 0, 0, 0.26), 0 8px 20px rgba(0, 0, 0, 0.30);
+  --shadow-3: 0 0 0 1px rgba(187, 223, 255, 0.10), 0 4px 10px rgba(0, 0, 0, 0.30), 0 16px 36px rgba(0, 0, 0, 0.36);
+  --shadow-4: 0 0 0 1px rgba(187, 223, 255, 0.11), 0 8px 20px rgba(0, 0, 0, 0.34), 0 32px 64px rgba(0, 0, 0, 0.46);
+
+  --ring-shadow: 0 0 0 4px color-mix(in srgb, var(--ring) 22%, transparent);
+
+  --status-neutral-bg: rgba(217, 212, 199, 0.08);
+  --status-neutral-fg: #A8A498;
+  --status-neutral-dot: #A8A498;
+  --status-info-bg: rgba(187, 223, 255, 0.10);
+  --status-info-fg: #8FC1EE;
+  --status-info-dot: #8FC1EE;
+  --status-warning-bg: rgba(212, 169, 76, 0.14);
+  --status-warning-fg: #D4A94C;
+  --status-warning-dot: #D4A94C;
+  --status-success-bg: rgba(76, 175, 122, 0.14);
+  --status-success-fg: #4CAF7A;
+  --status-success-dot: #4CAF7A;
+  --status-destructive-bg: rgba(224, 117, 104, 0.14);
+  --status-destructive-fg: #E07568;
+  --status-destructive-dot: #E07568;
 }
 
 @layer base {
@@ -126,5 +216,72 @@
   }
   html {
     @apply font-sans;
+  }
+}
+
+@layer utilities {
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes scale-in {
+    from {
+      opacity: 0;
+      transform: scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  @keyframes shimmer {
+    0%,
+    100% {
+      opacity: 0.55;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  .animate-fade-up {
+    animation: fade-up var(--dur-medium) var(--ease-out-soft) both;
+  }
+
+  .animate-scale-in {
+    animation: scale-in var(--dur-fast) var(--ease-out-soft) both;
+  }
+
+  .animate-shimmer {
+    animation: shimmer 1.6s var(--ease-out) infinite;
+  }
+
+  .overline {
+    font-family: var(--font-heading);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
   }
 }

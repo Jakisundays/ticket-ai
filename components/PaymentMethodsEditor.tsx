@@ -1,12 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { AlertCircle, Check, Loader2 } from "lucide-react";
 import { getPocketBase } from "@/lib/pocketbase-browser";
 import {
   Collections,
   type BasPaymentMethodsRecord,
   type MetodoPago,
 } from "@/lib/pocketbase-types";
+import { Input } from "@/components/ui/input";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 // A diferencia de bas_category_map (categorías libres, se agregan con el
 // tiempo), metodo_pago es un select CERRADO -- cada valor está acoplado a
@@ -28,19 +40,24 @@ type Draft = {
   confirmado: boolean;
 };
 
+function emptyDrafts(): Record<MetodoPago, Draft> {
+  return Object.fromEntries(
+    METODOS.map((m) => [
+      m.value,
+      { id: null, bas_medio_pago_codigo: "", bas_cuenta_bancaria: "", confirmado: false },
+    ])
+  ) as Record<MetodoPago, Draft>;
+}
+
 export default function PaymentMethodsEditor() {
-  const [drafts, setDrafts] = useState<Record<MetodoPago, Draft>>(() =>
-    Object.fromEntries(
-      METODOS.map((m) => [
-        m.value,
-        { id: null, bas_medio_pago_codigo: "", bas_cuenta_bancaria: "", confirmado: false },
-      ])
-    ) as Record<MetodoPago, Draft>
-  );
+  const [drafts, setDrafts] = useState<Record<MetodoPago, Draft>>(emptyDrafts);
   const [saved, setSaved] = useState<Record<MetodoPago, Draft>>(drafts);
   const [savingMetodo, setSavingMetodo] = useState<MetodoPago | null>(null);
+  const [justSaved, setJustSaved] = useState<Partial<Record<MetodoPago, boolean>>>({});
+  const [errors, setErrors] = useState<Partial<Record<MetodoPago, string>>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const savedTimers = useRef<Partial<Record<MetodoPago, ReturnType<typeof setTimeout>>>>({});
 
   useEffect(() => {
     let isMounted = true;
@@ -78,9 +95,29 @@ export default function PaymentMethodsEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const timers = savedTimers.current;
+    return () => {
+      Object.values(timers).forEach((t) => {
+        if (t) clearTimeout(t);
+      });
+    };
+  }, []);
+
+  function updateDraft(metodo: MetodoPago, patch: Partial<Draft>) {
+    setDrafts((prev) => ({ ...prev, [metodo]: { ...prev[metodo], ...patch } }));
+    // El usuario está corrigiendo la fila: el error anterior (si lo había)
+    // ya no aplica al intento nuevo.
+    setErrors((prev) => (prev[metodo] ? { ...prev, [metodo]: undefined } : prev));
+  }
+
   async function handleSave(metodo: MetodoPago) {
     const draft = drafts[metodo];
     setSavingMetodo(metodo);
+    setErrors((prev) => ({ ...prev, [metodo]: undefined }));
+    const pendingTimer = savedTimers.current[metodo];
+    if (pendingTimer) clearTimeout(pendingTimer);
+
     try {
       const pb = getPocketBase();
       const payload = {
@@ -102,34 +139,145 @@ export default function PaymentMethodsEditor() {
       };
       setDrafts((prev) => ({ ...prev, [metodo]: next }));
       setSaved((prev) => ({ ...prev, [metodo]: next }));
+      setJustSaved((prev) => ({ ...prev, [metodo]: true }));
+      savedTimers.current[metodo] = setTimeout(() => {
+        setJustSaved((prev) => ({ ...prev, [metodo]: false }));
+      }, 1600);
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "No se pudo guardar el cambio.");
+      setErrors((prev) => ({
+        ...prev,
+        [metodo]: error instanceof Error ? error.message : "No se pudo guardar el cambio.",
+      }));
     } finally {
       setSavingMetodo(null);
     }
   }
 
   if (isLoading) {
-    return <p className="text-sm text-gray-400">Cargando…</p>;
+    return <p className="text-sm text-muted-foreground">Cargando…</p>;
   }
 
   if (loadError) {
-    return <p className="text-sm text-red-600">{loadError}</p>;
+    return <p className="text-sm text-status-destructive-fg">{loadError}</p>;
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-      <table className="min-w-full divide-y divide-gray-200 text-sm">
-        <thead className="bg-gray-50 text-left text-xs font-medium uppercase text-gray-500">
-          <tr>
-            <th className="px-4 py-2">Método</th>
-            <th className="px-4 py-2">Código BAS (MedioPago)</th>
-            <th className="px-4 py-2">Cuenta bancaria</th>
-            <th className="px-4 py-2">Confirmado</th>
-            <th className="px-4 py-2" />
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100">
+    <>
+      {/* Mobile/tablet: card por método (2 inputs + toggle apilados no
+          entran en una tabla de 5 columnas en pantalla chica). Desktop
+          (md+): la tabla, sin cambios. */}
+      <ul className="flex flex-col gap-2.5 md:hidden">
+        {METODOS.map(({ value, label }) => {
+          const draft = drafts[value];
+          const original = saved[value];
+          const isDirty =
+            draft.bas_medio_pago_codigo !== original.bas_medio_pago_codigo ||
+            draft.bas_cuenta_bancaria !== original.bas_cuenta_bancaria ||
+            draft.confirmado !== original.confirmado;
+          const isSaving = savingMetodo === value;
+          const error = errors[value];
+          const showSaved = Boolean(justSaved[value]) && !isDirty && !isSaving;
+          const requiereCuenta = value === "transferencia";
+
+          return (
+            <li
+              key={value}
+              className="flex flex-col gap-3 rounded-xl bg-card p-4 shadow-(--shadow-1)"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[13.5px] font-medium text-foreground">
+                  {label}
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={draft.confirmado}
+                  aria-label={`Confirmado — ${label}`}
+                  onClick={() => updateDraft(value, { confirmado: !draft.confirmado })}
+                  className={cn(
+                    "relative h-[19px] w-[34px] shrink-0 rounded-full transition-colors outline-none after:absolute after:-inset-[13px] after:content-[''] focus-visible:ring-3 focus-visible:ring-ring/50",
+                    draft.confirmado ? "bg-primary" : "bg-[oklch(0.85_0_0)] dark:bg-muted-foreground/30"
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "absolute top-0.5 size-[15px] rounded-full bg-white shadow-sm transition-[left]",
+                      draft.confirmado ? "left-[17px]" : "left-0.5"
+                    )}
+                  />
+                </button>
+              </div>
+              <Input
+                value={draft.bas_medio_pago_codigo}
+                onChange={(event) =>
+                  updateDraft(value, { bas_medio_pago_codigo: event.target.value })
+                }
+                placeholder="Código MedioPago"
+                className="text-[13px]"
+              />
+              <Input
+                value={draft.bas_cuenta_bancaria}
+                onChange={(event) =>
+                  updateDraft(value, { bas_cuenta_bancaria: event.target.value })
+                }
+                disabled={!requiereCuenta}
+                placeholder={
+                  requiereCuenta ? "Banco, tipo y número de cuenta" : "No aplica para este método"
+                }
+                className="font-mono text-[13px]"
+              />
+              <div className="flex h-8 items-center justify-end">
+                {isSaving ? (
+                  <Loader2 className="size-[15px] animate-spin text-muted-foreground" />
+                ) : error ? (
+                  <button
+                    type="button"
+                    onClick={() => handleSave(value)}
+                    className="flex items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-status-destructive-fg hover:bg-status-destructive-bg"
+                  >
+                    <AlertCircle className="size-[13px]" />
+                    {error}
+                  </button>
+                ) : showSaved ? (
+                  <span className="animate-in zoom-in-75 fade-in flex items-center gap-1.5 text-xs font-medium text-status-success-fg duration-200">
+                    <Check className="size-[13px]" />
+                    Guardado
+                  </span>
+                ) : isDirty ? (
+                  <button
+                    type="button"
+                    onClick={() => handleSave(value)}
+                    className="h-8 w-full rounded-lg bg-primary px-2.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 active:translate-y-px"
+                  >
+                    Guardar
+                  </button>
+                ) : null}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
+      <div className="hidden overflow-hidden rounded-xl bg-card shadow-(--shadow-1) md:block">
+      <Table>
+        <TableHeader>
+          <TableRow className="hover:bg-transparent">
+            <TableHead className="overline h-[38px] w-[140px] text-[11px] text-muted-foreground">
+              Método
+            </TableHead>
+            <TableHead className="overline h-[38px] w-[130px] text-[11px] text-muted-foreground">
+              Código BAS
+            </TableHead>
+            <TableHead className="overline h-[38px] text-[11px] text-muted-foreground">
+              Cuenta bancaria
+            </TableHead>
+            <TableHead className="overline h-[38px] w-[92px] text-center text-[11px] text-muted-foreground">
+              Confirmado
+            </TableHead>
+            <TableHead className="h-[38px] w-[120px]" />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {METODOS.map(({ value, label }) => {
             const draft = drafts[value];
             const original = saved[value];
@@ -137,65 +285,101 @@ export default function PaymentMethodsEditor() {
               draft.bas_medio_pago_codigo !== original.bas_medio_pago_codigo ||
               draft.bas_cuenta_bancaria !== original.bas_cuenta_bancaria ||
               draft.confirmado !== original.confirmado;
+            const isSaving = savingMetodo === value;
+            const error = errors[value];
+            const showSaved = Boolean(justSaved[value]) && !isDirty && !isSaving;
+            const requiereCuenta = value === "transferencia";
 
             return (
-              <tr key={value}>
-                <td className="px-4 py-2 font-medium text-gray-900">{label}</td>
-                <td className="px-4 py-2">
-                  <input
-                    type="text"
+              <TableRow key={value} className="hover:bg-transparent">
+                <TableCell className="align-middle text-[13.5px] font-medium text-foreground">
+                  {label}
+                </TableCell>
+                <TableCell className="align-middle">
+                  <Input
                     value={draft.bas_medio_pago_codigo}
                     onChange={(event) =>
-                      setDrafts((prev) => ({
-                        ...prev,
-                        [value]: { ...draft, bas_medio_pago_codigo: event.target.value },
-                      }))
+                      updateDraft(value, { bas_medio_pago_codigo: event.target.value })
                     }
-                    className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm"
+                    placeholder="Código MedioPago"
+                    className="h-8 w-full text-[13px]"
                   />
-                </td>
-                <td className="px-4 py-2">
-                  <input
-                    type="text"
-                    disabled={value !== "transferencia"}
+                </TableCell>
+                <TableCell className="align-middle">
+                  <Input
                     value={draft.bas_cuenta_bancaria}
                     onChange={(event) =>
-                      setDrafts((prev) => ({
-                        ...prev,
-                        [value]: { ...draft, bas_cuenta_bancaria: event.target.value },
-                      }))
+                      updateDraft(value, { bas_cuenta_bancaria: event.target.value })
                     }
-                    placeholder={value === "transferencia" ? "" : "no aplica"}
-                    className="w-40 rounded-md border border-gray-300 px-2 py-1 text-sm disabled:bg-gray-50 disabled:text-gray-400"
-                  />
-                </td>
-                <td className="px-4 py-2">
-                  <input
-                    type="checkbox"
-                    checked={draft.confirmado}
-                    onChange={(event) =>
-                      setDrafts((prev) => ({
-                        ...prev,
-                        [value]: { ...draft, confirmado: event.target.checked },
-                      }))
+                    disabled={!requiereCuenta}
+                    placeholder={
+                      requiereCuenta ? "Banco, tipo y número de cuenta" : "No aplica para este método"
                     }
+                    className="h-8 w-full font-mono text-[13px]"
                   />
-                </td>
-                <td className="px-4 py-2">
-                  <button
-                    type="button"
-                    disabled={!isDirty || savingMetodo === value}
-                    onClick={() => handleSave(value)}
-                    className="rounded-md bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-800 disabled:opacity-40"
-                  >
-                    {savingMetodo === value ? "Guardando…" : "Guardar"}
-                  </button>
-                </td>
-              </tr>
+                </TableCell>
+                <TableCell className="align-middle">
+                  <div className="flex justify-center">
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={draft.confirmado}
+                      aria-label={`Confirmado — ${label}`}
+                      onClick={() => updateDraft(value, { confirmado: !draft.confirmado })}
+                      className={cn(
+                        "relative h-[19px] w-[34px] shrink-0 rounded-full transition-colors outline-none after:absolute after:-inset-[13px] after:content-[''] focus-visible:ring-3 focus-visible:ring-ring/50",
+                        draft.confirmado ? "bg-primary" : "bg-[oklch(0.85_0_0)] dark:bg-muted-foreground/30"
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "absolute top-0.5 size-[15px] rounded-full bg-white shadow-sm transition-[left]",
+                          draft.confirmado ? "left-[17px]" : "left-0.5"
+                        )}
+                      />
+                    </button>
+                  </div>
+                </TableCell>
+                <TableCell className="align-middle">
+                  <div className="flex h-8 items-center justify-end">
+                    {isSaving ? (
+                      <Loader2 className="size-[15px] animate-spin text-muted-foreground" />
+                    ) : error ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            onClick={() => handleSave(value)}
+                            className="flex items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-status-destructive-fg hover:bg-status-destructive-bg"
+                          >
+                            <AlertCircle className="size-[13px]" />
+                            Reintentar
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="left">{error}</TooltipContent>
+                      </Tooltip>
+                    ) : showSaved ? (
+                      <span className="animate-in zoom-in-75 fade-in flex items-center gap-1.5 text-xs font-medium text-status-success-fg duration-200">
+                        <Check className="size-[13px]" />
+                        Guardado
+                      </span>
+                    ) : isDirty ? (
+                      <button
+                        type="button"
+                        onClick={() => handleSave(value)}
+                        className="h-7 rounded-lg bg-primary px-2.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 active:translate-y-px"
+                      >
+                        Guardar
+                      </button>
+                    ) : null}
+                  </div>
+                </TableCell>
+              </TableRow>
             );
           })}
-        </tbody>
-      </table>
-    </div>
+        </TableBody>
+      </Table>
+      </div>
+    </>
   );
 }

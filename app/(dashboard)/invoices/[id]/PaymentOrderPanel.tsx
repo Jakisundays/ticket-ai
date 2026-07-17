@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { Loader2, CheckCircle, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,14 +14,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
+import StatusBadge from "@/components/StatusBadge";
 import type {
   BasPaymentMethodsRecord,
   MetodoPago,
   PaymentOrdersRecord,
 } from "@/lib/pocketbase-types";
-import { formatDate } from "@/lib/format";
+import { formatCurrency, formatDate } from "@/lib/format";
 
 const METODO_LABEL: Record<MetodoPago, string> = {
   efectivo: "Efectivo",
@@ -28,26 +28,16 @@ const METODO_LABEL: Record<MetodoPago, string> = {
   transferencia: "Transferencia",
 };
 
-const STATUS_LABEL: Record<string, string> = {
-  processing: "En proceso",
-  success: "Creada",
-  failed: "Falló",
-};
-
-const STATUS_VARIANT: Record<string, "default" | "destructive" | "secondary"> = {
-  processing: "secondary",
-  success: "default",
-  failed: "destructive",
-};
-
 export default function PaymentOrderPanel({
   processId,
   invoiceTotal,
+  moneda,
   paymentMethods,
   existingOrder,
 }: {
   processId: string;
   invoiceTotal: number;
+  moneda: string;
   paymentMethods: BasPaymentMethodsRecord[];
   existingOrder: PaymentOrdersRecord | null;
 }) {
@@ -60,6 +50,7 @@ export default function PaymentOrderPanel({
   const [order, setOrder] = useState<PaymentOrdersRecord | null>(existingOrder);
 
   const selectedMethod = paymentMethods.find((m) => m.metodo_pago === metodoPago);
+  const isRetry = order?.status === "failed";
 
   async function handleSubmit() {
     setLoading(true);
@@ -85,61 +76,81 @@ export default function PaymentOrderPanel({
   }
 
   return (
-    <section className="rounded-lg border border-gray-200 bg-white p-4">
-      <h2 className="mb-3 text-sm font-semibold text-gray-900">Orden de pago</h2>
+    <section className="flex flex-col gap-3.5 rounded-xl bg-card p-6 shadow-(--shadow-1)">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-[13px] font-semibold text-foreground">Orden de pago</h2>
+        <span className="text-xs text-muted-foreground">
+          Total a pagar{" "}
+          <span className="font-mono font-semibold text-foreground">
+            {formatCurrency(invoiceTotal, moneda)}
+          </span>
+        </span>
+      </div>
 
       {order && (
-        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-gray-500">Último intento:</span>
-          <Badge variant={STATUS_VARIANT[order.status] ?? "secondary"}>
-            {STATUS_LABEL[order.status] ?? order.status}
-          </Badge>
+        <div className="flex flex-wrap items-center gap-2 border-t pt-3 text-sm">
+          <span className="text-muted-foreground">Último intento</span>
+          <StatusBadge status={order.status} />
           {order.last_attempt_at && (
-            <span className="text-gray-400">{formatDate(order.last_attempt_at)}</span>
+            <span className="text-xs text-muted-foreground">
+              {formatDate(order.last_attempt_at)}
+            </span>
           )}
           {order.retry_count > 0 && (
-            <span className="text-gray-400">
+            <span className="text-xs text-muted-foreground">
               · {order.retry_count} reintento{order.retry_count === 1 ? "" : "s"}
             </span>
           )}
         </div>
       )}
 
+      {order?.status === "processing" && (
+        <div className="flex items-center gap-2.5 rounded-lg bg-status-info-bg px-3 py-2.5">
+          <Loader2 className="size-4 shrink-0 animate-spin text-status-info-fg" />
+          <p className="text-[12.5px] text-status-info-fg">Enviando la orden a BAS…</p>
+        </div>
+      )}
+
       {order?.status === "failed" && order.bas_error && (
-        <Alert variant="destructive" className="mb-4">
-          <AlertTitle>BAS rechazó la orden de pago</AlertTitle>
-          <AlertDescription>{order.bas_error}</AlertDescription>
-        </Alert>
+        <div className="flex flex-col gap-2 rounded-lg bg-status-warning-bg p-3.5">
+          <div className="flex items-center gap-2 text-[13px] font-semibold text-status-warning-fg">
+            <Clock className="size-3.5 shrink-0" />
+            BAS rechazó la orden de pago
+          </div>
+          <p className="rounded-md bg-background/50 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed text-status-warning-fg">
+            {order.bas_error}
+          </p>
+        </div>
       )}
 
       {order?.status === "success" && (
-        <Alert className="mb-4">
-          <AlertTitle>Orden de pago creada</AlertTitle>
-          <AlertDescription>
+        <div className="flex items-center gap-2.5 rounded-lg bg-status-success-bg px-3 py-2.5">
+          <CheckCircle className="size-4 shrink-0 text-status-success-fg" />
+          <p className="text-[12.5px] text-status-success-fg">
             {order.bas_op_prefijo && order.bas_op_numero
-              ? `OP ${order.bas_op_prefijo}-${order.bas_op_numero}`
+              ? `OP ${order.bas_op_prefijo}-${order.bas_op_numero} creada en BAS.`
               : "Confirmada en BAS."}
-          </AlertDescription>
-        </Alert>
+          </p>
+        </div>
       )}
 
       {paymentMethods.length === 0 ? (
-        <p className="text-sm text-gray-400">
+        <p className="text-sm text-muted-foreground">
           Todavía no hay métodos de pago configurados. Andá a{" "}
-          <a href="/payment-methods" className="text-blue-600 hover:underline">
+          <a href="/payment-methods" className="text-primary hover:underline">
             Métodos de pago
           </a>{" "}
           para agregar uno.
         </p>
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <Label className="mb-1.5 block text-xs font-medium text-gray-500">
+          <div className="grid grid-cols-1 gap-3 border-t pt-3.5 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs font-medium text-muted-foreground">
                 Método de pago
               </Label>
               <Select value={metodoPago} onValueChange={(v) => setMetodoPago(v as MetodoPago)}>
-                <SelectTrigger className="w-full">
+                <SelectTrigger className="h-9 w-full">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -151,23 +162,25 @@ export default function PaymentOrderPanel({
                 </SelectContent>
               </Select>
               {selectedMethod && !selectedMethod.confirmado && (
-                <p className="mt-1 text-xs text-amber-600">
+                <p className="text-xs text-status-warning-fg">
                   Código todavía no confirmado con un pago real en BAS — puede fallar.
                 </p>
               )}
             </div>
-            <div>
-              <Label className="mb-1.5 block text-xs font-medium text-gray-500">Monto</Label>
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs font-medium text-muted-foreground">Monto</Label>
               <Input
                 type="number"
+                className="h-9 font-mono"
                 value={monto}
                 onChange={(e) => setMonto(Number(e.target.value))}
               />
             </div>
           </div>
 
-          <Button onClick={handleSubmit} disabled={loading} className="mt-4">
-            {loading ? "Creando…" : order?.status === "failed" ? "Reintentar" : "Crear orden de pago"}
+          <Button onClick={handleSubmit} disabled={loading} className="mt-1 h-9 gap-2">
+            {loading && <Loader2 className="size-3.5 animate-spin" />}
+            {loading ? "Creando…" : isRetry ? "Reintentar" : "Crear orden de pago"}
           </Button>
         </>
       )}

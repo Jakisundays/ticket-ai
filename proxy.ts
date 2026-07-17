@@ -53,7 +53,7 @@ export function proxy(request: NextRequest) {
   }
 
   if (hasUserSession && isAuthPath) {
-    return NextResponse.redirect(new URL("/queue", request.url));
+    return NextResponse.redirect(new URL("/", request.url));
   }
 
   return NextResponse.next();

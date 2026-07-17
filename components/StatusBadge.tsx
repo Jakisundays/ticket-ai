@@ -1,29 +1,61 @@
-const STATUS_STYLES: Record<string, string> = {
-  pending: "bg-yellow-100 text-yellow-800",
-  queued: "bg-yellow-100 text-yellow-800",
-  needs_review: "bg-yellow-100 text-yellow-800",
-  processing: "bg-blue-100 text-blue-800",
-  completed: "bg-green-100 text-green-800",
-  confirmed: "bg-green-100 text-green-800",
-  done: "bg-green-100 text-green-800",
-  success: "bg-green-100 text-green-800",
-  error: "bg-red-100 text-red-800",
-  failed: "bg-red-100 text-red-800",
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
+
+type StatusBucket = "neutral" | "info" | "warning" | "success" | "destructive";
+
+const STATUS_META: Record<string, { label: string; bucket: StatusBucket }> = {
+  pending: { label: "Pendiente", bucket: "neutral" },
+  queued: { label: "En cola", bucket: "neutral" },
+  needs_review: { label: "Necesita revisión", bucket: "warning" },
+  processing: { label: "Procesando", bucket: "info" },
+  completed: { label: "Completada", bucket: "success" },
+  confirmed: { label: "Confirmada", bucket: "success" },
+  done: { label: "Completada", bucket: "success" },
+  success: { label: "Exitosa", bucket: "success" },
+  error: { label: "Error", bucket: "destructive" },
+  failed: { label: "Fallida", bucket: "destructive" },
+};
+
+const BUCKET_CLASSES: Record<StatusBucket, string> = {
+  neutral: "bg-status-neutral-bg text-status-neutral-fg",
+  info: "bg-status-info-bg text-status-info-fg",
+  warning: "bg-status-warning-bg text-status-warning-fg",
+  success: "bg-status-success-bg text-status-success-fg",
+  destructive: "bg-status-destructive-bg text-status-destructive-fg",
+};
+
+const DOT_CLASSES: Record<StatusBucket, string> = {
+  neutral: "bg-status-neutral-dot",
+  info: "bg-status-info-dot",
+  warning: "bg-status-warning-dot",
+  success: "bg-status-success-dot",
+  destructive: "bg-status-destructive-dot",
 };
 
 export default function StatusBadge({
   status,
+  dot = false,
 }: {
   status: string | null | undefined;
+  dot?: boolean;
 }) {
-  const value = status || "—";
-  const style = STATUS_STYLES[value] ?? "bg-gray-100 text-gray-700";
+  const key = status || "";
+  const meta = STATUS_META[key] ?? { label: key || "—", bucket: "neutral" as const };
 
   return (
-    <span
-      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${style}`}
+    <Badge
+      variant="secondary"
+      className={cn(
+        "h-[22px] gap-1.5 rounded-full border-transparent px-2.5 font-heading text-[11.5px] font-semibold tracking-wide",
+        BUCKET_CLASSES[meta.bucket]
+      )}
     >
-      {value}
-    </span>
+      {dot && (
+        <span
+          className={cn("size-1.5 shrink-0 rounded-full", DOT_CLASSES[meta.bucket])}
+        />
+      )}
+      {meta.label}
+    </Badge>
   );
 }

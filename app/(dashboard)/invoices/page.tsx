@@ -1,11 +1,14 @@
-import Link from "next/link";
-import { createServerClient } from "@/lib/pocketbase-server";
-import StatusBadge from "@/components/StatusBadge";
+import { AlertCircle } from "lucide-react";
+import { createServerClient, ClientResponseError } from "@/lib/pocketbase-server";
 import {
   Collections,
   type InvoiceListItemExpand,
 } from "@/lib/pocketbase-types";
 import { formatCurrency, formatDate, driveFileUrl } from "@/lib/format";
+import PageHeader from "@/components/PageHeader";
+import EmptyState from "@/components/EmptyState";
+import InvoicesTable, { type InvoiceRow } from "./InvoicesTable";
+import RetryButton from "./RetryButton";
 
 // Esta pagina lee cookies (via createServerClient) y siempre debe reflejar
 // el estado mas reciente de PocketBase, asi que no tiene sentido cachearla
@@ -15,101 +18,81 @@ export const dynamic = "force-dynamic";
 export default async function InvoicesPage() {
   const pb = await createServerClient();
 
-  const result = await pb
-    .collection<InvoiceListItemExpand>(Collections.Invoices)
-    .getList(1, 50, {
-      sort: "-created",
-      expand: "bas_processing_status_via_invoice",
-    });
+  // `items === null` distingue "fallo la consulta" de "la consulta funciono
+  // pero no hay facturas" -- son dos estados visuales distintos (error vs
+  // vacio) aunque ambos partan del mismo `getList`.
+  let items: InvoiceListItemExpand[] | null = null;
+  try {
+    const result = await pb
+      .collection<InvoiceListItemExpand>(Collections.Invoices)
+      .getList(1, 50, {
+        sort: "-created",
+        expand: "bas_processing_status_via_invoice",
+      });
+    items = result.items;
+  } catch (error) {
+    if (!(error instanceof ClientResponseError)) throw error;
+    items = null;
+  }
+
+  const rows: InvoiceRow[] =
+    items?.map((invoice) => {
+      // Relation `unique` (1:1) -- PocketBase expande esto como un objeto
+      // unico, no un array (a diferencia de invoice_items).
+      const basStatus = invoice.expand?.bas_processing_status_via_invoice;
+
+      return {
+        id: invoice.id,
+        numero: invoice.numero_comprobante || invoice.process_id,
+        emisorNombre: invoice.emisor_nombre,
+        fecha: formatDate(invoice.fecha_emision),
+        monto: formatCurrency(invoice.total, invoice.moneda),
+        status: invoice.status,
+        reviewStatus: invoice.review_status || "needs_review",
+        sheetsSaved: invoice.sheets_saved,
+        driveUrl: driveFileUrl(invoice.drive_file_id),
+        basStatus: basStatus ? basStatus.orden_pago_status : null,
+        // REGLA DE ORO: el listado no tiene ninguna accion disponible para
+        // facturas en estado "error" de extraccion -- fuera de alcance a
+        // proposito, decision de producto pendiente.
+        clickable: invoice.status !== "error",
+      };
+    }) ?? [];
 
   return (
-    <div>
-      <h1 className="mb-4 text-lg font-semibold text-gray-900">Facturas</h1>
-      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="min-w-full divide-y divide-gray-200 text-sm">
-          <thead className="bg-gray-50 text-left text-xs font-medium uppercase text-gray-500">
-            <tr>
-              <th className="px-4 py-2">Comprobante</th>
-              <th className="px-4 py-2">Emisión</th>
-              <th className="px-4 py-2">Emisor</th>
-              <th className="px-4 py-2">Total</th>
-              <th className="px-4 py-2">Estado</th>
-              <th className="px-4 py-2">Revisión</th>
-              <th className="px-4 py-2">Sheets</th>
-              <th className="px-4 py-2">Drive</th>
-              <th className="px-4 py-2">Estado BAS</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {result.items.map((invoice) => {
-              // Relation `unique` (1:1) -- PocketBase expande esto como un
-              // objeto único, no un array (a diferencia de invoice_items).
-              const basStatus =
-                invoice.expand?.bas_processing_status_via_invoice;
-              const driveUrl = driveFileUrl(invoice.drive_file_id);
+    <div className="flex h-full flex-col">
+      <PageHeader>
+        <h1 className="truncate text-[16px] font-semibold text-foreground">
+          Facturas
+        </h1>
+        <span className="ml-auto hidden truncate text-[13px] text-muted-foreground md:block">
+          Últimos 50 comprobantes recibidos
+        </span>
+      </PageHeader>
 
-              return (
-                <tr key={invoice.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-2">
-                    <Link
-                      href={`/invoices/${invoice.id}`}
-                      className="font-medium text-gray-900 hover:underline"
-                    >
-                      {invoice.numero_comprobante || invoice.process_id}
-                    </Link>
-                  </td>
-                  <td className="px-4 py-2 text-gray-600">
-                    {formatDate(invoice.fecha_emision)}
-                  </td>
-                  <td className="px-4 py-2 text-gray-600">
-                    {invoice.emisor_nombre}
-                  </td>
-                  <td className="px-4 py-2 text-gray-900">
-                    {formatCurrency(invoice.total, invoice.moneda)}
-                  </td>
-                  <td className="px-4 py-2">
-                    <StatusBadge status={invoice.status} />
-                  </td>
-                  <td className="px-4 py-2">
-                    <StatusBadge status={invoice.review_status || "needs_review"} />
-                  </td>
-                  <td className="px-4 py-2">
-                    {invoice.sheets_saved ? "Sí" : "No"}
-                  </td>
-                  <td className="px-4 py-2">
-                    {driveUrl ? (
-                      <a
-                        href={driveUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-blue-600 hover:underline"
-                      >
-                        Ver
-                      </a>
-                    ) : (
-                      <span className="text-gray-400">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2">
-                    {basStatus ? (
-                      <StatusBadge status={basStatus.orden_pago_status} />
-                    ) : (
-                      <span className="text-gray-400">—</span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-            {result.items.length === 0 && (
-              <tr>
-                <td colSpan={9} className="px-4 py-6 text-center text-gray-400">
-                  No hay facturas todavía.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      <div className="flex-1 overflow-y-auto p-4 md:p-8">
+        <div className="animate-fade-up mx-auto flex max-w-[1180px] flex-col gap-4">
+          {items === null ? (
+            <ErrorState />
+          ) : (
+            <InvoicesTable rows={rows} />
+          )}
+        </div>
       </div>
+    </div>
+  );
+}
+
+function ErrorState() {
+  return (
+    <div className="rounded-xl bg-card shadow-(--shadow-1)">
+      <EmptyState
+        icon={AlertCircle}
+        iconTone="destructive"
+        title="No pudimos cargar las facturas"
+        description="Revisá tu conexión e intentá de nuevo."
+        action={<RetryButton />}
+      />
     </div>
   );
 }

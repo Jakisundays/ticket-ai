@@ -1,13 +1,23 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { ChevronRight, ChevronLeft, AlertTriangle } from "lucide-react";
 import { createServerClient, ClientResponseError } from "@/lib/pocketbase-server";
+import { cn } from "@/lib/utils";
 import StatusBadge from "@/components/StatusBadge";
 import ReopenButton from "./ReopenButton";
 import InvoiceFileViewer from "./InvoiceFileViewer";
 import InvoiceReviewForm from "./InvoiceReviewForm";
 import PaymentOrderPanel from "./PaymentOrderPanel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import {
   Collections,
   type BasCategoryMapRecord,
@@ -16,6 +26,7 @@ import {
   type InvoiceWithItemsExpand,
 } from "@/lib/pocketbase-types";
 import { formatCurrency, formatDate, driveFileUrl } from "@/lib/format";
+import PageHeader from "@/components/PageHeader";
 
 export const dynamic = "force-dynamic";
 
@@ -63,30 +74,63 @@ export default async function InvoiceDetailPage({
     const nextInvoiceId = position >= 0 && position < queueIds.length - 1 ? queueIds[position + 1] : null;
 
     return (
-      <div className="flex h-[calc(100vh-8rem)] flex-col">
-        <div className="mb-4">
-          <Link href="/queue" className="text-sm text-gray-500 hover:underline">
-            ← Cola de revisión
+      <div className="flex h-full flex-col">
+        <PageHeader>
+          <Link
+            href="/queue"
+            className="text-sm font-medium text-muted-foreground hover:text-foreground"
+          >
+            Cola de revisión
           </Link>
-          <h1 className="mt-1 text-lg font-semibold text-gray-900">
+          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/50" />
+          <span className="truncate font-mono text-sm font-semibold text-foreground">
             {invoice.numero_comprobante || invoice.process_id}
-          </h1>
-        </div>
+          </span>
+          <StatusBadge status="needs_review" />
+          <div className="flex-1" />
+          {position >= 0 && (
+            <span className="hidden text-sm text-muted-foreground sm:inline">
+              {position + 1} de {queueIds.length} en la cola
+            </span>
+          )}
+          <div className="flex items-center gap-1.5">
+            <NavButton href={prevInvoiceId ? `/invoices/${prevInvoiceId}` : null} label="Factura anterior">
+              <ChevronLeft className="size-4" />
+            </NavButton>
+            <NavButton href={nextInvoiceId ? `/invoices/${nextInvoiceId}` : null} label="Factura siguiente">
+              <ChevronRight className="size-4" />
+            </NavButton>
+          </div>
+        </PageHeader>
+
         {invoice.status === "error" && invoice.error_message && (
-          <Alert variant="destructive" className="mb-4">
-            <AlertTitle>Error de procesamiento</AlertTitle>
-            <AlertDescription>{invoice.error_message}</AlertDescription>
-          </Alert>
+          <div className="border-b bg-background px-4 py-3 md:px-7">
+            <Alert variant="destructive">
+              <AlertTriangle className="size-4" />
+              <AlertTitle>Error de procesamiento</AlertTitle>
+              <AlertDescription>{invoice.error_message}</AlertDescription>
+            </Alert>
+          </div>
         )}
-        <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden lg:grid-cols-2">
-          <InvoiceFileViewer processId={invoice.process_id} />
-          <InvoiceReviewForm
-            invoice={invoice}
-            items={items}
-            categories={categoriesResult}
-            prevInvoiceId={prevInvoiceId}
-            nextInvoiceId={nextInvoiceId}
-          />
+
+        <div className="animate-fade-up flex min-h-0 flex-1 flex-col lg:flex-row">
+          <div className="h-[42vh] shrink-0 border-b p-3 lg:h-auto lg:w-2/5 lg:min-w-[280px] lg:max-w-[560px] lg:border-r lg:border-b-0 lg:p-5">
+            <div className="sticky top-16 flex h-full flex-col gap-3.5 rounded-xl bg-sidebar p-4 shadow-(--shadow-2)">
+              <span className="overline px-0.5 text-[11px] text-sidebar-foreground">
+                Comprobante original
+              </span>
+              <InvoiceFileViewer processId={invoice.process_id} />
+            </div>
+          </div>
+          <div className="min-h-0 min-w-0 flex-1">
+            <InvoiceReviewForm
+              invoice={invoice}
+              items={items}
+              categories={categoriesResult}
+              prevInvoiceId={prevInvoiceId}
+              nextInvoiceId={nextInvoiceId}
+            />
+          </div>
         </div>
       </div>
     );
@@ -99,169 +143,240 @@ export default async function InvoiceDetailPage({
     .getFullList({ sort: "metodo_pago" });
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <Link href="/invoices" className="text-sm text-gray-500 hover:underline">
-            ← Facturas
-          </Link>
-          <h1 className="mt-1 text-lg font-semibold text-gray-900">
-            {invoice.numero_comprobante || invoice.process_id}
-          </h1>
-        </div>
-        <div className="flex items-center gap-2">
-          <StatusBadge status="confirmed" />
-          <ReopenButton invoiceId={invoice.id} />
+    <div className="flex h-full flex-col">
+      <PageHeader>
+        <Link
+          href="/invoices"
+          className="text-sm font-medium text-muted-foreground hover:text-foreground"
+        >
+          Facturas
+        </Link>
+        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/50" />
+        <span className="truncate font-mono text-sm font-semibold text-foreground">
+          {invoice.numero_comprobante || invoice.process_id}
+        </span>
+        <StatusBadge status="confirmed" />
+      </PageHeader>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 md:px-7 md:py-7">
+        <div className="animate-fade-up mx-auto flex max-w-[1040px] flex-wrap items-start gap-6">
+          {/* Columna izquierda: datos de solo lectura */}
+          <div className="flex min-w-0 flex-1 basis-[420px] flex-col gap-5">
+            <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
+              <h2 className="mb-3.5 text-[13px] font-semibold text-foreground">
+                Datos de la factura
+              </h2>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field label="Estado">
+                  <StatusBadge status={invoice.status} />
+                </Field>
+                <Field label="Tipo">
+                  {invoice.tipo_comprobante} {invoice.subtipo_comprobante}
+                </Field>
+                <Field label="Emisión">{formatDate(invoice.fecha_emision)}</Field>
+                <Field label="Emisor" tabular>
+                  {invoice.emisor_nombre} ({invoice.emisor_cuit})
+                </Field>
+                <Field label="Receptor" tabular>
+                  {invoice.receptor_nombre} ({invoice.receptor_cuit})
+                </Field>
+                <Field label="Forma de pago">{invoice.forma_pago || "—"}</Field>
+                <Field label="Subtotal" tabular>
+                  {formatCurrency(invoice.subtotal, invoice.moneda)}
+                </Field>
+                <Field label="Total" tabular>
+                  {formatCurrency(invoice.total, invoice.moneda)}
+                </Field>
+                <Field label="CAE" tabular>
+                  {invoice.cae || "—"}
+                  {invoice.cae_vencimiento
+                    ? ` (vence ${formatDate(invoice.cae_vencimiento)})`
+                    : ""}
+                </Field>
+                <Field label="Guardado en Sheets">{invoice.sheets_saved ? "Sí" : "No"}</Field>
+                <Field label="Drive">
+                  {driveUrl ? (
+                    <a
+                      href={driveUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary hover:underline"
+                    >
+                      Ver archivo
+                    </a>
+                  ) : (
+                    "—"
+                  )}
+                </Field>
+                <Field label="process_id">
+                  <code className="font-mono text-xs text-muted-foreground">
+                    {invoice.process_id}
+                  </code>
+                </Field>
+                <Field label="Confirmada el">
+                  {invoice.confirmed_at ? formatDate(invoice.confirmed_at) : "—"}
+                  {confirmedByEmail ? ` · ${confirmedByEmail}` : ""}
+                </Field>
+              </div>
+            </section>
+
+            <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
+              <h2 className="mb-3.5 text-[13px] font-semibold text-foreground">Estado BAS</h2>
+              {basStatus ? (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field label="Proveedor resuelto">
+                    {basStatus.proveedor_resuelto ? "Sí" : "No"}
+                    {basStatus.proveedor_codigo ? ` (${basStatus.proveedor_codigo})` : ""}
+                  </Field>
+                  <Field label="Comprobante registrado">
+                    {basStatus.comprobante_registrado ? "Sí" : "No"}
+                    {basStatus.comprobante_prefijo
+                      ? ` (${basStatus.comprobante_prefijo}-${basStatus.comprobante_numero})`
+                      : ""}
+                  </Field>
+                  <Field label="Orden de pago (intento automático)">
+                    <StatusBadge status={basStatus.orden_pago_status} />
+                  </Field>
+                  {basStatus.orden_pago_error && (
+                    <Field label="Error">
+                      <span className="text-destructive">{basStatus.orden_pago_error}</span>
+                    </Field>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Todavía no hay estado de procesamiento BAS para esta factura.
+                </p>
+              )}
+            </section>
+
+            <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
+              <h2 className="mb-3.5 text-[13px] font-semibold text-foreground">Ítems</h2>
+              <ItemsTable items={items} moneda={invoice.moneda} />
+            </section>
+          </div>
+
+          {/* Columna derecha: estado + orden de pago */}
+          <div className="flex w-full min-w-[300px] max-w-[400px] flex-1 basis-[320px] flex-col gap-4">
+            <section className="flex flex-col gap-3.5 rounded-xl bg-card p-6 shadow-(--shadow-1)">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">Estado de la factura</span>
+                <StatusBadge status="confirmed" />
+              </div>
+              <ReopenButton invoiceId={invoice.id} />
+            </section>
+
+            <PaymentOrderPanel
+              processId={invoice.process_id}
+              invoiceTotal={invoice.total}
+              moneda={invoice.moneda}
+              paymentMethods={paymentMethods}
+              existingOrder={invoice.expand?.payment_orders_via_invoice ?? null}
+            />
+          </div>
         </div>
       </div>
-
-      <p className="text-sm text-gray-500">
-        Confirmada{confirmedByEmail ? ` por ${confirmedByEmail}` : ""}
-        {invoice.confirmed_at ? ` el ${formatDate(invoice.confirmed_at)}` : ""}.
-      </p>
-
-      <section className="grid grid-cols-1 gap-4 rounded-lg border border-gray-200 bg-white p-4 text-sm sm:grid-cols-3">
-        <Field label="Estado">
-          <StatusBadge status={invoice.status} />
-        </Field>
-        <Field label="Tipo">
-          {invoice.tipo_comprobante} {invoice.subtipo_comprobante}
-        </Field>
-        <Field label="Emisión">{formatDate(invoice.fecha_emision)}</Field>
-        <Field label="Emisor">
-          {invoice.emisor_nombre} ({invoice.emisor_cuit})
-        </Field>
-        <Field label="Receptor">
-          {invoice.receptor_nombre} ({invoice.receptor_cuit})
-        </Field>
-        <Field label="Forma de pago">{invoice.forma_pago || "—"}</Field>
-        <Field label="Subtotal">
-          {formatCurrency(invoice.subtotal, invoice.moneda)}
-        </Field>
-        <Field label="Total">
-          {formatCurrency(invoice.total, invoice.moneda)}
-        </Field>
-        <Field label="CAE">
-          {invoice.cae || "—"}
-          {invoice.cae_vencimiento
-            ? ` (vence ${formatDate(invoice.cae_vencimiento)})`
-            : ""}
-        </Field>
-        <Field label="Guardado en Sheets">
-          {invoice.sheets_saved ? "Sí" : "No"}
-        </Field>
-        <Field label="Drive">
-          {driveUrl ? (
-            <a
-              href={driveUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-blue-600 hover:underline"
-            >
-              Ver archivo
-            </a>
-          ) : (
-            "—"
-          )}
-        </Field>
-        <Field label="process_id">
-          <code className="text-xs text-gray-500">{invoice.process_id}</code>
-        </Field>
-      </section>
-
-      <section className="rounded-lg border border-gray-200 bg-white p-4">
-        <h2 className="mb-3 text-sm font-semibold text-gray-900">Estado BAS</h2>
-        {basStatus ? (
-          <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-3">
-            <Field label="Proveedor resuelto">
-              {basStatus.proveedor_resuelto ? "Sí" : "No"}
-              {basStatus.proveedor_codigo ? ` (${basStatus.proveedor_codigo})` : ""}
-            </Field>
-            <Field label="Comprobante registrado">
-              {basStatus.comprobante_registrado ? "Sí" : "No"}
-              {basStatus.comprobante_prefijo
-                ? ` (${basStatus.comprobante_prefijo}-${basStatus.comprobante_numero})`
-                : ""}
-            </Field>
-            <Field label="Orden de pago (intento automático)">
-              <StatusBadge status={basStatus.orden_pago_status} />
-            </Field>
-            {basStatus.orden_pago_error && (
-              <Field label="Error">
-                <span className="text-red-600">{basStatus.orden_pago_error}</span>
-              </Field>
-            )}
-          </div>
-        ) : (
-          <p className="text-sm text-gray-400">
-            Todavía no hay estado de procesamiento BAS para esta factura.
-          </p>
-        )}
-      </section>
-
-      <section className="rounded-lg border border-gray-200 bg-white p-4">
-        <h2 className="mb-3 text-sm font-semibold text-gray-900">Ítems</h2>
-        <ItemsTable items={items} moneda={invoice.moneda} />
-      </section>
-
-      <PaymentOrderPanel
-        processId={invoice.process_id}
-        invoiceTotal={invoice.total}
-        paymentMethods={paymentMethods}
-        existingOrder={invoice.expand?.payment_orders_via_invoice ?? null}
-      />
     </div>
   );
 }
 
 function ItemsTable({ items, moneda }: { items: InvoiceItemsRecord[]; moneda: string }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-gray-200 text-sm">
-        <thead className="bg-gray-50 text-left text-xs font-medium uppercase text-gray-500">
-          <tr>
-            <th className="px-3 py-2">#</th>
-            <th className="px-3 py-2">Descripción</th>
-            <th className="px-3 py-2">Cantidad</th>
-            <th className="px-3 py-2">Precio unit.</th>
-            <th className="px-3 py-2">Total</th>
-            <th className="px-3 py-2">Categoría</th>
-            <th className="px-3 py-2">Código BAS</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-100">
-          {items
-            .slice()
-            .sort((a, b) => (a.linea ?? 0) - (b.linea ?? 0))
-            .map((item) => (
-              <tr key={item.id}>
-                <td className="px-3 py-2 text-gray-500">{item.linea}</td>
-                <td className="px-3 py-2">{item.descripcion}</td>
-                <td className="px-3 py-2">{item.cantidad}</td>
-                <td className="px-3 py-2">{formatCurrency(item.precio_unitario, moneda)}</td>
-                <td className="px-3 py-2">{formatCurrency(item.precio_total, moneda)}</td>
-                <td className="px-3 py-2">{item.categoria || "—"}</td>
-                <td className="px-3 py-2">{item.bas_codigo_item || "—"}</td>
-              </tr>
-            ))}
-          {items.length === 0 && (
-            <tr>
-              <td colSpan={7} className="px-3 py-6 text-center text-gray-400">
-                Sin items.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+    <Table>
+      <TableHeader>
+        <TableRow className="hover:bg-transparent">
+          <TableHead>#</TableHead>
+          <TableHead>Descripción</TableHead>
+          <TableHead className="text-right">Cantidad</TableHead>
+          <TableHead className="text-right">Precio unit.</TableHead>
+          <TableHead className="text-right">Total</TableHead>
+          <TableHead>Categoría</TableHead>
+          <TableHead>Código BAS</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {items
+          .slice()
+          .sort((a, b) => (a.linea ?? 0) - (b.linea ?? 0))
+          .map((item) => (
+            <TableRow key={item.id} className="hover:bg-transparent">
+              <TableCell className="text-muted-foreground">{item.linea}</TableCell>
+              <TableCell className="whitespace-normal">{item.descripcion}</TableCell>
+              <TableCell className="text-right">{item.cantidad}</TableCell>
+              <TableCell className="text-right font-mono">
+                {formatCurrency(item.precio_unitario, moneda)}
+              </TableCell>
+              <TableCell className="text-right font-mono font-medium text-foreground">
+                {formatCurrency(item.precio_total, moneda)}
+              </TableCell>
+              <TableCell>{item.categoria || "—"}</TableCell>
+              <TableCell className="text-muted-foreground">
+                {item.bas_codigo_item || "—"}
+              </TableCell>
+            </TableRow>
+          ))}
+        {items.length === 0 && (
+          <TableRow className="hover:bg-transparent">
+            <TableCell colSpan={7} className="py-6 text-center text-muted-foreground">
+              Sin items.
+            </TableCell>
+          </TableRow>
+        )}
+      </TableBody>
+    </Table>
+  );
+}
+
+function Field({
+  label,
+  children,
+  tabular = false,
+}: {
+  label: string;
+  children: ReactNode;
+  tabular?: boolean;
+}) {
+  return (
+    <div>
+      <dt className="overline text-[11px] text-muted-foreground">{label}</dt>
+      <dd
+        className={cn(
+          "mt-0.5 text-[13.5px] font-medium text-foreground",
+          tabular && "tabular"
+        )}
+      >
+        {children}
+      </dd>
     </div>
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+/** Botones circulares de navegación prev/next del header de revisión --
+ * deshabilitados (sin Link, sin hover) cuando no hay factura hacia ese lado
+ * en la cola. */
+function NavButton({
+  href,
+  label,
+  children,
+}: {
+  href: string | null;
+  label: string;
+  children: ReactNode;
+}) {
+  const base =
+    "flex size-[34px] items-center justify-center rounded-lg border-[1.5px] border-input text-muted-foreground transition-colors duration-(--dur-fast) ease-(--ease-out)";
+
+  if (!href) {
+    return (
+      <span className={cn(base, "pointer-events-none opacity-40")} aria-hidden="true">
+        {children}
+      </span>
+    );
+  }
+
   return (
-    <div>
-      <dt className="text-xs font-medium uppercase text-gray-400">{label}</dt>
-      <dd className="mt-0.5 text-gray-900">{children}</dd>
-    </div>
+    <Link href={href} aria-label={label} className={cn(base, "hover:bg-accent hover:text-ring")}>
+      {children}
+    </Link>
   );
 }

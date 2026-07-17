@@ -1,8 +1,8 @@
-import Link from "next/link";
 import { createServerClient } from "@/lib/pocketbase-server";
-import StatusBadge from "@/components/StatusBadge";
 import { Collections, type PaymentOrdersWithExpand } from "@/lib/pocketbase-types";
 import { formatCurrency, formatDate } from "@/lib/format";
+import PageHeader from "@/components/PageHeader";
+import PaymentOrdersTable, { type PaymentOrderRow } from "./PaymentOrdersTable";
 
 export const dynamic = "force-dynamic";
 
@@ -14,71 +14,42 @@ export const dynamic = "force-dynamic";
 export default async function PaymentOrdersPage() {
   const pb = await createServerClient();
 
-  const rows = await pb
+  const orders = await pb
     .collection<PaymentOrdersWithExpand>(Collections.PaymentOrders)
     .getFullList({
       expand: "invoice,requested_by",
       sort: "-last_attempt_at",
     });
 
-  return (
-    <div>
-      <h1 className="mb-1 text-lg font-semibold text-gray-900">Órdenes de pago</h1>
-      <p className="mb-4 text-sm text-gray-500">
-        Intentos reales de crear una Orden de Pago en BAS, disparados desde la revisión de una
-        factura confirmada.
-      </p>
+  // Aplanado a valores serializables antes de cruzar al Client Component --
+  // ver la advertencia en PaymentOrdersTable.tsx sobre no pasarle nunca
+  // referencias de íconos/funciones desde acá.
+  const rows: PaymentOrderRow[] = orders.map((row) => ({
+    id: row.id,
+    numero: row.expand?.invoice?.numero_comprobante || row.process_id,
+    proveedor: row.expand?.invoice?.emisor_nombre || "—",
+    metodo: row.metodo_pago,
+    moneda: row.expand?.invoice?.moneda || "",
+    monto: formatCurrency(row.monto, row.expand?.invoice?.moneda),
+    fecha: formatDate(row.last_attempt_at),
+    status: row.status,
+    hasError: row.status === "failed" && !!row.bas_error,
+    errorMensaje: row.bas_error || "",
+    invoiceHref: row.expand?.invoice ? `/invoices/${row.expand.invoice.id}` : null,
+    requestedByEmail: row.expand?.requested_by?.email || "—",
+    retryCount: row.retry_count || 0,
+  }));
 
-      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="min-w-full divide-y divide-gray-200 text-sm">
-          <thead className="bg-gray-50 text-left text-xs font-medium uppercase text-gray-500">
-            <tr>
-              <th className="px-4 py-2">Comprobante</th>
-              <th className="px-4 py-2">Método</th>
-              <th className="px-4 py-2">Monto</th>
-              <th className="px-4 py-2">Estado</th>
-              <th className="px-4 py-2">Error</th>
-              <th className="px-4 py-2">Pedido por</th>
-              <th className="px-4 py-2">Último intento</th>
-              <th className="px-4 py-2" />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td className="px-4 py-2 font-medium text-gray-900">
-                  {row.expand?.invoice?.numero_comprobante || row.process_id}
-                </td>
-                <td className="px-4 py-2 text-gray-600 capitalize">{row.metodo_pago}</td>
-                <td className="px-4 py-2 text-gray-900">
-                  {formatCurrency(row.monto, row.expand?.invoice?.moneda)}
-                </td>
-                <td className="px-4 py-2">
-                  <StatusBadge status={row.status} />
-                </td>
-                <td className="max-w-xs truncate px-4 py-2 text-red-600" title={row.bas_error}>
-                  {row.bas_error || "—"}
-                </td>
-                <td className="px-4 py-2 text-gray-600">{row.expand?.requested_by?.email || "—"}</td>
-                <td className="px-4 py-2 text-gray-600">{formatDate(row.last_attempt_at)}</td>
-                <td className="px-4 py-2">
-                  {row.expand?.invoice && (
-                    <Link href={`/invoices/${row.expand.invoice.id}`} className="text-blue-600 hover:underline">
-                      Ver factura
-                    </Link>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {rows.length === 0 && (
-              <tr>
-                <td colSpan={8} className="px-4 py-6 text-center text-gray-400">
-                  Todavía no se pidió ninguna orden de pago.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+  return (
+    <div className="flex h-full flex-col">
+      <PageHeader>
+        <h1 className="truncate text-base font-semibold text-foreground">Órdenes de pago</h1>
+      </PageHeader>
+
+      <div className="flex-1 overflow-y-auto p-4 md:p-8">
+        <div className="animate-fade-up mx-auto flex max-w-[1100px] flex-col gap-4">
+          <PaymentOrdersTable rows={rows} />
+        </div>
       </div>
     </div>
   );

@@ -1,0 +1,696 @@
+<title>Plan post-deploy — ticket-ai-dashboard</title>
+<style>
+  :root {
+    --paper: #eef1f0;
+    --paper-raised: #ffffff;
+    --paper-sunken: #e4e9e7;
+    --ink: #151a20;
+    --ink-soft: #4b555c;
+    --ink-faint: #7c8790;
+    --line: #d8dedc;
+    --line-strong: #c2cac7;
+    --accent: #3d6b66;
+    --accent-soft: #e3ece9;
+    --accent-ink: #1f4744;
+    --warm: #c1732f;
+    --warm-soft: #f5e6d6;
+    --warm-ink: #7a4014;
+    --danger: #ac4b3f;
+    --danger-soft: #f6e3e0;
+    --danger-ink: #6e2f26;
+    --radius-s: 6px;
+    --radius-m: 10px;
+    --shadow-card: 0 1px 2px rgba(20, 30, 28, 0.06), 0 6px 20px -8px rgba(20, 30, 28, 0.12);
+    --font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, ui-serif, serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Fira Code", Menlo, Consolas, monospace;
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #10151a;
+    --paper-raised: #171e24;
+    --paper-sunken: #0c1114;
+    --ink: #e7eaea;
+    --ink-soft: #9aa6a6;
+    --ink-faint: #6c7679;
+    --line: #262e34;
+    --line-strong: #333d43;
+    --accent: #6fb3aa;
+    --accent-soft: #16302e;
+    --accent-ink: #a9d9d1;
+    --warm: #e0995a;
+    --warm-soft: #3a2a1a;
+    --warm-ink: #f0bd8b;
+    --danger: #e08579;
+    --danger-soft: #3a2220;
+    --danger-ink: #f2b3aa;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.2), 0 6px 24px -8px rgba(0, 0, 0, 0.45);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #10151a;
+      --paper-raised: #171e24;
+      --paper-sunken: #0c1114;
+      --ink: #e7eaea;
+      --ink-soft: #9aa6a6;
+      --ink-faint: #6c7679;
+      --line: #262e34;
+      --line-strong: #333d43;
+      --accent: #6fb3aa;
+      --accent-soft: #16302e;
+      --accent-ink: #a9d9d1;
+      --warm: #e0995a;
+      --warm-soft: #3a2a1a;
+      --warm-ink: #f0bd8b;
+      --danger: #e08579;
+      --danger-soft: #3a2220;
+      --danger-ink: #f2b3aa;
+      --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.2), 0 6px 24px -8px rgba(0, 0, 0, 0.45);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 15.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent-ink); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  .shell {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 40px 24px 96px;
+    display: grid;
+    grid-template-columns: 232px minmax(0, 760px);
+    gap: 56px;
+    align-items: start;
+  }
+
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 0 72px; }
+    .rail { display: none; }
+  }
+
+  /* ---------- Masthead ---------- */
+  .masthead {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 36px 0 28px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 8px;
+  }
+  @media (max-width: 900px) { .masthead { padding: 28px 24px 24px; } }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .eyebrow .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  h1.title {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: clamp(28px, 4vw, 38px);
+    line-height: 1.15;
+    margin: 0;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+
+  .dek {
+    color: var(--ink-soft);
+    font-size: 15px;
+    max-width: 62ch;
+    margin: 0;
+  }
+
+  .status-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 5px 10px 5px 8px;
+    border-radius: 100px;
+    border: 1px solid var(--line-strong);
+    background: var(--paper-raised);
+    color: var(--ink-soft);
+    text-decoration: none;
+    transition: border-color 120ms ease, color 120ms ease, transform 120ms ease;
+  }
+  .status-chip:hover { border-color: var(--accent); color: var(--accent-ink); transform: translateY(-1px); }
+  .status-chip b { color: var(--ink); font-weight: 600; font-family: var(--font-body); }
+  .status-chip .n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent-ink);
+    font-size: 10px; font-weight: 700;
+  }
+
+  /* ---------- Rail ---------- */
+  .rail {
+    position: sticky;
+    top: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .rail-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px 12px;
+  }
+  .rail a {
+    text-decoration: none;
+    color: var(--ink-soft);
+    font-size: 13.5px;
+    padding: 8px 12px;
+    border-radius: var(--radius-s);
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .rail a:hover { background: var(--paper-raised); color: var(--ink); }
+  .rail a .num {
+    font-family: var(--font-mono);
+    color: var(--ink-faint);
+    font-size: 12px;
+  }
+  .rail .meta {
+    margin: 18px 12px 0;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--ink-faint);
+    line-height: 1.7;
+  }
+  .rail .meta code { font-size: 11px; }
+
+  /* ---------- Content ---------- */
+  .content { min-width: 0; padding: 0 24px; }
+  @media (min-width: 901px) { .content { padding: 0; } }
+
+  .context-card {
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-m);
+    padding: 20px 22px;
+    box-shadow: var(--shadow-card);
+    margin: 28px 0 40px;
+  }
+  .context-card h2 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 17px;
+    margin: 0 0 14px;
+  }
+  .kv-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 8px 16px;
+    font-size: 13px;
+  }
+  .kv-grid dt { color: var(--ink-faint); white-space: nowrap; }
+  .kv-grid dd { margin: 0; font-family: var(--font-mono); font-size: 12.5px; color: var(--ink); word-break: break-word; }
+
+  section.task {
+    position: relative;
+    padding: 8px 0 8px 24px;
+    margin: 0 0 52px;
+    border-left: 3px solid var(--line-strong);
+    scroll-margin-top: 24px;
+  }
+  section.task[data-cat="cleanup"] { border-left-color: var(--ink-faint); }
+  section.task[data-cat="test"] { border-left-color: var(--warm); }
+  section.task[data-cat="backup"] { border-left-color: var(--accent); }
+  section.task[data-cat="monitor"] { border-left-color: var(--accent); }
+
+  .task-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .task-num {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--ink-faint);
+  }
+  h2.task-title {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 24px;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .cat-pill {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 100px;
+  }
+  [data-cat="cleanup"] .cat-pill { background: var(--paper-sunken); color: var(--ink-soft); }
+  [data-cat="test"] .cat-pill { background: var(--warm-soft); color: var(--warm-ink); }
+  [data-cat="backup"] .cat-pill, [data-cat="monitor"] .cat-pill { background: var(--accent-soft); color: var(--accent-ink); }
+
+  .task-intro { color: var(--ink-soft); margin: 10px 0 20px; max-width: 64ch; }
+  .task-intro code { font-size: 0.92em; }
+
+  h3.sub {
+    font-family: var(--font-body);
+    font-weight: 650;
+    font-size: 14.5px;
+    margin: 26px 0 10px;
+    color: var(--ink);
+  }
+  section.task > h3.sub:first-of-type { margin-top: 18px; }
+
+  p, li { color: var(--ink); }
+  .task p { max-width: 66ch; }
+  ol.steps, ul.plain {
+    margin: 8px 0 14px;
+    padding-left: 22px;
+    max-width: 66ch;
+  }
+  ol.steps li, ul.plain li { margin: 5px 0; }
+
+  code:not(pre code) {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    background: var(--paper-sunken);
+    padding: 1.5px 5px;
+    border-radius: 4px;
+    color: var(--accent-ink);
+  }
+
+  .term {
+    position: relative;
+    background: var(--paper-sunken);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-m);
+    margin: 10px 0 18px;
+    overflow: hidden;
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 12px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--line);
+  }
+  .copy-btn {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-faint);
+    background: transparent;
+    border: 1px solid var(--line-strong);
+    border-radius: 5px;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  }
+  .copy-btn:hover { color: var(--ink); border-color: var(--ink-faint); }
+  .copy-btn.copied { color: var(--accent-ink); border-color: var(--accent); background: var(--accent-soft); }
+  .term pre {
+    margin: 0;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--ink);
+    tab-size: 2;
+  }
+  .term .cmt { color: var(--ink-faint); }
+
+  .callout {
+    display: flex;
+    gap: 12px;
+    padding: 13px 16px;
+    border-radius: var(--radius-m);
+    margin: 14px 0 18px;
+    font-size: 13.5px;
+    max-width: 66ch;
+  }
+  .callout .glyph { font-family: var(--font-mono); font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+  .callout.ask { background: var(--warm-soft); color: var(--warm-ink); }
+  .callout.ask .glyph { color: var(--warm); }
+  .callout.warn { background: var(--danger-soft); color: var(--danger-ink); }
+  .callout.warn .glyph { color: var(--danger); }
+  .callout.note { background: var(--accent-soft); color: var(--accent-ink); }
+  .callout.note .glyph { color: var(--accent); }
+  .callout p { margin: 0; color: inherit; max-width: none; }
+
+  .order-strip {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-m);
+    padding: 18px 20px;
+    box-shadow: var(--shadow-card);
+    margin-top: 44px;
+  }
+  .order-strip h2 {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 18px;
+    margin: 0 0 4px;
+  }
+  .order-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .order-list li {
+    display: flex; align-items: baseline; gap: 10px;
+    font-size: 13.5px; color: var(--ink-soft);
+  }
+  .order-list .idx {
+    font-family: var(--font-mono); font-size: 12px; color: var(--paper-raised);
+    background: var(--ink); width: 18px; height: 18px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .order-list b { color: var(--ink); }
+
+  footer.foot {
+    grid-column: 1 / -1;
+    padding: 28px 0 0;
+    margin-top: 12px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-faint);
+    font-size: 12px;
+    font-family: var(--font-mono);
+  }
+  @media (max-width: 900px) { footer.foot { padding: 28px 24px 0; } }
+</style>
+
+<div class="shell">
+  <header class="masthead">
+    <span class="eyebrow"><span class="dot"></span>Runbook interno · ticket-ai-dashboard</span>
+    <h1 class="title">Plan post-deploy: limpieza, pruebas reales y hardening operativo</h1>
+    <p class="dek">Escrito el 15 de julio de 2026 para retomar en una conversación nueva — esta se quedó sin contexto. Todo lo que la próxima sesión necesita para ejecutar sin volver a descubrir el estado del Droplet.</p>
+    <nav class="status-row" aria-label="Saltar a una tarea">
+      <a class="status-chip" href="#tarea-a"><span class="n">A</span><b>Limpieza</b></a>
+      <a class="status-chip" href="#tarea-b"><span class="n">B</span><b>Pruebas reales</b></a>
+      <a class="status-chip" href="#tarea-c"><span class="n">C</span><b>Backups</b></a>
+      <a class="status-chip" href="#tarea-d"><span class="n">D</span><b>Monitoreo</b></a>
+    </nav>
+  </header>
+
+  <aside class="rail">
+    <p class="rail-label">En esta página</p>
+    <a href="#contexto"><span class="num">·</span> Contexto / acceso</a>
+    <a href="#tarea-a"><span class="num">A</span> Limpieza del stack viejo</a>
+    <a href="#tarea-b"><span class="num">B</span> Pruebas de flujos reales</a>
+    <a href="#tarea-c"><span class="num">C</span> Backups de PocketBase</a>
+    <a href="#tarea-d"><span class="num">D</span> Monitoreo / alertas</a>
+    <a href="#orden"><span class="num">→</span> Orden sugerido</a>
+    <div class="meta">
+      Droplet<br><code>root@137.184.219.162</code><br>
+      SSH por clave, sin contraseña.
+    </div>
+  </aside>
+
+  <main class="content">
+    <section class="context-card" id="contexto">
+      <h2>Contexto / acceso</h2>
+      <dl class="kv-grid">
+        <dt>Droplet</dt><dd>root@137.184.219.162 — DigitalOcean, SSH por clave (~/.ssh/id_ed25519)</dd>
+        <dt>Specs</dt><dd>960MB RAM + swap 2GB en /swapfile (persistido en /etc/fstab) · 1 vCPU</dd>
+        <dt>Stack</dt><dd>/root/v2/ticket-ai-infra/ — pocketbase, dashboard, invoice-api-{wa,bas,core}, wa-bot, gateway</dd>
+        <dt>Dashboard</dt><dd>http://137.184.219.162:3000 — sin dominio propio todavía</dd>
+        <dt>Backend real</dt><dd>https://backend.ticketia.devstage.com.ar — nginx + certbot, ya andando</dd>
+        <dt>PocketBase</dt><dd>http://137.184.219.162:8090 — admin UI en /_/</dd>
+        <dt>WhatsApp bot</dt><dd>vinculado y conectado (verificado con mensaje real)</dd>
+      </dl>
+    </section>
+
+    <p style="color:var(--ink-soft); max-width:66ch; margin: -20px 0 40px; font-size: 13.5px;">
+      Credenciales (superuser, usuario de prueba, cuenta de servicio) viven en
+      <code>/root/v2/ticket-ai-infra/.env</code> y <code>/root/v2/.superuser_pw_temp</code> en el Droplet — no están en este repo.
+      Más contexto histórico en la memoria del proyecto: <code>project_ticket_ai_dashboard_redesign.md</code> y
+      <code>project_invoicy_bas_orden_pago.md</code>.
+    </p>
+
+    <!-- TASK A -->
+    <section class="task" data-cat="cleanup" id="tarea-a">
+      <div class="task-head">
+        <span class="task-num">A</span>
+        <h2 class="task-title">Limpieza del stack viejo</h2>
+        <span class="cat-pill">Housekeeping</span>
+      </div>
+      <p class="task-intro">Los contenedores viejos siguen <strong>detenidos pero no borrados</strong> desde el cutover, como red de seguridad. No ocupan RAM detenidos — solo disco. Confirmar con el usuario que todo anda bien un tiempo prudencial antes de borrar.</p>
+
+      <h3 class="sub">Verificar estado</h3>
+      <div class="term">
+        <div class="term-bar"><span>bash</span><button class="copy-btn" data-copy="ssh root@137.184.219.162 &quot;docker ps -a --format 'table {{.Names}}\t{{.Status}}' | grep -E 'ticket-ai-api|ticket-wa|ticket-ai-wa-v2'&quot;">Copiar</button></div>
+        <pre>ssh root@137.184.219.162 "docker ps -a --format 'table {{.Names}}\t{{.Status}}' | grep -E 'ticket-ai-api|ticket-wa|ticket-ai-wa-v2'"</pre>
+      </div>
+
+      <h3 class="sub">Si el usuario confirma que quiere borrarlos</h3>
+      <div class="term">
+        <div class="term-bar"><span>bash</span><button class="copy-btn" data-copy="ssh root@137.184.219.162 &quot;
+docker rm ticket-ai-api ticket-wa ticket-ai-wa-v2
+docker image prune -a -f
+&quot;">Copiar</button></div>
+        <pre>ssh root@137.184.219.162 "
+docker rm ticket-ai-api ticket-wa ticket-ai-wa-v2
+docker image prune -a -f   <span class="cmt"># ojo: borra TODAS las imágenes sin contenedor asociado</span>
+"</pre>
+      </div>
+
+      <p>También evaluar borrar (con confirmación explícita — son directorios con código y posibles datos): <code>/root/ticket-ai/</code>, <code>/root/ticket-ai-wa/</code>, <code>/root/ticket-ai-wa-v2/</code>.</p>
+
+      <div class="callout warn">
+        <span class="glyph">!</span>
+        <p><strong>No borrar sin preguntar.</strong> Si alguno de estos directorios tiene un <code>.env</code> con credenciales que no se copiaron al <code>.env</code> nuevo, perderlas sería irreversible. Diff rápido antes de borrar:</p>
+      </div>
+      <div class="term">
+        <div class="term-bar"><span>bash</span><button class="copy-btn" data-copy="ssh root@137.184.219.162 &quot;diff <(grep -oE '^[A-Z_]+=' /root/ticket-ai/.env | sort) <(grep -oE '^[A-Z_]+=' /root/v2/ticket-ai-infra/.env | sort)&quot;">Copiar</button></div>
+        <pre>ssh root@137.184.219.162 "diff &lt;(grep -oE '^[A-Z_]+=' /root/ticket-ai/.env | sort) &lt;(grep -oE '^[A-Z_]+=' /root/v2/ticket-ai-infra/.env | sort)"</pre>
+      </div>
+    </section>
+
+    <!-- TASK B -->
+    <section class="task" data-cat="test" id="tarea-b">
+      <div class="task-head">
+        <span class="task-num">B</span>
+        <h2 class="task-title">Pruebas reales de los flujos que mutan datos</h2>
+        <span class="cat-pill">QA en producción</span>
+      </div>
+      <p class="task-intro">Nunca se probaron en producción, a propósito — para no arriesgar datos reales sin supervisión directa del usuario. Ahora que el stack lleva un tiempo estable, tiene sentido probarlos.</p>
+
+      <div class="callout note">
+        <span class="glyph">§</span>
+        <p>Seguir la convención de seguridad ya establecida: <strong>toda prueba real contra BAS debe ser Total = 1 peso.</strong></p>
+      </div>
+
+      <h3 class="sub">B.1 — Confirmar una factura real</h3>
+      <ol class="steps">
+        <li>Loguearse en el dashboard.</li>
+        <li>Cola de revisión → abrir una factura real pendiente.</li>
+        <li>Confirmar que los datos extraídos son correctos (o corregirlos).</li>
+        <li>Click "Confirmar factura" (⌘+Enter también sirve).</li>
+        <li>Verificar: pasa a <code>review_status=confirmed</code>, aparece en Facturas con el estado correcto, dispara el intento automático de BAS (sección "Estado BAS").</li>
+      </ol>
+
+      <h3 class="sub">B.2 — Reabrir una factura confirmada</h3>
+      <ol class="steps">
+        <li>Desde una factura confirmada, click "Reabrir factura" en el diálogo de confirmación.</li>
+        <li>Confirmar que vuelve a <code>needs_review</code> y reaparece en la Cola.</li>
+      </ol>
+      <div class="callout note">
+        <span class="glyph">i</span>
+        <p>Si esa factura ya tenía una Orden de Pago exitosa en BAS, reabrirla no la bloquea — es una decisión de producto documentada, no un bug.</p>
+      </div>
+
+      <h3 class="sub">B.3 — Crear una Orden de Pago real (la más sensible)</h3>
+      <div class="callout ask">
+        <span class="glyph">?</span>
+        <p>Antes de tocar nada: confirmar con el usuario qué factura real usar y que el monto/proveedor es apropiado para una prueba real contra BAS. Si hay dudas, preguntarle directamente — no asumir.</p>
+      </div>
+      <ol class="steps">
+        <li>Factura confirmada → panel "Orden de pago" → elegir método de pago → "Crear orden de pago".</li>
+        <li>Pega contra el BAS ERP real. Puede fallar con el bloqueador ya conocido ("no existe para aplicarlo") — si pasa, no es una regresión, es el problema externo ya documentado.</li>
+        <li>Documentar el resultado (éxito o error) en la memoria del proyecto para no reinvestigar lo mismo.</li>
+      </ol>
+
+      <h3 class="sub">B.4 — WhatsApp bot end-to-end</h3>
+      <ol class="steps">
+        <li>Mandar una foto/PDF de una factura real al número vinculado.</li>
+        <li>Verificar en logs que la recibe y la manda a procesar:</li>
+      </ol>
+      <div class="term">
+        <div class="term-bar"><span>bash</span><button class="copy-btn" data-copy="docker logs ticket-ai-infra-wa-bot-1 -f
+docker logs ticket-ai-infra-invoice-api-wa-1 -f">Copiar</button></div>
+        <pre>docker logs ticket-ai-infra-wa-bot-1 -f
+docker logs ticket-ai-infra-invoice-api-wa-1 -f</pre>
+      </div>
+      <ol class="steps" start="3">
+        <li>Confirmar que la factura aparece en la Cola de revisión del dashboard.</li>
+        <li>Si falla, revisar también <code>invoice-api-core</code> (Gemini/Claude) y los logs de Sheets si aplica.</li>
+      </ol>
+    </section>
+
+    <!-- TASK C -->
+    <section class="task" data-cat="backup" id="tarea-c">
+      <div class="task-head">
+        <span class="task-num">C</span>
+        <h2 class="task-title">Backups de PocketBase</h2>
+        <span class="cat-pill">Infra</span>
+      </div>
+      <p class="task-intro">Hoy el volumen <code>ticket-ai-infra_pocketbase-data</code> no tiene ningún backup, y ya es la fuente de verdad de facturas reales confirmadas.</p>
+
+      <div class="callout ask">
+        <span class="glyph">?</span>
+        <p>Preguntarle al usuario dónde quiere guardar los backups (S3, Cloudflare R2, Google Drive, otro Droplet) antes de implementar. Ya hay precedente propio: backups a R2 vía <code>rclone</code> en otro proyecto (memoria <code>project_felicity_db_backups</code>) — gotcha conocido: <code>rclone</code> necesita <code>--s3-no-check-bucket</code> con un token R2 no-admin. Probablemente el mismo patrón sirva acá.</p>
+      </div>
+
+      <h3 class="sub">Propuesta de implementación</h3>
+      <p>Script <code>/root/v2/backup-pocketbase.sh</code> en el Droplet (ajustar destino según lo que responda el usuario):</p>
+      <div class="term">
+        <div class="term-bar"><span>bash · backup-pocketbase.sh</span><button class="copy-btn" data-copy="#!/bin/bash
+set -euo pipefail
+TS=$(date -u +%Y%m%d-%H%M%S)
+DEST=&quot;/root/backups/pocketbase-$TS.tar.gz&quot;
+mkdir -p /root/backups
+docker run --rm -v ticket-ai-infra_pocketbase-data:/data -v /root/backups:/backup \
+  alpine tar czf &quot;/backup/pocketbase-$TS.tar.gz&quot; -C /data .
+# subir a destino remoto (ajustar):
+# rclone copy &quot;$DEST&quot; remote:bucket/pocketbase-backups/ --s3-no-check-bucket
+find /root/backups -name 'pocketbase-*.tar.gz' -mtime +14 -delete">Copiar</button></div>
+        <pre>#!/bin/bash
+set -euo pipefail
+TS=$(date -u +%Y%m%d-%H%M%S)
+DEST="/root/backups/pocketbase-$TS.tar.gz"
+mkdir -p /root/backups
+docker run --rm -v ticket-ai-infra_pocketbase-data:/data -v /root/backups:/backup \
+  alpine tar czf "/backup/pocketbase-$TS.tar.gz" -C /data .
+<span class="cmt"># subir a destino remoto (ajustar):
+# rclone copy "$DEST" remote:bucket/pocketbase-backups/ --s3-no-check-bucket</span>
+find /root/backups -name 'pocketbase-*.tar.gz' -mtime +14 -delete</pre>
+      </div>
+
+      <p>Cron diario:</p>
+      <div class="term">
+        <div class="term-bar"><span>crontab</span><button class="copy-btn" data-copy="0 4 * * * /root/v2/backup-pocketbase.sh >> /var/log/pb-backup.log 2>&1">Copiar</button></div>
+        <pre>0 4 * * * /root/v2/backup-pocketbase.sh >> /var/log/pb-backup.log 2>&1</pre>
+      </div>
+
+      <div class="callout warn">
+        <span class="glyph">!</span>
+        <p><strong>Probar una restauración real al menos una vez</strong> — no solo que el backup se genere. Parar <code>pocketbase</code>, restaurar el tar en el volumen, volver a levantar, confirmar que los datos están. Un backup nunca probado no cuenta como backup.</p>
+      </div>
+      <p style="font-size: 13px; color: var(--ink-faint);">Espacio en disco: ~10GB libres al momento del deploy (revisar de nuevo). Con retención de 14 días y una BD chica no debería ser problema, pero vigilarlo.</p>
+    </section>
+
+    <!-- TASK D -->
+    <section class="task" data-cat="monitor" id="tarea-d">
+      <div class="task-head">
+        <span class="task-num">D</span>
+        <h2 class="task-title">Monitoreo / alertas</h2>
+        <span class="cat-pill">Infra</span>
+      </div>
+      <p class="task-intro">Nada existe hoy. El Droplet es chico (960MB RAM) — evitar stacks pesados tipo Prometheus+Grafana. De más a menos simple:</p>
+
+      <h3 class="sub">1. Uptime check externo <span style="color:var(--ink-faint); font-weight:400;">— recomendado, gratis, cero carga en el Droplet</span></h3>
+      <p>UptimeRobot o similar pegándole a <code>https://backend.ticketia.devstage.com.ar/</code> (y al dashboard, cuando tenga dominio) cada 5 min, con alerta si cae. Requiere que el usuario cree la cuenta — no lo puede hacer Claude sin sus credenciales.</p>
+
+      <h3 class="sub">2. Watchdog local simple <span style="color:var(--ink-faint); font-weight:400;">— cron cada 5 min</span></h3>
+      <div class="term">
+        <div class="term-bar"><span>bash</span><button class="copy-btn" data-copy="#!/bin/bash
+cd /root/v2/ticket-ai-infra
+DOWN=$(docker compose ps --status exited --format '{{.Service}}')
+if [ -n &quot;$DOWN&quot; ]; then
+  echo &quot;Servicios caídos: $DOWN&quot; # reemplazar por un curl a un webhook (Slack/Discord/ntfy.sh)
+  docker compose up -d
+fi">Copiar</button></div>
+        <pre>#!/bin/bash
+cd /root/v2/ticket-ai-infra
+DOWN=$(docker compose ps --status exited --format '{{.Service}}')
+if [ -n "$DOWN" ]; then
+  echo "Servicios caídos: $DOWN" <span class="cmt"># reemplazar por un curl a un webhook (Slack/Discord/ntfy.sh)</span>
+  docker compose up -d
+fi</pre>
+      </div>
+      <p style="font-size: 13.5px;"><code>ntfy.sh</code> es la opción más simple para notificaciones push sin cuenta paga si el usuario quiere algo ya mismo sin configurar Slack/Discord.</p>
+
+      <h3 class="sub">3. Alertas de recursos</h3>
+      <p>Dado lo ajustado que está el Droplet, un chequeo simple de <code>free</code>/<code>df</code> por cron que avise si RAM disponible &lt;100MB o disco &gt;90% sería barato de agregar — ya se vio swap en uso real durante el deploy.</p>
+
+      <div class="callout ask">
+        <span class="glyph">?</span>
+        <p>Antes de implementar: preguntarle al usuario qué canal de alertas prefiere (email, Slack, WhatsApp al propio bot, ntfy.sh) — no asumir.</p>
+      </div>
+    </section>
+
+    <section class="order-strip" id="orden">
+      <h2>Orden sugerido al retomar</h2>
+      <ul class="order-list">
+        <li><span class="idx">1</span> <b>Tarea B</b>&nbsp;— probar que todo funciona de verdad en producción; es lo más urgente, valida el deploy end-to-end.</li>
+        <li><span class="idx">2</span> <b>Tarea C</b>&nbsp;— backups, antes de seguir usando el sistema en producción sin red de seguridad de datos.</li>
+        <li><span class="idx">3</span> <b>Tarea D</b>&nbsp;— monitoreo, para enterarse solo si algo se cae.</li>
+        <li><span class="idx">4</span> <b>Tarea A</b>&nbsp;— limpieza, al final, una vez que B/C/D dieron confianza de que el stack nuevo es estable.</li>
+      </ul>
+    </section>
+
+    <footer class="foot">docs/plan-post-deploy-ops.md · ticket-ai-dashboard · Dinardi</footer>
+  </main>
+</div>
+
+<script>
+  document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.getAttribute('data-copy') || '';
+      navigator.clipboard.writeText(text).then(function () {
+        var prev = btn.textContent;
+        btn.textContent = 'Copiado';
+        btn.classList.add('copied');
+        setTimeout(function () {
+          btn.textContent = prev;
+          btn.classList.remove('copied');
+        }, 1400);
+      });
+    });
+  });
+</script>

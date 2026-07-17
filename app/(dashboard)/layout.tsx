@@ -1,7 +1,19 @@
-import type { ReactNode } from "react";
-import Link from "next/link";
-import { requireUserSession } from "@/lib/pocketbase-server";
-import LogoutButton from "@/components/LogoutButton";
+import type { CSSProperties, ReactNode } from "react";
+import {
+  requireUserSession,
+  ClientResponseError,
+} from "@/lib/pocketbase-server";
+import { Collections, type InvoicesRecord } from "@/lib/pocketbase-types";
+import {
+  Sidebar,
+  SidebarFooter,
+  SidebarHeader,
+  SidebarInset,
+  SidebarProvider,
+} from "@/components/ui/sidebar";
+import SidebarNav from "@/components/SidebarNav";
+import UserMenu from "@/components/UserMenu";
+import CommandPalette from "@/components/CommandPalette";
 
 export default async function DashboardLayout({
   children,
@@ -10,41 +22,49 @@ export default async function DashboardLayout({
 }) {
   const pb = await requireUserSession();
   const record = pb.authStore.record;
-  const email = typeof record?.email === "string" ? record?.email : undefined;
+  const email = typeof record?.email === "string" ? record.email : undefined;
+  const name = typeof record?.name === "string" ? record.name : undefined;
+
+  // Mismo filtro exacto que app/(dashboard)/queue/page.tsx: facturas ya
+  // procesadas todavía sin confirmar por un humano. Es solo el número para
+  // el badge del nav -- si la consulta falla no vale la pena tirar abajo
+  // todo el shell del dashboard por eso, el badge simplemente no aparece.
+  let queueCount: number | undefined;
+  try {
+    const result = await pb
+      .collection<InvoicesRecord>(Collections.Invoices)
+      .getList(1, 1, {
+        filter: 'status = "completed" && review_status != "confirmed"',
+      });
+    queueCount = result.totalItems;
+  } catch (error) {
+    if (!(error instanceof ClientResponseError)) throw error;
+    queueCount = undefined;
+  }
 
   return (
-    <div className="flex min-h-full flex-1 flex-col">
-      <header className="border-b border-gray-200 bg-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <nav className="flex flex-wrap items-center gap-4 text-sm font-medium text-gray-600">
-            <span className="mr-2 text-sm font-semibold text-gray-900">
-              Ticket AI
-            </span>
-            <Link href="/queue" className="hover:text-gray-900">
-              Cola de revisión
-            </Link>
-            <Link href="/invoices" className="hover:text-gray-900">
-              Facturas
-            </Link>
-            <Link href="/category-map" className="hover:text-gray-900">
-              Categorías BAS
-            </Link>
-            <Link href="/payment-methods" className="hover:text-gray-900">
-              Métodos de pago
-            </Link>
-            <Link href="/payment-orders" className="hover:text-gray-900">
-              Órdenes de pago
-            </Link>
-          </nav>
-          <div className="flex items-center gap-3 text-sm text-gray-500">
-            {email && <span className="hidden sm:inline">{email}</span>}
-            <LogoutButton />
-          </div>
-        </div>
-      </header>
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
+    <SidebarProvider
+      defaultOpen
+      style={{ "--sidebar-width": "246px" } as CSSProperties}
+    >
+      <Sidebar collapsible="offcanvas" className="border-r">
+        <SidebarHeader className="h-[60px] flex-row items-baseline gap-2 border-b border-sidebar-border px-4">
+          <span className="font-serif text-[20px] leading-none text-sidebar-primary italic">
+            Ticket AI
+          </span>
+          <span className="font-heading text-[9.5px] font-semibold tracking-[0.08em] text-sidebar-foreground uppercase">
+            Dinardi
+          </span>
+        </SidebarHeader>
+        <SidebarNav queueCount={queueCount} />
+        <SidebarFooter className="border-t border-sidebar-border p-3">
+          <UserMenu name={name} email={email} />
+        </SidebarFooter>
+      </Sidebar>
+      <SidebarInset className="h-svh overflow-hidden">
+        <CommandPalette />
         {children}
-      </main>
-    </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }

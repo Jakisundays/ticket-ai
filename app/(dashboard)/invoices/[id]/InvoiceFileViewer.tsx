@@ -1,3 +1,4 @@
+import { ExternalLink } from "lucide-react";
 import { invoiceFileProxyUrl } from "@/lib/format";
 
 /**
@@ -14,24 +15,25 @@ export default function InvoiceFileViewer({ processId }: { processId: string }) 
   const src = invoiceFileProxyUrl(processId);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
-      <div className="flex items-center justify-between border-b border-gray-200 bg-white px-3 py-2">
-        <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
+    <div className="flex h-full flex-col gap-3 rounded-lg bg-card p-3">
+      <div className="flex items-center justify-between px-1">
+        <span className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
           Archivo original
         </span>
         <a
           href={src}
           target="_blank"
           rel="noreferrer"
-          className="text-xs text-blue-600 hover:underline"
+          className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80"
         >
           Abrir en pestaña nueva
+          <ExternalLink className="size-3.5" />
         </a>
       </div>
       <iframe
         src={src}
         title="Archivo original de la factura"
-        className="min-h-[480px] flex-1 bg-white"
+        className="min-h-0 flex-1 rounded-lg border bg-muted"
       />
     </div>
   );
