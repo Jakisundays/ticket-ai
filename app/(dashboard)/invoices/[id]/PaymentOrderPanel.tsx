@@ -140,7 +140,11 @@ export default function PaymentOrderPanel({
       if (outcome.success) {
         toast.success("Orden de pago creada en BAS.");
       } else {
-        toast.error(outcome.detailText || "BAS rechazó la orden de pago.");
+        // El detalle completo (a veces un blob JSON largo de BAS) ya se
+        // muestra inline en el paso que falló -- ver PaymentOrderMission.
+        // Repetirlo acá infla el toast (llegó a medir 346px de alto en una
+        // prueba real) y termina tapando el panel entero.
+        toast.error("BAS rechazó la orden de pago.");
       }
       router.refresh();
     } catch (error) {
