@@ -40,7 +40,7 @@ from googleapiclient.http import MediaFileUpload
 
 # Local imports
 from tools import tools
-from tools_standard import tools as tools_standard
+from tools_standard import build_tools
 from utils.bas import BasClient, BasApiError
 from utils.pocketbase_client import PocketBaseClient
 from utils.rate_limit import limiter
@@ -818,8 +818,36 @@ class InvoiceOrchestrator:
                 #     timeout=10,
                 # )
                 # app_logger.error(f"Webhook Status Code: {error_response.status_code}")
-                if attempt < max_retries:
-                    app_logger.warning("🔄 Retrying...")
+                # Bug real (18-jul-2026): esta condición usaba "< max_retries" en
+                # vez de "< max_retries - 1", así que con range(0, max_retries)
+                # (attempt siempre 0..max_retries-1) nunca daba False -- el except
+                # de abajo con el ValueError "Max retries exceeded" era código
+                # muerto, jamás se ejecutaba. Al agotarse los intentos la función
+                # caía al final del for sin return -> devolvía None en silencio,
+                # y el caller (formatear_factura) reventaba con un
+                # AttributeError críptico ("'NoneType' object has no attribute
+                # 'get'") en vez de un mensaje real. Confirmado en vivo con una
+                # imagen corrupta real.
+                if attempt < max_retries - 1:
+                    app_logger.warning(
+                        f"🔄 Retrying... (intento {attempt + 2} de {max_retries})"
+                    )
+                    # Best-effort, mismo patrón que el resto del pipeline: no
+                    # debe frenar el reintento si PocketBase no responde. Nota:
+                    # las 3 tools corren en paralelo (ver run_image_toolchain),
+                    # cada una con su propio contador -- este campo es un
+                    # indicador agregado aproximado para la UI ("va por el
+                    # intento N"), no un progreso exacto por tool.
+                    try:
+                        self._pb_client.upsert_invoice(
+                            {
+                                "process_id": process_id,
+                                "status": "processing",
+                                "extraction_attempt": attempt + 2,
+                            }
+                        )
+                    except Exception:
+                        pass
                     continue
                 else:
                     app_logger.error("❌ Max retries exceeded.")
@@ -843,13 +871,31 @@ class InvoiceOrchestrator:
                 #     timeout=10,
                 # )
                 # app_logger.error(f"Webhook Status Code: {error_response.status_code}")
-                if attempt < max_retries:
-                    app_logger.warning("🔄 Retrying...")
+                # Mismo fix de off-by-one que en el except de ValidationError
+                # de arriba, ver ese comentario.
+                if attempt < max_retries - 1:
+                    app_logger.warning(
+                        f"🔄 Retrying... (intento {attempt + 2} de {max_retries})"
+                    )
+                    try:
+                        self._pb_client.upsert_invoice(
+                            {
+                                "process_id": process_id,
+                                "status": "processing",
+                                "extraction_attempt": attempt + 2,
+                            }
+                        )
+                    except Exception:
+                        pass
                     continue
                 else:
                     app_logger.error("❌ Max retries exceeded.")
+                    # e.message NO existe en una Exception genérica (solo en
+                    # ValidationError, ver el except de arriba) -- este
+                    # AttributeError también era código muerto hasta el fix
+                    # del off-by-one; usar str(e) acá.
                     raise ValueError(
-                        f"Max retries exceeded for '{tool_name}'. Last error: {e.message}"
+                        f"Max retries exceeded for '{tool_name}'. Last error: {str(e)}"
                     )
 
     # Procesa imágenes con Claude Vision
@@ -857,6 +903,11 @@ class InvoiceOrchestrator:
         self,
         item: QueueItem,
     ):
+        # Categorías vigentes (PocketBase, cacheadas 60s -- ver bas_config.py)
+        # en vez del enum estático de antes: agregar/sacar una categoría es
+        # un cambio de datos en /category-map, no un deploy.
+        tools_standard = build_tools()
+
         # Convierte imagen a base64
         image_file = Path(item["file_path"])
         base64_string = base64.b64encode(image_file.read_bytes()).decode()
@@ -914,6 +965,9 @@ class InvoiceOrchestrator:
         self,
         item: QueueItem,
     ):
+        # Ver comentario equivalente en run_image_toolchain.
+        tools_standard = build_tools()
+
         doc = fitz.open(item["file_path"])
         base64_images = []
         for page_num in range(len(doc)):
@@ -1697,6 +1751,48 @@ async def _procesar_imagen_o_pdf(
         "process_id": process_id,
     }
 
+    # Placeholder "processing" ANTES de arrancar la extracción -- ver bug
+    # real 2026-07-18: si run_image_toolchain/run_pdf_toolchain (Gemini) o
+    # cualquier paso más abajo tira una excepción, _procesar_en_background la
+    # traga y loguea, pero hasta ahora el invoice recién se creaba al FINAL
+    # (tras Gemini+Sheets+BAS) -- una falla temprana dejaba CERO rastro en
+    # PocketBase: no aparecía en Facturas ni en la cola, "no pasaba nada"
+    # para quien subió el archivo. Este upsert (mismo process_id que el
+    # upsert final de más abajo, así que se pisan entre sí, no duplican)
+    # garantiza que toda subida deje un registro desde el arranque, y que
+    # una falla real termine en status="error" (ver _procesar_en_background)
+    # en vez de desaparecer en silencio.
+    #
+    # error_message/extraction_attempt se resetean acá a propósito: este
+    # mismo código corre también en un REINTENTO manual (ver endpoint
+    # /invoices/{process_id}/retry-extraction), así que si no se limpian
+    # quedarían pegados el mensaje de error y el contador del intento
+    # anterior encima de un resultado nuevo.
+    _pb_invoice_record_inicial = orchestrator._pb_client.upsert_invoice(
+        {
+            "process_id": process_id,
+            "status": "processing",
+            "error_message": "",
+            "extraction_attempt": 1,
+        }
+    )
+
+    # Adjunta el archivo original DESDE EL ARRANQUE, no solo si el
+    # procesamiento termina bien (a diferencia de como era antes, ver más
+    # abajo) -- así el panel de revisión puede mostrar el documento aunque
+    # la extracción falle, y el endpoint de reintento manual tiene de dónde
+    # volver a leerlo sin pedirle al usuario que lo suba de nuevo.
+    # Best-effort: un fallo acá no debe frenar el procesamiento.
+    if _pb_invoice_record_inicial and _pb_invoice_record_inicial.get("id"):
+        try:
+            orchestrator._pb_client.adjuntar_archivo_original(
+                _pb_invoice_record_inicial["id"], file_location, file_name, media_type
+            )
+        except Exception as e:
+            app_logger.warning(
+                f"[{process_id}] PocketBase: error adjuntando archivo original (temprano): {e}"
+            )
+
     # Procesa según tipo
     if media_type.startswith("image"):
         app_logger.info("Tenemos una imagen")
@@ -1820,96 +1916,58 @@ async def _procesar_imagen_o_pdf(
     factura["bas"] = resultado_bas
     factura["status_code"] = 200
 
+    # El archivo original ya se adjuntó al arranque de esta función (ver el
+    # placeholder "processing" más arriba) -- no hace falta repetirlo acá.
+
     os.remove(file_location)
 
     return factura
+
+
+async def _procesar_en_background(**kwargs) -> None:
+    """Corre _procesar_imagen_o_pdf() sin bloquear la respuesta HTTP.
+
+    El procesamiento real (Gemini + búsqueda de proveedor en BAS) puede
+    superar los 200s de timeout del gateway para /gemini2/ (ver nginx.conf)
+    incluso cuando termina bien del lado del servidor -- verificado en
+    producción con facturas reales: 7/7 PDFs de una tanda de prueba
+    devolvieron 504 al cliente, pero 6/7 igual terminaron persistidas
+    correctamente en PocketBase unos minutos después (el request HTTP no se
+    cancela solo porque nginx se desconectó). El cliente veía un error falso
+    mientras el backend seguía trabajando -- confuso, y arriesga que alguien
+    reintente y duplique el procesamiento de la misma factura.
+    """
+    try:
+        await _procesar_imagen_o_pdf(**kwargs)
+    except Exception as exc:
+        process_id = kwargs.get("process_id", "?")
+        app_logger.info(f"[{process_id}] Error procesando en background: {exc}")
+        # Deja rastro real en PocketBase en vez de tragar la excepción en
+        # silencio -- convierte el placeholder "processing" (creado al
+        # arranque de _procesar_imagen_o_pdf) en "error", así la factura
+        # aparece en Facturas con el motivo real en vez de desaparecer.
+        if process_id != "?":
+            orchestrator._pb_client.upsert_invoice(
+                {
+                    "process_id": process_id,
+                    "status": "error",
+                    "error_message": str(exc)[:1000],
+                }
+            )
 
 
 @router.post(
     "/process-invoice",
     summary="Procesar factura - GEMINI",
     tags=["Procesamiento de facturas"],
-    response_description="Datos extraídos de la factura y uso de tokens.",
+    # Tanto archivo suelto como ZIP responden 201 de inmediato y procesan en
+    # background (ver _procesar_en_background) -- antes, el archivo suelto
+    # devolvía 200 de forma síncrona con los datos ya extraídos, pero eso es
+    # lo que producía 504 del gateway con PDFs reales (la extracción +
+    # búsqueda de proveedor en BAS puede superar los 200s de nginx.conf).
+    response_description="La factura quedó encolada para procesarse en background.",
     response_model=dict,
     responses={
-        200: {
-            "description": "Respuesta exitosa con los datos extraídos de la factura y uso de tokens.",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "data": {
-                            "emisor_receptor": {
-                                "comprobante": {
-                                    "tipo": "Factura",
-                                    "subtipo": "A",
-                                    "jurisdiccion_fiscal": "AR",
-                                    "numero": "0001-00001234",
-                                    "fecha_emision": "2024-06-01",
-                                    "moneda": "ARS",
-                                },
-                                "emisor": {
-                                    "nombre": "Empresa S.A.",
-                                    "id_fiscal": "30-12345678-9",
-                                    "direccion": "Av. Siempre Viva 123",
-                                    "condicion_iva": "Responsable Inscripto",
-                                },
-                                "receptor": {
-                                    "nombre": "Juan Pérez",
-                                    "id_fiscal": "20-98765432-1",
-                                    "direccion": "Calle Falsa 456",
-                                    "condicion_iva": "Consumidor Final",
-                                },
-                                "otros": {
-                                    "forma_pago": "Transferencia",
-                                    "CAE": "12345678901234",
-                                    "vencimiento_CAE": "2024-06-15",
-                                },
-                            },
-                            "items": {
-                                "detalles": [
-                                    {
-                                        "descripcion": "Producto A",
-                                        "cantidad": 2,
-                                        "precio_unitario": 1500.0,
-                                        "precio_total": 3000.0,
-                                    }
-                                ],
-                                "subtotal": 3000.0,
-                                "total": 3630.0,
-                                "observaciones": "Pago contado.",
-                            },
-                            "impuestos": {
-                                "impuestos": [
-                                    {
-                                        "tipo": "IVA",
-                                        "descripcion": "IVA 21%",
-                                        "base_imponible": 3000.0,
-                                        "alicuota": 21.0,
-                                        "importe": 630.0,
-                                    }
-                                ],
-                                "retenciones": [
-                                    {
-                                        "tipo": "Ganancias",
-                                        "descripcion": "Retención de Ganancias",
-                                        "base_imponible": 1000.0,
-                                    }
-                                ],
-                            },
-                        },
-                        "tokens": {
-                            "input_tokens": 1234,
-                            "output_tokens": 567,
-                            "cache_creation_input_tokens": 1230,
-                            "cache_read_input_tokens": 2130,
-                        },
-                        "id": "id_value",
-                        "saved_sheet": True,
-                        "status_code": 200,
-                    }
-                }
-            },
-        },
         201: {
             "description": "La factura está siendo procesada.",
             "content": {
@@ -1966,15 +2024,25 @@ async def process_invoice(
 
         app_logger.info(f"Mime type: {kind.mime}")
 
-        # Procesa imagen o PDF
+        # Procesa imagen o PDF -- en background (ver _procesar_en_background):
+        # esperarlo acá adentro del request original es lo que producía los
+        # 504 con PDFs reales (Gemini + búsqueda de proveedor en BAS puede
+        # superar los 200s del gateway).
         if kind.mime.startswith("image") or kind.mime == "application/pdf":
-            return await _procesar_imagen_o_pdf(
-                file_location=file_location,
-                file_name=file.filename,
-                extension=extension,
-                media_type=kind.mime,
-                process_id=id,
+            asyncio.create_task(
+                _procesar_en_background(
+                    file_location=file_location,
+                    file_name=file.filename,
+                    extension=extension,
+                    media_type=kind.mime,
+                    process_id=id,
+                )
             )
+            return {
+                "success": True,
+                "message": "La factura está siendo procesada.",
+                "status_code": 201,
+            }
 
         # Procesa ZIP
         elif (
@@ -1983,20 +2051,32 @@ async def process_invoice(
         ):
             app_logger.info("Tenemos un ZIP")
             supported_extensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"]
+            # Tope de archivos por ZIP -- el Droplet tiene 1 vCPU/960MB y cada
+            # archivo encadena Gemini + búsqueda de proveedor en BAS (puede
+            # tardar 1-2 min sola, ver nginx.conf); un ZIP gigante saturaría
+            # el background task de abajo por horas.
+            MAX_ARCHIVOS_ZIP = 20
 
-            # Extrae y procesa cada archivo
+            archivos_a_procesar = []
+
             with zipfile.ZipFile(file_location, "r") as zip_ref:
-                for member_name in zip_ref.namelist():
-                    if member_name.endswith("/"):
-                        continue  # Skip dirs
+                miembros = [n for n in zip_ref.namelist() if not n.endswith("/")]
+                if len(miembros) > MAX_ARCHIVOS_ZIP:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"El ZIP tiene {len(miembros)} archivos, el máximo "
+                            f"permitido es {MAX_ARCHIVOS_ZIP}. Subilo en lotes más chicos."
+                        ),
+                    )
 
-                    # Info del archivo
+                # Extrae y clasifica cada archivo
+                for member_name in miembros:
                     file_name_in_zip = os.path.basename(member_name)
                     file_extension_in_zip = os.path.splitext(file_name_in_zip)[
                         1
                     ].lower()
 
-                    # Extrae archivo
                     downloads_folder = "downloads"
                     zip_ref.extract(member_name, downloads_folder)
                     extracted_file_path = os.path.join(downloads_folder, member_name)
@@ -2004,14 +2084,15 @@ async def process_invoice(
 
                     # Procesa si es compatible
                     if file_extension_in_zip in supported_extensions:
-                        item = {
-                            "file_name": file_name_in_zip,
-                            "file_extension": file_extension_in_zip,
-                            "file_path": extracted_file_path,
-                            "media_type": media_type,
-                            "process_id": f"{id}/{file_name_in_zip}",
-                        }
-                        await orchestrator.task_queue.put(item)
+                        archivos_a_procesar.append(
+                            {
+                                "file_location": extracted_file_path,
+                                "file_name": file_name_in_zip,
+                                "extension": file_extension_in_zip.lstrip("."),
+                                "media_type": media_type,
+                                "process_id": f"{id}/{file_name_in_zip}",
+                            }
+                        )
 
                     # Notifica y elimina si no es compatible
                     else:
@@ -2027,6 +2108,22 @@ async def process_invoice(
                         )
                         os.remove(extracted_file_path)
 
+            async def _procesar_zip_en_background(archivos):
+                # Secuencial a propósito (ver comentario de MAX_ARCHIVOS_ZIP):
+                # correr todos los archivos en paralelo saturaría la única
+                # vCPU del Droplet. Un archivo que falla no frena al resto
+                # (_procesar_en_background ya loguea y traga la excepción).
+                for archivo in archivos:
+                    await _procesar_en_background(**archivo)
+
+            # No se espera (await) a propósito -- el endpoint responde 201 de
+            # inmediato y el batch sigue procesándose en background. Antes de
+            # este fix, esta rama llamaba a "orchestrator.task_queue" que no
+            # existe en esta clase (solo existe "job_queue", con una forma de
+            # item distinta) -- cada archivo de cada ZIP subido a este
+            # endpoint fallaba en silencio con AttributeError.
+            asyncio.create_task(_procesar_zip_en_background(archivos_a_procesar))
+
         else:
             raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
 
@@ -2036,6 +2133,8 @@ async def process_invoice(
             "status_code": 201,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         app_logger.info(f"Error: {e}")
         raise HTTPException(
@@ -2096,13 +2195,20 @@ async def website_upload(
             os.remove(file_location)
             raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
 
-        return await _procesar_imagen_o_pdf(
-            file_location=file_location,
-            file_name=file.filename,
-            extension=extension,
-            media_type=kind.mime,
-            process_id=process_id,
+        asyncio.create_task(
+            _procesar_en_background(
+                file_location=file_location,
+                file_name=file.filename,
+                extension=extension,
+                media_type=kind.mime,
+                process_id=process_id,
+            )
         )
+        return {
+            "success": True,
+            "message": "La factura está siendo procesada.",
+            "status_code": 201,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -2520,47 +2626,174 @@ def _drive_credentials():
 
 @router.get(
     "/invoices/{process_id}/file",
-    summary="Proxy del archivo original de una factura (Google Drive)",
+    summary="Proxy del archivo original de una factura (Drive o PocketBase)",
     tags=["Procesamiento de facturas"],
 )
 async def obtener_archivo_factura(
     process_id: str,
     x_invoicy_secret: Optional[str] = Header(default=None, alias="X-Invoicy-Secret"),
 ):
-    """Streamea el archivo original (imagen/PDF) de una factura desde Drive,
-    para el panel de revisión del dashboard. El archivo se sube con scope
-    drive.file y sin permissions().create() (verificado: es privado al
-    service account) -- por eso hace falta este proxy en vez de un iframe
-    directo a drive.google.com."""
+    """Streamea el archivo original (imagen/PDF) de una factura para el panel
+    de revisión del dashboard. Dos orígenes posibles según cómo haya
+    ingresado la factura:
+      - drive_file_id (flujo viejo de email, worker()/job_queue): Google
+        Drive, con scope drive.file y sin permissions().create() (privado al
+        service account) -- por eso hace falta este proxy en vez de un
+        iframe directo a drive.google.com.
+      - documento_original (website-upload, /process-invoice, /upload del
+        dashboard): campo "file" nativo de PocketBase, protected=true --
+        hace falta un file token de corta duración (ver
+        PocketBaseClient.obtener_file_token) para leerlo.
+    """
     _verificar_secreto_invoicy(x_invoicy_secret)
 
     invoice = orchestrator._pb_client.get_invoice_by_process_id(process_id)
-    if invoice is None or not invoice.get("drive_file_id"):
-        raise HTTPException(status_code=404, detail=f"No hay archivo para process_id={process_id}.")
+    if invoice is None:
+        raise HTTPException(
+            status_code=404, detail=f"No hay factura para process_id={process_id}."
+        )
 
-    credentials = _drive_credentials()
-    if credentials is None:
-        raise HTTPException(status_code=500, detail="Faltan credenciales de Google Drive en el servidor.")
-    credentials.refresh(google_auth_requests.Request())
+    if invoice.get("drive_file_id"):
+        credentials = _drive_credentials()
+        if credentials is None:
+            raise HTTPException(
+                status_code=500, detail="Faltan credenciales de Google Drive en el servidor."
+            )
+        credentials.refresh(google_auth_requests.Request())
 
-    upstream = requests.get(
-        f"https://www.googleapis.com/drive/v3/files/{invoice['drive_file_id']}",
-        params={"alt": "media", "supportsAllDrives": "true"},
-        headers={"Authorization": f"Bearer {credentials.token}"},
-        stream=True,
-        timeout=30,
+        upstream = requests.get(
+            f"https://www.googleapis.com/drive/v3/files/{invoice['drive_file_id']}",
+            params={"alt": "media", "supportsAllDrives": "true"},
+            headers={"Authorization": f"Bearer {credentials.token}"},
+            stream=True,
+            timeout=30,
+        )
+        if upstream.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Google Drive respondió {upstream.status_code} para {invoice['drive_file_id']}.",
+            )
+        return StreamingResponse(
+            upstream.iter_content(chunk_size=65536),
+            media_type=upstream.headers.get("Content-Type", "application/octet-stream"),
+            headers={"Content-Disposition": "inline"},
+        )
+
+    if invoice.get("documento_original"):
+        file_token = orchestrator._pb_client.obtener_file_token()
+        if not file_token:
+            raise HTTPException(
+                status_code=502, detail="No se pudo obtener un token de archivo de PocketBase."
+            )
+        pb_base_url = (os.getenv("POCKETBASE_URL") or "").rstrip("/")
+        file_url = (
+            f"{pb_base_url}/api/files/invoices/{invoice['id']}/{invoice['documento_original']}"
+        )
+        upstream = requests.get(
+            file_url, params={"token": file_token}, stream=True, timeout=30
+        )
+        if upstream.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"PocketBase respondió {upstream.status_code} al pedir el archivo.",
+            )
+        return StreamingResponse(
+            upstream.iter_content(chunk_size=65536),
+            media_type=upstream.headers.get("Content-Type", "application/octet-stream"),
+            headers={"Content-Disposition": "inline"},
+        )
+
+    raise HTTPException(
+        status_code=404, detail=f"No hay archivo original para process_id={process_id}."
     )
+
+
+@router.post(
+    "/invoices/{process_id}/retry-extraction",
+    summary="Reintenta manualmente la extracción de una factura en status=error",
+    tags=["Procesamiento de facturas"],
+)
+async def reintentar_extraccion(
+    process_id: str,
+    x_invoicy_secret: Optional[str] = Header(default=None, alias="X-Invoicy-Secret"),
+):
+    """Vuelve a correr el mismo pipeline de _procesar_en_background() para
+    una factura que quedó en status="error" -- re-descarga el archivo
+    original desde PocketBase (documento_original, adjuntado desde el
+    arranque del procesamiento, ver _procesar_imagen_o_pdf) en vez de
+    pedirle al usuario que lo suba de nuevo. Mismo process_id, así que el
+    upsert_invoice de siempre actualiza el mismo registro en vez de crear
+    uno nuevo -- el "Reintentar" del dashboard llama acá (ver
+    ticket-ai-dashboard/app/api/invoices/[processId]/retry-extraction/route.ts).
+    """
+    _verificar_secreto_invoicy(x_invoicy_secret)
+
+    invoice = orchestrator._pb_client.get_invoice_by_process_id(process_id)
+    if invoice is None:
+        raise HTTPException(
+            status_code=404, detail=f"No hay factura para process_id={process_id}."
+        )
+    if invoice.get("status") != "error":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Solo se puede reintentar una factura en estado 'error' "
+                f"(estado actual: {invoice.get('status')})."
+            ),
+        )
+    if not invoice.get("documento_original"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Esta factura no tiene el archivo original guardado -- "
+                "subila de nuevo desde /subir-factura."
+            ),
+        )
+
+    file_token = orchestrator._pb_client.obtener_file_token()
+    if not file_token:
+        raise HTTPException(
+            status_code=502, detail="No se pudo obtener un token de archivo de PocketBase."
+        )
+    pb_base_url = (os.getenv("POCKETBASE_URL") or "").rstrip("/")
+    file_url = (
+        f"{pb_base_url}/api/files/invoices/{invoice['id']}/{invoice['documento_original']}"
+    )
+    upstream = requests.get(file_url, params={"token": file_token}, timeout=30)
     if upstream.status_code != 200:
         raise HTTPException(
             status_code=502,
-            detail=f"Google Drive respondió {upstream.status_code} para {invoice['drive_file_id']}.",
+            detail=f"PocketBase respondió {upstream.status_code} al pedir el archivo original.",
         )
 
-    return StreamingResponse(
-        upstream.iter_content(chunk_size=65536),
-        media_type=upstream.headers.get("Content-Type", "application/octet-stream"),
-        headers={"Content-Disposition": "inline"},
+    file_name = invoice["documento_original"]
+    extension = file_name.split(".")[-1].lower()
+    kind = filetype.guess(upstream.content[:262])
+    media_type = kind.mime if kind else upstream.headers.get(
+        "Content-Type", "application/octet-stream"
     )
+
+    os.makedirs("downloads", exist_ok=True)
+    # Prefijo "retry-" para no pisar un archivo que otro proceso pueda estar
+    # escribiendo con el mismo nombre original en paralelo.
+    file_location = f"./downloads/retry-{process_id}-{file_name}"
+    with open(file_location, "wb") as f:
+        f.write(upstream.content)
+
+    asyncio.create_task(
+        _procesar_en_background(
+            file_location=file_location,
+            file_name=file_name,
+            extension=extension,
+            media_type=media_type,
+            process_id=process_id,
+        )
+    )
+    return {
+        "success": True,
+        "message": "Reintentando la extracción.",
+        "status_code": 201,
+    }
 
 
 class CrearOrdenPagoBody(BaseModel):
