@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type ChangeEvent, type DragEvent, type FormEvent } from "react";
+import Link from "next/link";
 import {
   AlertCircle,
   CheckCircle,
@@ -245,13 +246,37 @@ export default function SubirFacturaPage() {
             <div className="text-[15.5px] font-semibold text-foreground">
               ¡Listo! Recibimos tu factura.
             </div>
+            {/* Antes acá decía "vas a recibir la confirmación por el mismo
+                medio que la enviaste" -- ese mensaje tiene sentido para
+                WhatsApp/email (canales donde sí hay a quién responderle),
+                pero este formulario web nunca pide un contacto, así que la
+                promesa no se cumplía nunca: quien sube acá no vuelve a
+                saber nada del lado del sistema. Mostrar el nombre del
+                archivo (prueba concreta de que se recibió ESTE archivo, no
+                un genérico) + un link directo a la cola para quien tenga
+                acceso al dashboard, en vez de una promesa vacía. */}
             <p className="max-w-[340px] text-[13.5px] leading-relaxed text-muted-foreground">
-              El equipo la va a revisar pronto. Vas a recibir la confirmación
-              por el mismo medio que la enviaste.
+              {file ? (
+                <>
+                  Subimos <span className="font-medium text-foreground">{file.name}</span> y
+                  ya está en proceso.
+                </>
+              ) : (
+                "Ya está en proceso."
+              )}{" "}
+              En unos segundos va a aparecer en la cola de revisión del equipo.
             </p>
-            <Button variant="outline" onClick={handleReset} className="mt-2 h-9">
-              Subir otra factura
-            </Button>
+            <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
+              <Button variant="outline" onClick={handleReset} className="h-9">
+                Subir otra factura
+              </Button>
+              <Link
+                href="/queue"
+                className="text-[13px] font-medium text-primary hover:underline"
+              >
+                Ver la cola de revisión →
+              </Link>
+            </div>
           </div>
         )}
 
