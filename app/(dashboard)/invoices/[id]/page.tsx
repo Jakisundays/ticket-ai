@@ -9,7 +9,8 @@ import ReopenButton from "./ReopenButton";
 import InvoiceFileViewer from "./InvoiceFileViewer";
 import InvoiceReviewForm from "./InvoiceReviewForm";
 import PaymentOrderPanel from "./PaymentOrderPanel";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import ExtractionProgress from "./ExtractionProgress";
+import RetryExtractionButton from "./RetryExtractionButton";
 import {
   Table,
   TableBody,
@@ -59,6 +60,109 @@ export default async function InvoiceDetailPage({
   const basStatus = invoice.expand?.bas_processing_status_via_invoice;
   const isConfirmed = invoice.review_status === "confirmed";
 
+  // Todavía no hay nada que revisar -- ni éxito ni fracaso -- mientras la
+  // extracción con IA está corriendo (o reintentando) del lado de Invoicy.
+  // Chequea status ANTES que isConfirmed a propósito: una factura
+  // processing/error nunca puede estar confirmed (el formulario de
+  // confirmación solo existe cuando status="completed").
+  if (invoice.status === "processing") {
+    return (
+      <div className="flex h-full flex-col">
+        <PageHeader>
+          <Link
+            href="/queue"
+            className="text-sm font-medium text-muted-foreground hover:text-foreground"
+          >
+            Cola de revisión
+          </Link>
+          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/50" />
+          <span className="truncate font-mono text-sm font-semibold text-foreground">
+            {invoice.numero_comprobante || invoice.process_id}
+          </span>
+          <StatusBadge status="processing" />
+        </PageHeader>
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+          <div className="h-[42vh] shrink-0 border-b p-3 lg:h-auto lg:w-2/5 lg:min-w-[280px] lg:max-w-[560px] lg:border-r lg:border-b-0 lg:p-5">
+            <div className="sticky top-16 flex h-full flex-col gap-3.5 rounded-xl bg-sidebar p-4 shadow-(--shadow-2)">
+              <span className="overline px-0.5 text-[11px] text-sidebar-foreground">
+                Comprobante original
+              </span>
+              <InvoiceFileViewer processId={invoice.process_id} />
+            </div>
+          </div>
+          <ExtractionProgress
+            invoiceId={invoice.id}
+            initialAttempt={invoice.extraction_attempt || 1}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Se agotaron los reintentos de extracción (ver Invoicy tool_handler,
+  // max_retries=6) -- no hay datos reales para revisar/confirmar, así que
+  // esta rama no reusa InvoiceReviewForm. El archivo original queda
+  // disponible (se adjunta desde el arranque del procesamiento, no solo si
+  // termina bien) para que el motivo del fallo se pueda revisar a ojo.
+  if (invoice.status === "error") {
+    return (
+      <div className="flex h-full flex-col">
+        <PageHeader>
+          <Link
+            href="/invoices"
+            className="text-sm font-medium text-muted-foreground hover:text-foreground"
+          >
+            Facturas
+          </Link>
+          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/50" />
+          <span className="truncate font-mono text-sm font-semibold text-foreground">
+            {invoice.numero_comprobante || invoice.process_id}
+          </span>
+          <StatusBadge status="error" />
+        </PageHeader>
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+          <div className="h-[42vh] shrink-0 border-b p-3 lg:h-auto lg:w-2/5 lg:min-w-[280px] lg:max-w-[560px] lg:border-r lg:border-b-0 lg:p-5">
+            <div className="sticky top-16 flex h-full flex-col gap-3.5 rounded-xl bg-sidebar p-4 shadow-(--shadow-2)">
+              <span className="overline px-0.5 text-[11px] text-sidebar-foreground">
+                Comprobante original
+              </span>
+              <InvoiceFileViewer processId={invoice.process_id} />
+            </div>
+          </div>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-4 overflow-y-auto px-7 py-5 text-center">
+            <span className="flex size-11 items-center justify-center rounded-full bg-status-destructive-bg text-status-destructive-fg">
+              <AlertTriangle className="size-5" />
+            </span>
+            <div className="flex flex-col gap-1.5">
+              <p className="text-[15px] font-semibold text-foreground">
+                No pudimos extraer los datos de esta factura
+              </p>
+              <p className="max-w-md text-[13.5px] text-muted-foreground">
+                {invoice.extraction_attempt
+                  ? `Se agotaron los ${invoice.extraction_attempt} intentos de extracción.`
+                  : "La extracción falló antes de completar ningún intento."}
+              </p>
+            </div>
+            {invoice.error_message && (
+              <p className="max-w-md rounded-md bg-status-destructive-bg px-3 py-2.5 text-left font-mono text-[11.5px] leading-relaxed text-status-destructive-fg">
+                {invoice.error_message}
+              </p>
+            )}
+            <div className="mt-1 flex items-center gap-2.5">
+              <RetryExtractionButton processId={invoice.process_id} />
+              <Link
+                href="/subir-factura"
+                className="text-[13px] font-medium text-muted-foreground hover:text-foreground hover:underline"
+              >
+                Subir de nuevo
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!isConfirmed) {
     const [categoriesResult, queueResult] = await Promise.all([
       pb.collection<BasCategoryMapRecord>(Collections.BasCategoryMap).getFullList({ sort: "categoria" }),
@@ -102,16 +206,6 @@ export default async function InvoiceDetailPage({
             </NavButton>
           </div>
         </PageHeader>
-
-        {invoice.status === "error" && invoice.error_message && (
-          <div className="border-b bg-background px-4 py-3 md:px-7">
-            <Alert variant="destructive">
-              <AlertTriangle className="size-4" />
-              <AlertTitle>Error de procesamiento</AlertTitle>
-              <AlertDescription>{invoice.error_message}</AlertDescription>
-            </Alert>
-          </div>
-        )}
 
         <div className="animate-fade-up flex min-h-0 flex-1 flex-col lg:flex-row">
           <div className="h-[42vh] shrink-0 border-b p-3 lg:h-auto lg:w-2/5 lg:min-w-[280px] lg:max-w-[560px] lg:border-r lg:border-b-0 lg:p-5">

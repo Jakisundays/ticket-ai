@@ -52,10 +52,12 @@ export default async function InvoicesPage() {
         sheetsSaved: invoice.sheets_saved,
         driveUrl: driveFileUrl(invoice.drive_file_id),
         basStatus: basStatus ? basStatus.orden_pago_status : null,
-        // REGLA DE ORO: el listado no tiene ninguna accion disponible para
-        // facturas en estado "error" de extraccion -- fuera de alcance a
-        // proposito, decision de producto pendiente.
-        clickable: invoice.status !== "error",
+        // Antes: false para status="error" ("decision de producto
+        // pendiente"). Ya no aplica -- invoices/[id]/page.tsx ahora tiene
+        // una vista dedicada para status="error" (motivo + reintentar) y
+        // para status="processing" (progreso en vivo), así que toda fila
+        // tiene a dónde ir.
+        clickable: true,
       };
     }) ?? [];
 

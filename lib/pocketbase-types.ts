@@ -53,6 +53,11 @@ export interface InvoicesRecord extends BaseSystemFields {
   sheets_saved: boolean;
   status: InvoiceStatus;
   error_message: string;
+  /** Solo mientras status="processing" -- número de intento actual de la
+   * extracción con IA (hasta 6, ver Invoicy tool_handler). Indicador
+   * agregado aproximado: hay 3 llamadas en paralelo, cada una con su
+   * propio contador de reintentos -- no es progreso exacto por campo. */
+  extraction_attempt: number;
   review_status: ReviewStatus;
   /** relation -> users; "" si nunca se confirmó */
   confirmed_by: string;
