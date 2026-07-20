@@ -2143,6 +2143,42 @@ async def process_invoice(
 
 
 @router.post(
+    "/website-upload/init",
+    summary="Crear el placeholder de una factura ANTES de subir el archivo",
+    tags=["Procesamiento de facturas"],
+    response_model=dict,
+    responses={
+        429: {"description": "Demasiadas subidas desde esta IP, reintentar más tarde."},
+        500: {"description": "Error interno del servidor."},
+    },
+)
+@limiter.limit("5/minute")
+async def website_upload_init(request: Request):
+    """Reserva un process_id y deja un row en PocketBase con status="pending"
+    ANTES de que el navegador empiece a transferir el archivo. El frontend
+    (ver /subir-factura) llama esto primero, muestra el estado localmente
+    ("subiendo") mientras transfiere el archivo, y le pasa el mismo
+    process_id a POST /website-upload para que reutilice este row en vez de
+    crear uno nuevo -- así la cola de revisión puede mostrar la factura desde
+    el instante del click, no recién cuando termina la subida.
+
+    Best-effort: si el upsert a PocketBase falla acá, igual devolvemos un
+    process_id nuevo (uuid) -- /website-upload sabe crear su propio
+    placeholder "processing" si no encuentra uno ya creado con ese id, así
+    que un fallo acá no bloquea la subida real, solo pierde la visibilidad
+    temprana en la cola.
+    """
+    process_id = f"website-{uuid.uuid4()}"
+    try:
+        orchestrator._pb_client.upsert_invoice(
+            {"process_id": process_id, "status": "pending", "error_message": ""}
+        )
+    except Exception as e:
+        app_logger.warning(f"[{process_id}] PocketBase: error creando placeholder pending: {e}")
+    return {"process_id": process_id}
+
+
+@router.post(
     "/website-upload",
     summary="Procesar factura subida desde el formulario público del website",
     tags=["Procesamiento de facturas"],
@@ -2159,6 +2195,10 @@ async def website_upload(
     file: UploadFile = File(
         ...,
         description="Archivo de la factura a procesar. Imagen (png, jpg, jpeg, webp, gif) o PDF -- no se aceptan ZIP por este canal.",
+    ),
+    process_id: str = Form(
+        None,
+        description="process_id ya reservado por POST /website-upload/init. Si no se manda, se genera uno nuevo (comportamiento previo).",
     ),
 ):
     """Puerta de entrada pública (sin secret_key) para el formulario de subida
@@ -2180,7 +2220,10 @@ async def website_upload(
                 ),
             )
 
-        process_id = f"website-{uuid.uuid4()}"
+        # Reusa el process_id reservado por /website-upload/init si vino uno
+        # -- _procesar_imagen_o_pdf hace upsert (no create) por process_id,
+        # así que esto pisa el mismo row "pending" en vez de duplicarlo.
+        process_id = process_id or f"website-{uuid.uuid4()}"
 
         os.makedirs("downloads", exist_ok=True)
         file_location = f"./downloads/{file.filename.split('/')[-1]}"
