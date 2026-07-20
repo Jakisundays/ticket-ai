@@ -19,6 +19,24 @@ const INVOICE_API_BAS_URL = process.env.NEXT_PUBLIC_INVOICE_API_BAS_URL;
 
 type Status = "idle" | "uploading" | "success" | "error" | "error429";
 
+/** Best-effort: reserva un process_id con status="pending" en PocketBase
+ * ANTES de mandar el archivo, para que la factura aparezca en la cola de
+ * revisión desde el instante del click. Si esto falla (red, rate limit),
+ * seguimos igual sin process_id -- /website-upload sabe crear su propio
+ * placeholder si no le llega ninguno (comportamiento previo intacto). */
+async function reservarProcessId(baseUrl: string): Promise<string | null> {
+  try {
+    const response = await fetch(`${baseUrl}/gemini2/website-upload/init`, {
+      method: "POST",
+    });
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => null);
+    return typeof body?.process_id === "string" ? body.process_id : null;
+  } catch {
+    return null;
+  }
+}
+
 const EXTENSIONES_PERMITIDAS = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"];
 
 const MENSAJE_ERROR_GENERICO = "Probá de nuevo en un momento.";
@@ -82,8 +100,13 @@ export default function SubirFacturaPage() {
     setMessage(null);
 
     try {
+      // Reserva el process_id ANTES de subir el archivo -- ver
+      // reservarProcessId() más arriba. Si falla, seguimos sin él.
+      const processId = await reservarProcessId(INVOICE_API_BAS_URL);
+
       const formData = new FormData();
       formData.append("file", file);
+      if (processId) formData.append("process_id", processId);
 
       // Sin secret_key: este endpoint es público a propósito, protegido con
       // rate limiting en el backend en vez de un secreto compartido (ver

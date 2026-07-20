@@ -6,8 +6,18 @@ import { formatCurrency, formatDate } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 import EmptyState from "@/components/EmptyState";
 import QueueList, { type QueueRow } from "./QueueList";
+import QueueRealtime from "./QueueRealtime";
 
 export const dynamic = "force-dynamic";
+
+// Antes solo "completed" (extracción terminada) contaba como "en la cola".
+// Ahora también entran pending/processing/error: el objetivo es que la
+// factura aparezca acá desde el instante en que se crea el placeholder
+// (ver /gemini2/website-upload/init en Invoicy), no recién cuando termina
+// de procesarse -- así el equipo ve la actividad en vivo, no solo el
+// resultado final.
+const FILTRO_COLA =
+  '(status = "completed" && review_status != "confirmed") || status = "pending" || status = "processing" || status = "error"';
 
 type Antiguedad = { label: string; urgente: boolean };
 
@@ -67,14 +77,10 @@ function calcularIniciales(nombre: string): string {
 export default async function QueuePage() {
   const pb = await createServerClient();
 
-  // status = "completed": una factura todavía en processing/error no es
-  // asunto de la cola de revisión humana todavía (eso lo cubre /invoices).
-  // review_status != "confirmed" (no "= needs_review"): filas legacy sin
-  // review_status seteado (string vacío) también cuentan como pendientes.
   const result = await pb
     .collection<InvoicesRecord>(Collections.Invoices)
     .getList(1, 100, {
-      filter: 'status = "completed" && review_status != "confirmed"',
+      filter: FILTRO_COLA,
       sort: "+created",
     });
 
@@ -85,33 +91,44 @@ export default async function QueuePage() {
     // fecha_emision, que es la fecha de emisión de la factura del proveedor,
     // no cuánto tiempo lleva esperando revisión en nuestra cola.
     const antiguedad = calcularAntiguedad(invoice.created);
-    const proveedorNombre = invoice.emisor_nombre || "Emisor sin identificar";
+    // Mientras no haya terminado la extracción todavía no conocemos al
+    // emisor real -- mostrar un placeholder honesto en vez de "Emisor sin
+    // identificar" (ese mensaje es para cuando la extracción SÍ terminó
+    // pero Gemini no pudo leer el emisor).
+    const enProceso = invoice.status !== "completed";
+    const proveedorNombre = enProceso
+      ? "Extrayendo datos…"
+      : invoice.emisor_nombre || "Emisor sin identificar";
 
     return {
       id: invoice.id,
       href: `/invoices/${invoice.id}`,
-      numero: invoice.numero_comprobante || invoice.process_id,
+      numero: enProceso
+        ? invoice.process_id
+        : invoice.numero_comprobante || invoice.process_id,
       tipo: invoice.tipo_comprobante,
       proveedorNombre,
-      iniciales: calcularIniciales(proveedorNombre),
-      fecha: formatDate(invoice.fecha_emision),
+      iniciales: enProceso ? "…" : calcularIniciales(proveedorNombre),
+      fecha: enProceso ? "" : formatDate(invoice.fecha_emision),
       antiguedad: antiguedad.label,
       antiguedadUrgente: antiguedad.urgente,
-      monto: formatCurrency(invoice.total, invoice.moneda),
+      monto: enProceso ? "" : formatCurrency(invoice.total, invoice.moneda),
+      status: invoice.status,
     };
   });
 
   return (
     <div className="flex h-full flex-col">
+      <QueueRealtime />
       <PageHeader>
         <h1 className="truncate text-base font-semibold text-foreground">
           Cola de revisión
         </h1>
         <span className="rounded-full bg-status-warning-bg px-3 py-1 font-heading text-xs font-semibold whitespace-nowrap text-status-warning-fg">
-          {rows.length} pendiente{rows.length === 1 ? "" : "s"}
+          {rows.length} en cola
         </span>
         <span className="ml-auto hidden truncate text-[13px] text-muted-foreground md:block">
-          Ordenadas por antigüedad · la más vieja primero
+          Ordenadas por antigüedad · la más vieja primero · se actualiza sola
         </span>
       </PageHeader>
 

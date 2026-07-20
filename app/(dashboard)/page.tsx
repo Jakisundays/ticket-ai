@@ -16,11 +16,13 @@ import RecentActivityTable, { type RecentActivityRow } from "./RecentActivityTab
 
 export const dynamic = "force-dynamic";
 
-// Mismo filtro exacto que app/(dashboard)/queue/page.tsx y
-// app/(dashboard)/layout.tsx (badge del nav): facturas ya procesadas
-// (status="completed") que todavía nadie confirmó (review_status !=
-// "confirmed" -- no "= needs_review": filas legacy con review_status ""
-// también cuentan como pendientes).
+// Mismo filtro que app/(dashboard)/layout.tsx (badge del nav): "acción
+// humana pendiente" (facturas ya procesadas que todavía nadie confirmó),
+// no "actividad en curso" -- deliberadamente más angosto que
+// app/(dashboard)/queue/page.tsx, que desde este cambio también muestra
+// pending/processing/error para dar visibilidad temprana en la subida.
+// review_status != "confirmed" -- no "= needs_review": filas legacy con
+// review_status "" también cuentan como pendientes.
 const FILTRO_COLA = 'status = "completed" && review_status != "confirmed"';
 
 const MESES_ES = [

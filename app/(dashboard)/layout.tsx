@@ -25,10 +25,13 @@ export default async function DashboardLayout({
   const email = typeof record?.email === "string" ? record.email : undefined;
   const name = typeof record?.name === "string" ? record.name : undefined;
 
-  // Mismo filtro exacto que app/(dashboard)/queue/page.tsx: facturas ya
-  // procesadas todavía sin confirmar por un humano. Es solo el número para
-  // el badge del nav -- si la consulta falla no vale la pena tirar abajo
-  // todo el shell del dashboard por eso, el badge simplemente no aparece.
+  // A propósito MÁS angosto que el filtro de app/(dashboard)/queue/page.tsx
+  // (que desde este cambio también incluye pending/processing/error para
+  // dar visibilidad temprana): este badge del nav es "acción humana
+  // pendiente", no "actividad en curso" -- una factura todavía procesándose
+  // no necesita que nadie haga nada todavía. Es solo el número para el
+  // badge -- si la consulta falla no vale la pena tirar abajo todo el shell
+  // del dashboard por eso, el badge simplemente no aparece.
   let queueCount: number | undefined;
   try {
     const result = await pb

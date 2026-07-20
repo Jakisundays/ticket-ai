@@ -9,6 +9,7 @@ import {
   InputGroupInput,
 } from "@/components/ui/input-group";
 import InitialsAvatar from "@/components/InitialsAvatar";
+import StatusBadge from "@/components/StatusBadge";
 import { cn } from "@/lib/utils";
 
 /**
@@ -27,6 +28,9 @@ export type QueueRow = {
   antiguedad: string;
   antiguedadUrgente: boolean;
   monto: string;
+  /** InvoiceStatus ("pending"|"processing"|"completed"|"error") -- se
+   * muestra como badge cuando todavía no es "completed" (ver StatusBadge). */
+  status: string;
 };
 
 export default function QueueList({ rows }: { rows: QueueRow[] }) {
@@ -104,9 +108,13 @@ export default function QueueList({ rows }: { rows: QueueRow[] }) {
                   </div>
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-0.75">
-                  <span className="whitespace-nowrap font-mono text-sm font-semibold text-foreground">
-                    {row.monto}
-                  </span>
+                  {row.status !== "completed" ? (
+                    <StatusBadge status={row.status} dot />
+                  ) : (
+                    <span className="whitespace-nowrap font-mono text-sm font-semibold text-foreground">
+                      {row.monto}
+                    </span>
+                  )}
                   <span
                     className={cn(
                       "whitespace-nowrap text-[11.5px]",

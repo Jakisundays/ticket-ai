@@ -21,11 +21,21 @@ export default async function InvoicesPage() {
   // `items === null` distingue "fallo la consulta" de "la consulta funciono
   // pero no hay facturas" -- son dos estados visuales distintos (error vs
   // vacio) aunque ambos partan del mismo `getList`.
+  // "Facturas" es el historial de lo ya REVISADO y aprobado -- no de todo lo
+  // que entró al sistema. Antes no filtraba nada, así que una factura
+  // recién subida (pending/processing/completed-sin-confirmar) aparecía acá
+  // Y en la cola al mismo tiempo, lo cual confundía el propósito de cada
+  // pantalla. Ahora: review_status="confirmed" es el único gate de entrada
+  // -- coincide exactamente con el único lugar que lo setea
+  // (InvoiceReviewForm.tsx, al confirmar). Todo lo anterior a eso
+  // (pending/processing/error, o completed sin confirmar) vive solo en
+  // /queue.
   let items: InvoiceListItemExpand[] | null = null;
   try {
     const result = await pb
       .collection<InvoiceListItemExpand>(Collections.Invoices)
       .getList(1, 50, {
+        filter: 'review_status = "confirmed"',
         sort: "-created",
         expand: "bas_processing_status_via_invoice",
       });
@@ -68,7 +78,7 @@ export default async function InvoicesPage() {
           Facturas
         </h1>
         <span className="ml-auto hidden truncate text-[13px] text-muted-foreground md:block">
-          Últimos 50 comprobantes recibidos
+          Últimos 50 comprobantes confirmados
         </span>
       </PageHeader>
 
