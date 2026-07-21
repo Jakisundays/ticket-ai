@@ -129,14 +129,25 @@ BAS_IMPUTACION_CONTABLE_PROVEEDORES = 211001
 # Qué ARRAY de "pagos" de OrdenDePago usar por método es forma de payload
 # (estructura de código), no dato de negocio descubrible con el tiempo, así
 # que vive hardcodeado acá -- a diferencia del CÓDIGO de MedioPago y, para
-# transferencia, la CuentaBancaria, que SÍ son datos de negocio del ERP y
-# viven en bas_payment_methods (ver PocketBaseClient.get_payment_method).
-# "cheque" -> ChequesPropios (cheque PROPIO emitido para pagar, no un cheque
-# de terceros recibido/endosado) es una inferencia razonable, NO confirmada
-# -- docs/bas-orden-de-pago-research.md marca toda esta sección "DIFERIDO".
-# Confirmar con el admin de BAS antes de usar esto para un pago real.
+# transferencia/tarjeta, la CuentaBancaria/Plan/CodigoTarjeta, que SÍ son
+# datos de negocio del ERP y viven en bas_payment_methods (ver
+# PocketBaseClient.get_payment_method).
+#
+# Confirmado en vivo contra la API real de BAS (2026-07-21, probando
+# MedioPago 1 a 20 con Total=1, ver docs/bas-orden-de-pago-research.md):
+# - "cheque" -> Cheques (cheque RECIBIDO/de terceros, endosado para pagar --
+#   NO ChequesPropios). La Caja actual no tiene ningún medio de pago tipo
+#   "cheque propio" habilitado (existen los códigos 3/5 en el maestro de BAS,
+#   pero ninguno configurado en Caja 1) -- si en el futuro se necesita emitir
+#   cheques propios, hay que pedirle a un admin de BAS que habilite uno en la
+#   Caja primero, esto no es algo que Invoicy pueda resolver solo.
+# - "tarjeta" (nuevo): confirmado que MedioPago=9 es tipo tarjeta. A
+#   diferencia de los demás, Tarjetas[] exige también Plan/CodigoTarjeta
+#   (códigos del maestro de tarjetas de BAS) además de NumeroTarjeta -- ver
+#   bas_payment_methods.bas_plan_tarjeta/bas_codigo_tarjeta.
 METODO_PAGO_ARRAY_BAS = {
     "efectivo": "Efectivos",
-    "cheque": "ChequesPropios",
+    "cheque": "Cheques",
     "transferencia": "PagosPorBanco",
+    "tarjeta": "Tarjetas",
 }

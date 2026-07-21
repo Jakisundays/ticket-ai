@@ -619,3 +619,64 @@ class BasClient:
 > Pendiente de configuración: agregar `BAS_BASE_URL` (y opcionalmente
 > `BAS_CLIENT_ID`/`BAS_CLIENT_SECRET`) al `.env`. Hoy el cliente cae al default
 > `http://190.210.77.103:32501` si no está seteada.
+
+---
+
+## 5. Catálogo real de `MedioPago` (confirmado en vivo, 2026-07-21)
+
+**No existe ningún endpoint que exponga este catálogo** (confirmado probando
+`/api/CONSULTAGRAL/{NameConsulta}` con varios nombres candidatos —
+`MediosPago`, `MedioPago`, `MediosDePago`, `TablasGenerales`,
+`CodigosMedioPago` — todos responden *"La consulta X no está habilitada"*).
+La única forma de descubrirlo fue probar en vivo contra `/api/OrdenesPago`
+con `Total=1` (regla de seguridad del proyecto para pruebas reales), leyendo
+el mensaje de validación de BAS, que sí devuelve el tipo real de cada código:
+
+*"El medio de pago N corresponde al tipo X y fue informado en la sección Y"*
+
+| Código | Tipo real | Array de `OrdenDePago` correcto |
+|---|---|---|
+| 1, 2, 10, 11, 12 | Efectivo | `Efectivos` |
+| 3, 5 | Cheque **propio** (existen en el maestro de BAS, pero **ninguno habilitado en Caja 1** — un admin de BAS tiene que agregarlos ahí antes de poder usarlos) | `ChequesPropios` |
+| 4, 6 | Cheque **recibido** (de terceros, se paga endosándolo) | `Cheques` |
+| 7 | Cobro por banco (dinero **entrante** — no sirve para pagar a un proveedor) | `CobrosPorBanco` |
+| **8** | **Pago por banco** | `PagosPorBanco` — esto es "transferencia" |
+| 9 | Tarjeta | `Tarjetas` |
+| 13-20 | No existen (mensaje distinto: "es inexistente", no "no tiene imputación contable en la caja") | — |
+
+**Confirmado end-to-end (llegó al mismo bloqueo estructural ya documentado
+en §DIAGNÓSTICO DEFINITIVO, no a un error de medio de pago):**
+- Transferencia: `MedioPago="8"` en `PagosPorBanco`, con `CuentaBancaria`
+  (código real obtenido de `GET /api/CuentasBancarias/{empresa}`, ej. `"1"`
+  = Banco Patagonia) + `Fecha` + `Numero` (bug real encontrado: el código de
+  producción anterior no mandaba `Fecha` ni `Numero` en absoluto para
+  `PagosPorBanco`, hubiera fallado con 400 aunque el `MedioPago` fuera
+  correcto).
+- Cheque (recibido): `MedioPago="4"` en `Cheques`, con `Fecha` +
+  `NumeroExterno` (el número del cheque de terceros que se está endosando —
+  dato que el flujo humano tiene que aportar, BAS lo valida contra un cheque
+  ya existente).
+- Tarjeta: `MedioPago="9"` en `Tarjetas`, con `Fecha` + `Plan` +
+  `CodigoTarjeta` + `NumeroTarjeta` (los primeros dos son códigos del
+  maestro de tarjetas de BAS — mismo problema que `MedioPago`, no hay
+  catálogo consultable; se guardan en `bas_payment_methods` una vez que se
+  confirmen con el admin de BAS o probando en vivo).
+
+**Requisitos runtime NO declarados como `required` en el schema del Swagger**
+(mismo patrón ya visto en `ComprobantesCompra`, §DIAGNÓSTICO):
+- `Efectivos`: ninguno extra (no tiene `Fecha` en su schema — pasarla rompe
+  por `additionalProperties: false`).
+- `Cheques`/`ChequesPropios`: `Fecha`, `NumeroExterno`.
+- `PagosPorBanco`: `Fecha`, `Numero`, `CuentaBancaria`.
+- `Tarjetas`: `Fecha`, `Plan`, `CodigoTarjeta`, `NumeroTarjeta`.
+- Cabecera de la OP: `ImputacionContable` (distinta de
+  `CuentasCorrientes[].ImputacionContable` del proveedor — esta es la cuenta
+  contable de la propia línea de pago) — sin ella, error genérico *"Debe
+  ingresar la imputación contable"* que **bloquea la validación de
+  `MedioPago` por completo** (no se llega a saber si el código es válido
+  hasta resolver esto primero).
+
+**Proveedores de prueba usados:** `LITORALG` tiene `CuentasCorrientes: []`
+(proveedor viejo, de antes del fix "cuenta 0") — inútil para probar
+`OrdenesPago` real. `SUPERCOO` sí tiene `CuentasCorrientes: [{ImputacionContable: 211001, PorDefecto: true}]`
+confirmado — usado para todas las pruebas de este catálogo.

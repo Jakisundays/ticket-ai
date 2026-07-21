@@ -2845,6 +2845,17 @@ class CrearOrdenPagoBody(BaseModel):
     metodo_pago: str
     monto: Optional[float] = None
     requested_by: str  # id de PocketBase (colección "users"), lo resuelve el dashboard Next.js
+    # Solo aplica a metodo_pago="cheque": número del cheque de TERCEROS que se
+    # está endosando para pagar (BAS lo exige como NumeroExterno en el array
+    # Cheques -- confirmado en vivo 2026-07-21, ver METODO_PAGO_ARRAY_BAS).
+    numero_cheque: Optional[str] = None
+    # Solo aplica a metodo_pago="tarjeta": número de la tarjeta usada.
+    numero_tarjeta: Optional[str] = None
+    # Solo aplica a metodo_pago="transferencia": número/referencia de la
+    # operación bancaria. Opcional -- si no viene, se usa el process_id como
+    # referencia (BAS exige el campo igual, pero no depende de un dato real
+    # para funcionar).
+    numero_transferencia: Optional[str] = None
 
 
 @router.post(
@@ -2904,16 +2915,64 @@ async def crear_orden_pago(
         )
 
     monto = body.monto if body.monto is not None else invoice.get("total")
+    fecha_pago = datetime.date.today().isoformat()
+    medio_pago_codigo = metodo_bas["bas_medio_pago_codigo"]
 
-    item_pago = {
-        "MedioPago": metodo_bas["bas_medio_pago_codigo"],
-        "Importe": monto,
-        "IngresooEgreso": "E",
-    }
-    if body.metodo_pago == "transferencia":
+    # Cada array de BAS exige campos runtime distintos más allá de lo que
+    # marca el schema del Swagger como "required" (mismo patrón ya conocido
+    # de ComprobantesCompra) -- confirmado en vivo 2026-07-21 probando cada
+    # array con Total=1 contra la API real (ver docs/bas-orden-de-pago-research.md).
+    if body.metodo_pago == "efectivo":
+        # Efectivos NO tiene Fecha en su schema -- pasarla igual rompería
+        # (additionalProperties: false).
+        item_pago = {"MedioPago": medio_pago_codigo, "Importe": monto, "IngresooEgreso": "E"}
+    elif body.metodo_pago == "cheque":
+        if not body.numero_cheque:
+            raise HTTPException(
+                status_code=422,
+                detail="Falta numero_cheque (el cheque de terceros que se va a endosar) para pagar con cheque.",
+            )
+        item_pago = {
+            "MedioPago": medio_pago_codigo,
+            "Importe": monto,
+            "IngresooEgreso": "E",
+            "Fecha": fecha_pago,
+            "NumeroExterno": body.numero_cheque,
+        }
+    elif body.metodo_pago == "transferencia":
         if not metodo_bas.get("bas_cuenta_bancaria"):
             raise HTTPException(status_code=422, detail="Falta bas_cuenta_bancaria para transferencia.")
-        item_pago["CuentaBancaria"] = metodo_bas["bas_cuenta_bancaria"]
+        item_pago = {
+            "MedioPago": medio_pago_codigo,
+            "Importe": monto,
+            "IngresooEgreso": "E",
+            "Fecha": fecha_pago,
+            "Numero": (body.numero_transferencia or process_id)[:15],
+            "CuentaBancaria": metodo_bas["bas_cuenta_bancaria"],
+        }
+    elif body.metodo_pago == "tarjeta":
+        if not (metodo_bas.get("bas_plan_tarjeta") and metodo_bas.get("bas_codigo_tarjeta")):
+            raise HTTPException(
+                status_code=422,
+                detail="Falta bas_plan_tarjeta/bas_codigo_tarjeta para tarjeta (bas_payment_methods).",
+            )
+        if not body.numero_tarjeta:
+            raise HTTPException(status_code=422, detail="Falta numero_tarjeta para pagar con tarjeta.")
+        item_pago = {
+            "MedioPago": medio_pago_codigo,
+            "Importe": monto,
+            "IngresooEgreso": "E",
+            "Fecha": fecha_pago,
+            "Plan": metodo_bas["bas_plan_tarjeta"],
+            "CodigoTarjeta": metodo_bas["bas_codigo_tarjeta"],
+            "NumeroTarjeta": body.numero_tarjeta,
+        }
+    else:
+        # No debería llegar acá: ya se validó metodo_pago in METODO_PAGO_ARRAY_BAS
+        # más arriba -- este else cubre un método nuevo agregado a ese dict
+        # sin su rama de payload correspondiente acá.
+        raise HTTPException(status_code=422, detail=f"metodo_pago sin manejo de payload: {body.metodo_pago}")
+
     pagos = {METODO_PAGO_ARRAY_BAS[body.metodo_pago]: [item_pago]}
 
     # Mismo armado de Items/comprobante_compra_payload que
