@@ -24,19 +24,23 @@ import { cn } from "@/lib/utils";
 // tiempo), metodo_pago es un select CERRADO -- cada valor está acoplado a
 // una rama de código Python (METODO_PAGO_ARRAY_BAS en utils/bas_config.py).
 // Por eso este editor no tiene formulario de "agregar nuevo": siempre
-// muestra las 3 filas posibles, y crea el record recién al guardar si
-// todavía no existe (típicamente cheque/transferencia, sin sembrar por
-// migración).
+// muestra las 4 filas posibles, y crea el record recién al guardar si
+// todavía no existe (típicamente cheque/transferencia/tarjeta, sin sembrar
+// por migración -- salvo tarjeta, que sí trae una fila semilla sin
+// confirmar desde la migración que la agregó).
 const METODOS: { value: MetodoPago; label: string }[] = [
   { value: "efectivo", label: "Efectivo" },
   { value: "cheque", label: "Cheque" },
   { value: "transferencia", label: "Transferencia" },
+  { value: "tarjeta", label: "Tarjeta" },
 ];
 
 type Draft = {
   id: string | null;
   bas_medio_pago_codigo: string;
   bas_cuenta_bancaria: string;
+  bas_plan_tarjeta: string;
+  bas_codigo_tarjeta: string;
   confirmado: boolean;
 };
 
@@ -44,7 +48,14 @@ function emptyDrafts(): Record<MetodoPago, Draft> {
   return Object.fromEntries(
     METODOS.map((m) => [
       m.value,
-      { id: null, bas_medio_pago_codigo: "", bas_cuenta_bancaria: "", confirmado: false },
+      {
+        id: null,
+        bas_medio_pago_codigo: "",
+        bas_cuenta_bancaria: "",
+        bas_plan_tarjeta: "",
+        bas_codigo_tarjeta: "",
+        confirmado: false,
+      },
     ])
   ) as Record<MetodoPago, Draft>;
 }
@@ -73,6 +84,8 @@ export default function PaymentMethodsEditor() {
             id: item.id,
             bas_medio_pago_codigo: item.bas_medio_pago_codigo,
             bas_cuenta_bancaria: item.bas_cuenta_bancaria,
+            bas_plan_tarjeta: item.bas_plan_tarjeta,
+            bas_codigo_tarjeta: item.bas_codigo_tarjeta,
             confirmado: item.confirmado,
           };
         }
@@ -124,6 +137,8 @@ export default function PaymentMethodsEditor() {
         metodo_pago: metodo,
         bas_medio_pago_codigo: draft.bas_medio_pago_codigo,
         bas_cuenta_bancaria: draft.bas_cuenta_bancaria,
+        bas_plan_tarjeta: draft.bas_plan_tarjeta,
+        bas_codigo_tarjeta: draft.bas_codigo_tarjeta,
         confirmado: draft.confirmado,
       };
       const record = draft.id
@@ -135,6 +150,8 @@ export default function PaymentMethodsEditor() {
         id: record.id,
         bas_medio_pago_codigo: record.bas_medio_pago_codigo,
         bas_cuenta_bancaria: record.bas_cuenta_bancaria,
+        bas_plan_tarjeta: record.bas_plan_tarjeta,
+        bas_codigo_tarjeta: record.bas_codigo_tarjeta,
         confirmado: record.confirmado,
       };
       setDrafts((prev) => ({ ...prev, [metodo]: next }));
@@ -173,11 +190,14 @@ export default function PaymentMethodsEditor() {
           const isDirty =
             draft.bas_medio_pago_codigo !== original.bas_medio_pago_codigo ||
             draft.bas_cuenta_bancaria !== original.bas_cuenta_bancaria ||
+            draft.bas_plan_tarjeta !== original.bas_plan_tarjeta ||
+            draft.bas_codigo_tarjeta !== original.bas_codigo_tarjeta ||
             draft.confirmado !== original.confirmado;
           const isSaving = savingMetodo === value;
           const error = errors[value];
           const showSaved = Boolean(justSaved[value]) && !isDirty && !isSaving;
           const requiereCuenta = value === "transferencia";
+          const requiereTarjeta = value === "tarjeta";
 
           return (
             <li
@@ -215,17 +235,36 @@ export default function PaymentMethodsEditor() {
                 placeholder="Código MedioPago"
                 className="text-[13px]"
               />
-              <Input
-                value={draft.bas_cuenta_bancaria}
-                onChange={(event) =>
-                  updateDraft(value, { bas_cuenta_bancaria: event.target.value })
-                }
-                disabled={!requiereCuenta}
-                placeholder={
-                  requiereCuenta ? "Banco, tipo y número de cuenta" : "No aplica para este método"
-                }
-                className="font-mono text-[13px]"
-              />
+              {requiereCuenta && (
+                <Input
+                  value={draft.bas_cuenta_bancaria}
+                  onChange={(event) =>
+                    updateDraft(value, { bas_cuenta_bancaria: event.target.value })
+                  }
+                  placeholder="Banco, tipo y número de cuenta"
+                  className="font-mono text-[13px]"
+                />
+              )}
+              {requiereTarjeta && (
+                <>
+                  <Input
+                    value={draft.bas_plan_tarjeta}
+                    onChange={(event) =>
+                      updateDraft(value, { bas_plan_tarjeta: event.target.value })
+                    }
+                    placeholder="Código de Plan (BAS)"
+                    className="font-mono text-[13px]"
+                  />
+                  <Input
+                    value={draft.bas_codigo_tarjeta}
+                    onChange={(event) =>
+                      updateDraft(value, { bas_codigo_tarjeta: event.target.value })
+                    }
+                    placeholder="Código de Tarjeta (BAS)"
+                    className="font-mono text-[13px]"
+                  />
+                </>
+              )}
               <div className="flex h-8 items-center justify-end">
                 {isSaving ? (
                   <Loader2 className="size-[15px] animate-spin text-muted-foreground" />
@@ -269,7 +308,7 @@ export default function PaymentMethodsEditor() {
               Código BAS
             </TableHead>
             <TableHead className="overline h-[38px] text-[11px] text-muted-foreground">
-              Cuenta bancaria
+              Datos extra (transferencia/tarjeta)
             </TableHead>
             <TableHead className="overline h-[38px] w-[92px] text-center text-[11px] text-muted-foreground">
               Confirmado
@@ -284,11 +323,14 @@ export default function PaymentMethodsEditor() {
             const isDirty =
               draft.bas_medio_pago_codigo !== original.bas_medio_pago_codigo ||
               draft.bas_cuenta_bancaria !== original.bas_cuenta_bancaria ||
+              draft.bas_plan_tarjeta !== original.bas_plan_tarjeta ||
+              draft.bas_codigo_tarjeta !== original.bas_codigo_tarjeta ||
               draft.confirmado !== original.confirmado;
             const isSaving = savingMetodo === value;
             const error = errors[value];
             const showSaved = Boolean(justSaved[value]) && !isDirty && !isSaving;
             const requiereCuenta = value === "transferencia";
+            const requiereTarjeta = value === "tarjeta";
 
             return (
               <TableRow key={value} className="hover:bg-transparent">
@@ -306,17 +348,36 @@ export default function PaymentMethodsEditor() {
                   />
                 </TableCell>
                 <TableCell className="align-middle">
-                  <Input
-                    value={draft.bas_cuenta_bancaria}
-                    onChange={(event) =>
-                      updateDraft(value, { bas_cuenta_bancaria: event.target.value })
-                    }
-                    disabled={!requiereCuenta}
-                    placeholder={
-                      requiereCuenta ? "Banco, tipo y número de cuenta" : "No aplica para este método"
-                    }
-                    className="h-8 w-full font-mono text-[13px]"
-                  />
+                  {requiereCuenta && (
+                    <Input
+                      value={draft.bas_cuenta_bancaria}
+                      onChange={(event) =>
+                        updateDraft(value, { bas_cuenta_bancaria: event.target.value })
+                      }
+                      placeholder="Banco, tipo y número de cuenta"
+                      className="h-8 w-full font-mono text-[13px]"
+                    />
+                  )}
+                  {requiereTarjeta && (
+                    <div className="flex gap-1.5">
+                      <Input
+                        value={draft.bas_plan_tarjeta}
+                        onChange={(event) =>
+                          updateDraft(value, { bas_plan_tarjeta: event.target.value })
+                        }
+                        placeholder="Código de Plan"
+                        className="h-8 w-full font-mono text-[13px]"
+                      />
+                      <Input
+                        value={draft.bas_codigo_tarjeta}
+                        onChange={(event) =>
+                          updateDraft(value, { bas_codigo_tarjeta: event.target.value })
+                        }
+                        placeholder="Código de Tarjeta"
+                        className="h-8 w-full font-mono text-[13px]"
+                      />
+                    </div>
+                  )}
                 </TableCell>
                 <TableCell className="align-middle">
                   <div className="flex justify-center">

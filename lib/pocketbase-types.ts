@@ -30,7 +30,7 @@ export type OrdenPagoStatus = "pending" | "success" | "failed";
 export type ProcessingJobStatus = "queued" | "processing" | "done" | "error";
 /** "" en filas legacy anteriores a este campo -- tratar como needs_review en todos lados. */
 export type ReviewStatus = "" | "needs_review" | "confirmed";
-export type MetodoPago = "efectivo" | "cheque" | "transferencia";
+export type MetodoPago = "efectivo" | "cheque" | "transferencia" | "tarjeta";
 export type PaymentOrderStatus = "processing" | "success" | "failed";
 
 export interface InvoicesRecord extends BaseSystemFields {
@@ -124,6 +124,10 @@ export interface BasPaymentMethodsRecord extends BaseSystemFields {
   bas_medio_pago_codigo: string;
   /** solo aplica a "transferencia" -- PagosPorBanco exige CuentaBancaria por item */
   bas_cuenta_bancaria: string;
+  /** solo aplica a "tarjeta" -- Tarjetas exige Plan/CodigoTarjeta ademas del
+   * numero de tarjeta (que se pide por-pago, no aca, ver PaymentOrderPanel). */
+  bas_plan_tarjeta: string;
+  bas_codigo_tarjeta: string;
   confirmado: boolean;
 }
 

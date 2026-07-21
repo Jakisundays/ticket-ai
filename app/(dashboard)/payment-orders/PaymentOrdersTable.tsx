@@ -45,6 +45,7 @@ export type PaymentOrderRow = {
 const METODO_LABEL: Record<MetodoPago, string> = {
   efectivo: "Efectivo",
   cheque: "Cheque",
+  tarjeta: "Tarjeta",
   transferencia: "Transferencia",
 };
 

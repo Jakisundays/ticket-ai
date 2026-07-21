@@ -47,6 +47,14 @@ export async function POST(
           metodo_pago: body.metodo_pago,
           monto: typeof body.monto === "number" ? body.monto : undefined,
           requested_by: requestedBy,
+          // Datos extra por-método (ver CrearOrdenPagoBody en Invoicy):
+          // cheque necesita el número del cheque de terceros a endosar,
+          // tarjeta el número de tarjeta usado, transferencia opcionalmente
+          // una referencia de la operación bancaria.
+          numero_cheque: typeof body.numero_cheque === "string" ? body.numero_cheque : undefined,
+          numero_tarjeta: typeof body.numero_tarjeta === "string" ? body.numero_tarjeta : undefined,
+          numero_transferencia:
+            typeof body.numero_transferencia === "string" ? body.numero_transferencia : undefined,
         }),
       }
     );

@@ -253,7 +253,8 @@ export default async function InvoiceDetailPage({
       </PageHeader>
 
       <div className="flex-1 overflow-y-auto px-4 py-4 md:px-7 md:py-7">
-        <div className="animate-fade-up mx-auto flex max-w-[1040px] flex-wrap items-start gap-6">
+        <div className="animate-fade-up mx-auto flex max-w-[1040px] flex-col gap-6">
+        <div className="flex flex-wrap items-start gap-6">
           {/* Columna izquierda: datos de solo lectura */}
           <div className="flex min-w-0 flex-1 basis-[420px] flex-col gap-5">
             <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
@@ -343,11 +344,6 @@ export default async function InvoiceDetailPage({
                 </p>
               )}
             </section>
-
-            <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
-              <h2 className="mb-3.5 text-[13px] font-semibold text-foreground">Ítems</h2>
-              <ItemsTable items={items} moneda={invoice.moneda} />
-            </section>
           </div>
 
           {/* Columna derecha: estado + orden de pago */}
@@ -369,6 +365,15 @@ export default async function InvoiceDetailPage({
             />
           </div>
         </div>
+
+        {/* Ítems: ancho completo -- antes vivía apretada en la columna
+            izquierda (compartiendo espacio con la columna derecha de 320-400px),
+            lo que forzaba scroll horizontal en sus 7 columnas. */}
+        <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
+          <h2 className="mb-3.5 text-[13px] font-semibold text-foreground">Ítems</h2>
+          <ItemsTable items={items} moneda={invoice.moneda} />
+        </section>
+        </div>
       </div>
     </div>
   );
@@ -379,13 +384,11 @@ function ItemsTable({ items, moneda }: { items: InvoiceItemsRecord[]; moneda: st
     <Table>
       <TableHeader>
         <TableRow className="hover:bg-transparent">
-          <TableHead>#</TableHead>
           <TableHead>Descripción</TableHead>
           <TableHead className="text-right">Cantidad</TableHead>
           <TableHead className="text-right">Precio unit.</TableHead>
           <TableHead className="text-right">Total</TableHead>
           <TableHead>Categoría</TableHead>
-          <TableHead>Código BAS</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -394,7 +397,6 @@ function ItemsTable({ items, moneda }: { items: InvoiceItemsRecord[]; moneda: st
           .sort((a, b) => (a.linea ?? 0) - (b.linea ?? 0))
           .map((item) => (
             <TableRow key={item.id} className="hover:bg-transparent">
-              <TableCell className="text-muted-foreground">{item.linea}</TableCell>
               <TableCell className="whitespace-normal">{item.descripcion}</TableCell>
               <TableCell className="text-right">{item.cantidad}</TableCell>
               <TableCell className="text-right font-mono">
@@ -404,14 +406,11 @@ function ItemsTable({ items, moneda }: { items: InvoiceItemsRecord[]; moneda: st
                 {formatCurrency(item.precio_total, moneda)}
               </TableCell>
               <TableCell>{item.categoria || "—"}</TableCell>
-              <TableCell className="text-muted-foreground">
-                {item.bas_codigo_item || "—"}
-              </TableCell>
             </TableRow>
           ))}
         {items.length === 0 && (
           <TableRow className="hover:bg-transparent">
-            <TableCell colSpan={7} className="py-6 text-center text-muted-foreground">
+            <TableCell colSpan={5} className="py-6 text-center text-muted-foreground">
               Sin items.
             </TableCell>
           </TableRow>

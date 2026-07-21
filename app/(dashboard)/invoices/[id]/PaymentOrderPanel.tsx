@@ -38,6 +38,7 @@ const METODO_LABEL: Record<MetodoPago, string> = {
   efectivo: "Efectivo",
   cheque: "Cheque",
   transferencia: "Transferencia",
+  tarjeta: "Tarjeta",
 };
 
 export default function PaymentOrderPanel({
@@ -54,10 +55,28 @@ export default function PaymentOrderPanel({
   existingOrder: PaymentOrdersRecord | null;
 }) {
   const router = useRouter();
+  // "transferencia" es el método por defecto (pedido explícito) -- el
+  // orden de paymentMethods viene alfabético (sort: "metodo_pago" en
+  // page.tsx), así que paymentMethods[0] no es una elección de negocio, es
+  // un accidente de sorting ("cheque" quedaba primero). Se prioriza
+  // transferencia si está configurada; si no, cae al primer método
+  // disponible para no romper con una configuración parcial.
+  const metodoPorDefecto =
+    paymentMethods.find((m) => m.metodo_pago === "transferencia")?.metodo_pago ??
+    paymentMethods[0]?.metodo_pago ??
+    "efectivo";
   const [metodoPago, setMetodoPago] = useState<MetodoPago>(
-    existingOrder?.metodo_pago ?? paymentMethods[0]?.metodo_pago ?? "efectivo"
+    existingOrder?.metodo_pago ?? metodoPorDefecto
   );
   const [monto, setMonto] = useState<number>(existingOrder?.monto ?? invoiceTotal);
+  // Cada método (salvo efectivo) exige un dato extra que BAS pide por-línea,
+  // no por-configuración -- ver Invoicy/utils/bas_config.py (METODO_PAGO_ARRAY_BAS)
+  // y CrearOrdenPagoBody. "cheque" acá es un cheque de TERCEROS que se
+  // endosa para pagar, no uno propio emitido (la Caja actual no tiene
+  // ningún medio de pago tipo "cheque propio" habilitado en BAS).
+  const [numeroCheque, setNumeroCheque] = useState("");
+  const [numeroTarjeta, setNumeroTarjeta] = useState("");
+  const [numeroTransferencia, setNumeroTransferencia] = useState("");
   const [order, setOrder] = useState<PaymentOrdersRecord | null>(existingOrder);
   // El resultado inicial puede venir de un intento previo persistido (reload
   // de página), no solo de una corrida en vivo -- mismo inferMissionOutcome()
@@ -71,13 +90,29 @@ export default function PaymentOrderPanel({
   const isRetry = order?.status === "failed" || (lastOutcome !== null && !lastOutcome.success) || isStaleProcessing;
   const stepViews = computeMissionSteps(loading, liveStepIndex, loading ? null : lastOutcome);
   const showConnectionLost = !loading && lastOutcome !== null && !lastOutcome.success && lastOutcome.failedStepIndex === null;
+  // cheque/tarjeta exigen un dato extra por-línea que BAS no puede inferir
+  // (qué cheque se endosa, qué tarjeta se pasó) -- sin esto el backend
+  // devuelve 422 antes de tocar BAS, así que lo cortamos acá para no gastar
+  // el intento.
+  const faltaDatoExtra =
+    (metodoPago === "cheque" && !numeroCheque.trim()) ||
+    (metodoPago === "tarjeta" && !numeroTarjeta.trim());
 
   async function handleSubmit() {
     const outcome = await run(async () => {
       const res = await fetch(`/api/payment-orders/${encodeURIComponent(processId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ metodo_pago: metodoPago, monto }),
+        body: JSON.stringify({
+          metodo_pago: metodoPago,
+          monto,
+          numero_cheque: metodoPago === "cheque" ? numeroCheque.trim() : undefined,
+          numero_tarjeta: metodoPago === "tarjeta" ? numeroTarjeta.trim() : undefined,
+          numero_transferencia:
+            metodoPago === "transferencia" && numeroTransferencia.trim()
+              ? numeroTransferencia.trim()
+              : undefined,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (data.payment_order) setOrder(data.payment_order);
@@ -191,11 +226,63 @@ export default function PaymentOrderPanel({
                 onChange={(e) => setMonto(Number(e.target.value))}
               />
             </div>
+
+            {metodoPago === "cheque" && (
+              <div className="flex flex-col gap-1.5 sm:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">
+                  Número de cheque a endosar
+                </Label>
+                <Input
+                  className="h-9"
+                  value={numeroCheque}
+                  onChange={(e) => setNumeroCheque(e.target.value)}
+                  placeholder="Número del cheque de terceros ya recibido"
+                />
+              </div>
+            )}
+
+            {metodoPago === "tarjeta" && (
+              <div className="flex flex-col gap-1.5 sm:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">
+                  Número de tarjeta
+                </Label>
+                <Input
+                  className="h-9"
+                  value={numeroTarjeta}
+                  onChange={(e) => setNumeroTarjeta(e.target.value)}
+                />
+              </div>
+            )}
+
+            {metodoPago === "transferencia" && (
+              <div className="flex flex-col gap-1.5 sm:col-span-2">
+                <Label className="text-xs font-medium text-muted-foreground">
+                  Número de operación (opcional)
+                </Label>
+                <Input
+                  className="h-9"
+                  value={numeroTransferencia}
+                  onChange={(e) => setNumeroTransferencia(e.target.value)}
+                />
+              </div>
+            )}
           </div>
 
-          <Button onClick={handleSubmit} disabled={loading} className="mt-1 h-9 gap-2">
+          <Button
+            onClick={handleSubmit}
+            disabled={loading || faltaDatoExtra}
+            className="mt-1 h-9 gap-2"
+          >
             {loading && <Loader2 className="size-3.5 animate-spin" />}
-            {loading ? "Creando…" : isRetry ? "Reintentar" : "Crear orden de pago"}
+            {loading
+              ? "Creando…"
+              : faltaDatoExtra
+                ? metodoPago === "cheque"
+                  ? "Falta el número de cheque"
+                  : "Falta el número de tarjeta"
+                : isRetry
+                  ? "Reintentar"
+                  : "Crear orden de pago"}
           </Button>
         </>
       )}
