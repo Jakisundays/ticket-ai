@@ -58,6 +58,7 @@ from utils.bas_config import (
     BAS_TRAT_IMPOSITIVO_PROV_RI,
     BAS_PREFIJO_TALONARIO_MA,
     BAS_PREFIJO_TALONARIO_OP,
+    BAS_IMPUTACION_CONTABLE_PROVEEDORES,
     METODO_PAGO_ARRAY_BAS,
 )
 import google.auth.transport.requests as google_auth_requests
@@ -1385,6 +1386,7 @@ class InvoiceOrchestrator:
             empresa_alta=BAS_EMPRESA,
             trat_impositivo=BAS_TRAT_IMPOSITIVO_RI,
             trat_impositivo_prov=BAS_TRAT_IMPOSITIVO_PROV_RI,
+            imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
         )
         self._proveedores_bas_cache[cuit_normalizado] = proveedor
         try:

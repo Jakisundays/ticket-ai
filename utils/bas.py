@@ -439,12 +439,23 @@ class BasClient:
         trat_impositivo_prov: str,
         numero_impositivo_tipo: Optional[str] = None,
         numero_impositivo1: Optional[str] = None,
+        imputacion_contable: Optional[int] = None,
     ) -> dict:
         """
         Arma el body Proveedor. Requeridos por schema: Codigo, RazonSocial,
         TratImpositivo, TratImpositivoProv, EmpresaAlta. Los códigos de
         TratImpositivo/TratImpositivoProv deben salir de
         GET /api/TratamientosImpositivos(Provinciales)/{empresa} — no inventarlos.
+
+        `imputacion_contable`: si se pasa, arma `CuentasCorrientes` con esa
+        cuenta marcada `PorDefecto`. Sin esto, un proveedor nuevo queda sin
+        cuenta contable propia, y BAS no puede resolver su moneda al
+        registrar un ComprobanteCompra con MetodoPago="C" (cuenta corriente)
+        -- responde 409 "no se pudo establecer la moneda correspondiente a
+        la cuenta 0" (ver docs/bas-comprobante-compra-cuenta-0-diagnostico.md,
+        confirmado en vivo el 2026-07-18). El caller lo resuelve pasando
+        `BAS_IMPUTACION_CONTABLE_PROVEEDORES` (utils/bas_config.py) -- ese
+        valor es config de negocio, no vive acá.
         """
         payload: dict = {
             "Codigo": codigo,
@@ -457,6 +468,10 @@ class BasClient:
             payload["NumeroImpositivoTipo"] = numero_impositivo_tipo
         if numero_impositivo1 is not None:
             payload["NumeroImpositivo1"] = numero_impositivo1
+        if imputacion_contable is not None:
+            payload["CuentasCorrientes"] = [
+                {"ImputacionContable": imputacion_contable, "PorDefecto": True}
+            ]
         return payload
 
     # ------------------------------------------------------------------ #
@@ -505,6 +520,7 @@ class BasClient:
         trat_impositivo: str,
         trat_impositivo_prov: str,
         codigo_sugerido: Optional[str] = None,
+        imputacion_contable: Optional[int] = None,
         dry_run: bool = False,
     ) -> dict:
         """
@@ -514,6 +530,12 @@ class BasClient:
         construir_payload_proveedor, crear_proveedor) que hasta ahora se usaban
         sueltas. Devuelve el proveedor (existente o recién creado) con una
         clave extra `_nuevo: bool` para que el caller sepa si hubo alta.
+
+        `imputacion_contable`: se reenvía tal cual a construir_payload_proveedor
+        -- ver su docstring. El caller (routes/process_invoice_google_2.py) debe
+        pasar `BAS_IMPUTACION_CONTABLE_PROVEEDORES`; si no se pasa nada, el
+        proveedor queda sin cuenta contable propia (mismo bug que ya se dio
+        con SUPERCOOP).
         """
         encontrado = self.buscar_proveedor_por_cuit(cuit)
         if encontrado is not None:
@@ -531,6 +553,7 @@ class BasClient:
             trat_impositivo_prov=trat_impositivo_prov,
             numero_impositivo_tipo="80",  # CUIT
             numero_impositivo1=cuit,
+            imputacion_contable=imputacion_contable,
         )
         app_logger.info(
             f"BAS: proveedor con CUIT {cuit} no existe; dando de alta como '{codigo}'"
@@ -569,7 +592,9 @@ class BasClient:
         Flujo completo y robusto:
           1) Valida la factura por número externo del proveedor.
           2) Si no existe y `registrar_si_no_existe`, la registra (requiere
-             `comprobante_compra_payload`).
+             `comprobante_compra_payload`), y VERIFICA con un GET
+             independiente que quedó realmente persistida antes de seguir
+             -- no confía ciegamente en el 201 del POST.
           3) Arma e (opcionalmente, según `dry_run`) crea la orden de pago.
 
         `dry_run=True` (default) NO impacta el ERP: arma todo y devuelve el payload
@@ -622,6 +647,40 @@ class BasClient:
             cmp = _primer_comprobante(factura_resultado)
             prefijo_int = cmp.get("Prefijo") if cmp else None
             numero_int = cmp.get("Numero") if cmp else None
+
+            # 2.1) Verificar con un GET independiente antes de pagar. En
+            # dry_run no hay nada real escrito en el ERP -- no tiene sentido
+            # (ni es posible: factura_resultado es solo el payload de vuelta)
+            # verificarlo.
+            if not dry_run:
+                if not prefijo_int or numero_int in (None, ""):
+                    raise BasApiError(
+                        500,
+                        "El POST a ComprobantesCompra devolvió 201 pero sin Prefijo/Numero "
+                        "en la respuesta -- no se puede verificar ni continuar con la orden "
+                        "de pago.",
+                        "/api/ComprobantesCompra",
+                    )
+                verificada = self.consultar_comprobante(
+                    empresa, sucursal, comprobante_factura, prefijo_int, numero_int
+                )
+                if verificada is None:
+                    raise BasApiError(
+                        409,
+                        f"El comprobante {comprobante_factura} {prefijo_int}-{numero_int} se "
+                        "registró (POST 201) pero la verificación posterior (GET "
+                        "/api/ConsultaComprobantes) no lo encontró -- no se creó la orden de "
+                        "pago para evitar aplicarla contra una factura que podría no existir.",
+                        "/api/ConsultaComprobantesExternos",
+                    )
+                app_logger.info(
+                    f"BAS: comprobante {comprobante_factura} {prefijo_int}-{numero_int} "
+                    "verificado OK tras el registro"
+                )
+                # Preferir los valores que confirmó la verificación (más
+                # confiables que el simple eco del POST) para armar la OP.
+                prefijo_int = verificada.get("Prefijo", prefijo_int)
+                numero_int = verificada.get("Numero", numero_int)
 
         # 3) Construir y crear la orden de pago.
         comprobantes_aplicados = [

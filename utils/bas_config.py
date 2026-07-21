@@ -55,6 +55,17 @@ BAS_NUMERO_IMPOSITIVO_TIPO_CUIT = "80"
 BAS_PREFIJO_TALONARIO_MA = "00001"  # talonario de Factura de Compra A
 BAS_PREFIJO_TALONARIO_OP = "00001"  # talonario de Orden de Pago (distinto talonario, mismo prefijo)
 
+# Cuenta contable genérica "Proveedores" (plan de cuentas, GET /api/Cuentas),
+# NO específica de ningún proveedor puntual -- confirmado 2026-07-18
+# muestreando 25 proveedores reales y activos del maestro (GET /api/Proveedores):
+# 211001 aparece en el 100% (25/25). Se usa como CuentasCorrientes por defecto
+# al dar de alta un proveedor nuevo (ver BasClient.verificar_o_dar_de_alta_proveedor),
+# porque sin ella BAS no puede resolver la moneda de la cuenta corriente del
+# proveedor al registrar un ComprobanteCompra con MetodoPago="C" (cuenta
+# corriente) -- cae a una cuenta "0" inexistente y responde 409
+# (SP_ICR_VALIDA_CODTAB). Ver docs/bas-comprobante-compra-cuenta-0-diagnostico.md.
+BAS_IMPUTACION_CONTABLE_PROVEEDORES = 211001
+
 # --- Métodos de pago (Orden de Pago humana, ver /payment-orders/{id}/create) ---
 # Qué ARRAY de "pagos" de OrdenDePago usar por método es forma de payload
 # (estructura de código), no dato de negocio descubrible con el tiempo, así
