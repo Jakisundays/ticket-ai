@@ -72,6 +72,7 @@ BAS_PROCESSING_STATUS_COLLECTION = "bas_processing_status"
 BAS_PROVIDERS_COLLECTION = "bas_providers"
 BAS_PAYMENT_METHODS_COLLECTION = "bas_payment_methods"
 PAYMENT_ORDERS_COLLECTION = "payment_orders"
+BAS_CATEGORY_MAP_COLLECTION = "bas_category_map"
 
 
 class PocketBaseApiError(Exception):
@@ -227,6 +228,34 @@ class PocketBaseClient:
             )
         return resp
 
+    def _request_multipart(
+        self,
+        method: str,
+        path: str,
+        *,
+        files: dict,
+        _reintento_auth: bool = True,
+    ) -> requests.Response:
+        """Variante de _request() para escrituras multipart/form-data -- lo
+        que exige la API de PocketBase para un campo tipo "file" (un PATCH
+        con json= NO sirve para subir archivos, a diferencia del resto de
+        los campos que sí usan _request/_update normal)."""
+        if not self.base_url:
+            raise PocketBaseApiError(0, "Falta POCKETBASE_URL", path)
+        url = f"{self.base_url}{path}"
+        headers = {"Authorization": self.get_token()}
+        try:
+            resp = requests.request(
+                method, url, files=files, headers=headers, timeout=self.timeout
+            )
+        except requests.exceptions.RequestException as e:
+            raise PocketBaseApiError(0, str(e), path)
+        if resp.status_code == 401 and _reintento_auth:
+            app_logger.warning("PocketBase: 401, invalidando token y reintentando (multipart)")
+            self._invalidar_token()
+            return self._request_multipart(method, path, files=files, _reintento_auth=False)
+        return resp
+
     # ------------------------------------------------------------------ #
     # Helpers genéricos de colección (privados, pueden lanzar PocketBaseApiError)
     # ------------------------------------------------------------------ #
@@ -239,6 +268,17 @@ class PocketBaseClient:
         data = _json_o_error(resp, f"/api/collections/{collection}/records", ok=(200,))
         items = (data or {}).get("items") or []
         return items[0] if items else None
+
+    def _list_all(self, collection: str, filter_str: str = "", page_size: int = 200) -> list:
+        """Trae TODOS los records de una colección chica (sin paginar de verdad
+        -- page_size generoso alcanza para colecciones de config como
+        bas_category_map, que nunca van a tener cientos de filas)."""
+        params = {"perPage": page_size, "page": 1}
+        if filter_str:
+            params["filter"] = filter_str
+        resp = self._request("GET", f"/api/collections/{collection}/records", params=params)
+        data = _json_o_error(resp, f"/api/collections/{collection}/records", ok=(200,))
+        return (data or {}).get("items") or []
 
     def _create(self, collection: str, data: dict) -> dict:
         resp = self._request("POST", f"/api/collections/{collection}/records", json_body=data)
@@ -279,6 +319,67 @@ class PocketBaseClient:
             return self._upsert(INVOICES_COLLECTION, "process_id", process_id, payload)
         except Exception as e:
             app_logger.warning(f"PocketBase: error en upsert_invoice: {e}")
+            return None
+
+    def adjuntar_archivo_original(
+        self, record_id: str, file_path: str, filename: str, mime_type: str
+    ) -> bool:
+        """
+        Adjunta el archivo original (imagen/PDF) al campo "documento_original"
+        de una factura ya persistida. `record_id` es el id de PocketBase
+        (record["id"]), NO el process_id -- a diferencia de upsert_invoice,
+        que sí resuelve por process_id, PATCH /records/{id} necesita el id
+        real. Llamar ANTES de borrar el archivo local (ver
+        _procesar_imagen_o_pdf). Best-effort: un fallo acá nunca debe frenar
+        el resto del procesamiento (Sheets/BAS ya se hicieron para cuando se
+        llega a este punto). Devuelve True si quedó adjuntado.
+        """
+        try:
+            with open(file_path, "rb") as f:
+                resp = self._request_multipart(
+                    "PATCH",
+                    f"/api/collections/{INVOICES_COLLECTION}/records/{record_id}",
+                    files={"documento_original": (filename, f, mime_type)},
+                )
+            if resp.status_code not in (200, 201):
+                app_logger.warning(
+                    f"PocketBase: adjuntar_archivo_original {resp.status_code}: {_detalle(resp)}"
+                )
+                return False
+            return True
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en adjuntar_archivo_original: {e}")
+            return False
+
+    def obtener_categoria_map(self) -> dict:
+        """
+        {categoria: codigo_item} desde "bas_category_map", solo filas con
+        confirmado=true (las sin confirmar son borradores del dashboard,
+        todavía no verificadas contra el catálogo real de BAS -- no deben
+        llegar al LLM ni usarse para armar un ComprobanteCompra real).
+        Devuelve {} (no None) en caso de error -- el caller (bas_config.py)
+        decide el fallback.
+        """
+        try:
+            records = self._list_all(BAS_CATEGORY_MAP_COLLECTION, filter_str="confirmado = true")
+            return {r["categoria"]: r["codigo_item"] for r in records if r.get("categoria") and r.get("codigo_item")}
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en obtener_categoria_map: {e}")
+            return {}
+
+    def obtener_file_token(self) -> Optional[str]:
+        """
+        POST /api/files/token -- token de corta duración (credenciales del
+        service account) requerido para leer un campo tipo "file" marcado
+        protected=true, como "documento_original". Lo usa el proxy
+        GET /gemini2/invoices/{process_id}/file para servir el archivo.
+        """
+        try:
+            resp = self._request("POST", "/api/files/token")
+            data = _json_o_error(resp, "/api/files/token", ok=(200,))
+            return (data or {}).get("token")
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en obtener_file_token: {e}")
             return None
 
     def get_provider_cache(self, cuit: str) -> Optional[dict]:
