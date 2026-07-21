@@ -132,18 +132,26 @@ export default function InvoiceReviewForm({
     });
   }
 
-  // Los ítems se extraen NETOS (sin IVA, ver Invoicy/tools.py) pero
-  // invoiceDraft.total viene CON IVA -- comparar contra total disparaba esta
-  // advertencia en casi cualquier factura con IVA (falso positivo
-  // estructural). subtotal sí es neto, misma base que los ítems. Si
-  // subtotal viene en 0 (facturas viejas de antes de este campo, o una
-  // extracción que no lo pudo calcular) preferimos no mostrar nada a
-  // comparar contra la base equivocada.
+  // Gemini es inconsistente sobre si desglosa impuestos (IVA, Ingresos
+  // Brutos, tasas municipales, etc.) como líneas de ítem propias o no --
+  // depende de cómo esté impresa la factura real (caso real: Litoral Gas,
+  // 15 ítems donde 2 son líneas de impuesto, sumando exacto contra `total`
+  // bruto; vs. una factura de un solo producto donde el ítem viene neto,
+  // sumando exacto contra `subtotal`). Ambos son resultados de extracción
+  // válidos -- lo único que indica un error real es que la suma de ítems no
+  // cierre contra NINGUNO de los dos.
   const itemsTotal = items.reduce((sum, item) => sum + (itemDrafts[item.id]?.precio_total ?? 0), 0);
+  const TOLERANCIA = 0.05;
+  const coincideConSubtotal =
+    invoiceDraft.subtotal > 0 && Math.abs(itemsTotal - invoiceDraft.subtotal) <= TOLERANCIA;
+  const coincideConTotal =
+    invoiceDraft.total > 0 && Math.abs(itemsTotal - invoiceDraft.total) <= TOLERANCIA;
+  // Si ninguno de los dos campos de referencia existe (factura vieja, o
+  // extracción incompleta) no hay contra qué verificar -- preferimos no
+  // mostrar nada a comparar contra una base en 0.
+  const hayBaseParaVerificar = invoiceDraft.subtotal > 0 || invoiceDraft.total > 0;
   const itemsTotalMismatch =
-    items.length > 0 &&
-    invoiceDraft.subtotal > 0 &&
-    Math.abs(itemsTotal - invoiceDraft.subtotal) > 0.05;
+    items.length > 0 && hayBaseParaVerificar && !coincideConSubtotal && !coincideConTotal;
 
   async function handleConfirm() {
     setStatus("saving");
@@ -348,8 +356,9 @@ export default function InvoiceReviewForm({
             {itemsTotalMismatch && (
               <p className="flex items-center gap-1.5 rounded-sm bg-status-warning-bg px-2.5 py-1 text-xs font-medium text-status-warning-fg">
                 <AlertTriangle className="size-3.5 shrink-0" />
-                Los ítems suman {formatCurrency(itemsTotal, invoiceDraft.moneda)}, el subtotal (sin IVA) dice{" "}
-                {formatCurrency(invoiceDraft.subtotal, invoiceDraft.moneda)}
+                Los ítems suman {formatCurrency(itemsTotal, invoiceDraft.moneda)} -- no coincide ni con el subtotal
+                ({formatCurrency(invoiceDraft.subtotal, invoiceDraft.moneda)}) ni con el total{" "}
+                ({formatCurrency(invoiceDraft.total, invoiceDraft.moneda)})
               </p>
             )}
           </div>
