@@ -1529,10 +1529,13 @@ class InvoiceOrchestrator:
             resultado["orden_pago"] = flujo.get("orden_pago")
             if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
                 # Bloqueador conocido y documentado (docs/bas-orden-de-pago-research.md):
-                # OrdenesPago hoy responde "el comprobante no existe para aplicarlo".
+                # OrdenesPago hoy responde "el comprobante no existe para aplicarlo"
+                # (SP_ICR_COMPROB_APL) -- confirmado como limitación del lado de BAS,
+                # no de esta factura (ver utils/bas.py:_es_error_no_resoluble_desde_cliente).
                 # La factura SÍ quedó registrada (resultado["comprobante"] poblado);
                 # se loguea como advertencia esperada, no como error crítico.
-                resultado["error"] = f"Orden de pago falló: {resultado['orden_pago']['detail']}"
+                sufijo = " -- requiere soporte de BAS, no reintentar" if resultado["orden_pago"].get("_requiere_soporte_bas") else ""
+                resultado["error"] = f"Orden de pago falló{sufijo}: {resultado['orden_pago']['detail']}"
                 app_logger.warning(
                     f"[{process_id}] BAS: factura registrada OK; OP falló (esperado hasta que BAS lo resuelva): {resultado['error']}"
                 )
@@ -2639,7 +2642,9 @@ async def retry_orden_pago(process_id: str):
         )
         resultado["orden_pago"] = flujo.get("orden_pago")
         if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
-            resultado["error"] = f"Orden de pago falló: {resultado['orden_pago'].get('detail')}"
+            _detalle = resultado["orden_pago"].get("detail")
+            _sufijo = " -- requiere soporte de BAS, no reintentar" if resultado["orden_pago"].get("_requiere_soporte_bas") else ""
+            resultado["error"] = f"Orden de pago falló{_sufijo}: {_detalle}"
     except BasApiError as e:
         resultado["error"] = f"BasApiError {e.status_code} en {e.path}: {e.detail}"
         app_logger.error(f"[{process_id}] retry-op: fallo BAS: {resultado['error']}")
@@ -3091,7 +3096,22 @@ async def crear_orden_pago(
         )
         resultado["orden_pago"] = flujo.get("orden_pago")
         if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
-            resultado["error"] = f"Orden de pago falló: {resultado['orden_pago'].get('detail')}"
+            detalle = resultado["orden_pago"].get("detail")
+            if resultado["orden_pago"].get("_requiere_soporte_bas"):
+                # Ver utils/bas.py:_es_error_no_resoluble_desde_cliente -- esta
+                # firma de error ya se confirmó (~37 variantes de payload
+                # probadas en total, incluido el endpoint alternativo
+                # /api/AplicacionesComprobantes) como una limitación del lado
+                # de BAS en esta instalación, no de esta factura ni de los
+                # datos enviados. Reintentar desde acá no cambia el resultado.
+                resultado["error"] = (
+                    "Orden de pago falló: BAS no puede aplicar este comprobante "
+                    "(SP_ICR_COMPROB_APL) -- limitación confirmada del lado de "
+                    "BAS en esta instalación, no de los datos de la factura. "
+                    f"No reintentar: escalar a soporte de BAS. Detalle: {detalle}"
+                )
+            else:
+                resultado["error"] = f"Orden de pago falló: {detalle}"
     except BasApiError as e:
         resultado["error"] = f"BasApiError {e.status_code} en {e.path}: {e.detail}"
         app_logger.error(f"[{process_id}] crear-orden-pago: fallo BAS: {resultado['error']}")

@@ -680,3 +680,125 @@ en §DIAGNÓSTICO DEFINITIVO, no a un error de medio de pago):**
 (proveedor viejo, de antes del fix "cuenta 0") — inútil para probar
 `OrdenesPago` real. `SUPERCOO` sí tiene `CuentasCorrientes: [{ImputacionContable: 211001, PorDefecto: true}]`
 confirmado — usado para todas las pruebas de este catálogo.
+
+---
+
+## ⛔ ACTUALIZACIÓN 2026-07-21 — "no existe para aplicarlo" CONFIRMADO como limitación de BAS, no de Invoicy (~37 variantes probadas en total, ninguna resuelve)
+
+Nota: la nota de arriba sobre `LITORALG` ya quedó obsoleta -- el fix de
+"cuenta 0" del mismo día (`utils/bas.py:asegurar_cuenta_corriente_proveedor`)
+reparó su `CuentasCorrientes` automáticamente al re-procesar una factura real
+de ese proveedor. `LITORALG` es hoy un proveedor sano, usado en las pruebas
+de esta sección.
+
+**Contexto:** con el bug de "cuenta 0" (proveedor sin cuenta contable) y el
+bug de "fecha anterior al cierre del subdiario" (`Fecha` = fecha del
+documento en vez de fecha de registración) ya resueltos ese mismo día, la
+factura de Litoral Gas se registró con éxito (`MA 00001-00021885`, verificado
+con `GET /api/ConsultaComprobantes`, `Anulado: false`) pero **crear la Orden
+de Pago sigue fallando** con el mismo error ya documentado arriba (2026-07-01):
+
+```
+"El comprobante MA 00001-00021885 no existe para aplicarlo.
+(SP_ICR_COMPROB_APL)(SP_ICR_COMPROB_CAJA)"
+```
+
+Esta sección agrega **evidencia nueva, no probada en la investigación de
+2026-07-01**, que cierra el caso: **esto no es resoluble desde el payload de
+Invoicy.**
+
+### Experimento 1 — Fecha dentro de `ComprobantesAplicados`
+
+Se probó explícitamente lo que la investigación de julio dejó "no probado con
+el valor correcto": agregar `Fecha` al ítem de `ComprobantesAplicados`, pero
+usando el valor **real y verificado** que devuelve `GET /api/ConsultaComprobantes`
+para ese comprobante (no un valor inventado). Mismo resultado exacto, con y
+sin el campo:
+
+```
+FALLO: 409 {'title': 'El comprobante MA 00001-00021885 no existe para
+aplicarlo.(SP_ICR_COMPROB_APL)(SP_ICR_COMPROB_CAJA)', 'status': 409}
+```
+
+**Descubrimiento colateral:** `GET /api/ConsultaComprobantesExternos` y
+`GET /api/ConsultaComprobantes` no necesariamente devuelven el mismo valor de
+`Fecha` para el mismo comprobante -- la primera parece influenciada por el
+parámetro `fecha_externo` de la consulta, no por el valor realmente
+persistido. `ConsultaComprobantes` (sin parámetro de fecha) es la fuente de
+verdad. No cambia la conclusión de esta sección, pero es una trampa a evitar
+en cualquier verificación futura.
+
+### Experimento 2 — Endpoint dedicado `POST /api/AplicacionesComprobantes`
+
+El Swagger expone un endpoint separado, nunca antes probado contra BAS real,
+pensado específicamente para "aplicar" un comprobante ya existente contra
+otro (schema `Entidadesv2.Varias.AplicacionComprobante`) -- listado como
+"Alternativa 2" en la sección de arriba pero nunca ejecutado. Se probó de
+punta a punta:
+
+1. Se creó una Orden de Pago **suelta**, sin `ComprobantesAplicados` (un
+   comprobante de pago sin aplicar todavía) → **201 real, sin error**:
+   `IdTransaccion 274510`, `Comprobante: "OPG"`, `Prefijo 00001`, `Numero
+   00034994`. Esto **confirma que el mecanismo de creación de OP en sí
+   funciona perfectamente** -- el problema es específicamente la aplicación
+   contra un comprobante existente, no la OP como tal.
+2. Se intentó aplicar esa OP contra `MA 00001-00021885` vía
+   `POST /api/AplicacionesComprobantes` (top-level `Comprobante: "OP"` —
+   nota: la respuesta de creación usa el nombre largo `"OPG"`, pero el
+   *código* de 2 caracteres que exige este endpoint es `"OP"`, mismo patrón
+   ya visto con `"FAC A"` vs `"MA"`). Primero pidió `ImputacionContable`
+   (`409 "Debe indicar la imputación contable.(SP_ICR_APLICACIONES)"` —
+   resuelto agregando `211001`, la misma cuenta ya usada para proveedores).
+   Con eso resuelto, el resultado final fue:
+
+```
+409 {'title': 'El comprobante MA 00001-00021885 no existe para
+aplicarlo.(SP_ICR_COMPROB_APL)(SP_ICR_APLICACIONES)', 'status': 409}
+```
+
+**Esto es la prueba decisiva:** `SP_ICR_COMPROB_APL` es el mismo
+procedimiento interno que falla sin importar si se llega a él desde
+`OrdenesPago` (con `ComprobantesAplicados` embebido) o desde
+`AplicacionesComprobantes` (endpoint dedicado). No es un problema del
+endpoint elegido ni de cómo arma el payload Invoicy -- es el propio SP el que
+no puede resolver la aplicación en esta instalación.
+
+### Experimento 3 — Control con un comprobante 100% limpio
+
+Para descartar cualquier particularidad de Litoral Gas (fecha vieja, CAE
+real, proveedor recién reparado), se repitió el intento de aplicación contra
+`MA 00001-00021884` -- un comprobante creado ESE MISMO DÍA, con `Fecha` de
+hoy, CAE de prueba (no real), proveedor `SUPERCOO` con cuenta sana desde
+hace 3 días. **Mismo error, letra por letra.** Esto descarta con evidencia
+directa que el problema dependa del proveedor, la fecha del documento, o si
+el CAE es real o de prueba.
+
+### Conclusión y recomendación
+
+Con dos investigaciones independientes (2026-07-01 y 2026-07-21) y ~37
+variantes de payload distintas probadas en total -- formatos de número,
+`ImputacionContable` en 3 lugares distintos, `Fecha`/sin `Fecha`, ambos
+endpoints de aplicación, `Importe` negativo, monedas, medios de pago, un
+comprobante recién creado y limpio vs. uno real -- **ninguna cambia el
+resultado.** `SP_ICR_COMPROB_APL` (y su variante `SP_ICR_APLICACIONES`)
+rechaza sistemáticamente la aplicación de cualquier comprobante de compra en
+esta instalación de BAS (`PLATINUM_TEST`), consistente con la hipótesis ya
+planteada en julio: es un caso no cubierto por esos SPs específicos de la
+capa de integración REST/ICR (podrían no reflejar la misma lógica que usa la
+interfaz de escritorio clásica de BAS).
+
+**Esto ya no es investigable más a fondo desde el lado de Invoicy.**
+Recomendación: escalar al equipo/soporte de BAS con la evidencia exacta de
+esta sección (en particular el Experimento 2, que aísla el problema al SP
+mismo, independiente del endpoint). Mientras tanto, `utils/bas.py` detecta
+esta firma de error (`_es_error_no_resoluble_desde_cliente`) y la marca
+como `_requiere_soporte_bas` para que el mensaje mostrado al usuario diga
+explícitamente "no reintentar, escalar a BAS" en vez de invitar a reintentos
+que no van a cambiar el resultado.
+
+**Efecto colateral de estas pruebas (documentado, no limpiado):** quedó una
+Orden de Pago suelta y sin aplicar en BAS real (`IdTransaccion 274510`,
+`OPG 00001-00034994`, Total=1, proveedor `LITORALG`, sin aplicar contra
+ninguna factura). No se intentó anular/revertir -- requiere que el usuario
+decida (misma política que el resto de las escrituras reales de esta
+investigación).

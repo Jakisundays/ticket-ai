@@ -55,6 +55,23 @@ EGRESO = "E"
 
 DEFAULT_BASE_URL = "http://190.210.77.103:32501"
 
+# Firmas de error de BAS confirmadas (2026-07-21) como una limitación real del
+# lado de BAS -- no de datos, formato ni payload -- en el SP que aplica un
+# comprobante ya registrado contra una Orden de Pago. Confirmado con evidencia
+# exhaustiva en dos investigaciones separadas (~37 variantes de payload en
+# total, ver docs/bas-orden-de-pago-research.md): comprobantes recién creados,
+# verificados con GET independiente, no anulados, con proveedor sano, incluso
+# probando el endpoint alternativo POST /api/AplicacionesComprobantes en vez
+# del embebido en OrdenesPago -- SP_ICR_COMPROB_APL sigue rechazando con "no
+# existe para aplicarlo". No reintentar esperando un resultado distinto:
+# requiere que el equipo de BAS revise ese SP en esta instalación.
+_BAS_ERRORES_NO_RESOLUBLES_DESDE_CLIENTE = ("SP_ICR_COMPROB_APL",)
+
+
+def _es_error_no_resoluble_desde_cliente(detail: Any) -> bool:
+    texto = detail.get("title", "") if isinstance(detail, dict) else str(detail or "")
+    return any(marca in texto for marca in _BAS_ERRORES_NO_RESOLUBLES_DESDE_CLIENTE)
+
 
 def medio_pago_egreso(medio_pago: str, importe: float, **extra) -> dict:
     """Arma un ítem de medio de pago de egreso (IngresooEgreso='E'), requerido por BAS."""
@@ -784,6 +801,8 @@ class BasClient:
                 f"({e.status_code}): {e.detail}"
             )
             orden_pago = {"_error": True, "status_code": e.status_code, "detail": e.detail}
+            if _es_error_no_resoluble_desde_cliente(e.detail):
+                orden_pago["_requiere_soporte_bas"] = True
         return {"factura": factura_resultado, "orden_pago": orden_pago}
 
 
