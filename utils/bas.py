@@ -485,6 +485,63 @@ class BasClient:
         resp = self._request("POST", "/api/Proveedores", json_body=payload)
         return _json_o_error(resp, "/api/Proveedores", ok=(200, 201))
 
+    def actualizar_proveedor(self, codigo: str, cambios: dict, *, dry_run: bool = False) -> dict:
+        """
+        PUT /api/Proveedores/{codigo}. Lee el proveedor completo, lo mergea
+        (shallow) con `cambios` y reescribe el objeto entero -- el Swagger no
+        aclara si PUT admite reemplazo parcial, así que nunca se manda un
+        objeto parcial (mismo patrón GET -> merge -> PUT ya verificado en vivo
+        el 2026-07-18 reparando `CuentasCorrientes` de SUPERCOO con un 201
+        real posterior).
+        """
+        actual = self.obtener_proveedor(codigo)
+        if actual is None:
+            raise BasApiError(404, f"Proveedor '{codigo}' no existe", f"/api/Proveedores/{codigo}")
+        payload = {**actual, **cambios}
+        if dry_run:
+            app_logger.info(f"BAS [dry_run]: NO se actualiza Proveedor '{codigo}'; se devuelve el payload")
+            return {"dry_run": True, "endpoint": f"/api/Proveedores/{codigo}", "payload": payload}
+        resp = self._request("PUT", f"/api/Proveedores/{codigo}", json_body=payload)
+        _json_o_error(resp, f"/api/Proveedores/{codigo}", ok=(200, 201, 204))
+        return self.obtener_proveedor(codigo) or payload
+
+    def asegurar_cuenta_corriente_proveedor(
+        self, *, codigo: str, imputacion_contable: int, dry_run: bool = False
+    ) -> Optional[dict]:
+        """
+        GET del proveedor por Código; si `CuentasCorrientes` viene vacío, lo
+        repara con `actualizar_proveedor`. Idempotente: si ya tiene cuenta, no
+        escribe nada (solo el GET barato).
+
+        Por qué existe: `verificar_o_dar_de_alta_proveedor` solo setea
+        `CuentasCorrientes` cuando DA DE ALTA un proveedor nuevo -- un
+        proveedor que YA EXISTÍA en BAS (por ejemplo, dado de alta antes de
+        este fix, o cacheado por CUIT en PocketBase antes de tenerlo) queda
+        "desnudo" para siempre y cualquier Orden de Pago futura contra él
+        vuelve a romper con 409 "no se pudo establecer la moneda
+        correspondiente a la cuenta 0" (SP_ICR_VALIDA_CODTAB) -- el mismo bug
+        ya diagnosticado y resuelto puntualmente para SUPERCOO el 2026-07-18
+        (ver docs/bas-comprobante-compra-cuenta-0-diagnostico.md), pero que
+        se repite con cualquier otro proveedor preexistente. Este método
+        cierra el hueco de forma genérica y automática, sin depender de un
+        parche manual por proveedor.
+        """
+        proveedor = self.obtener_proveedor(codigo)
+        if proveedor is None:
+            return None
+        if proveedor.get("CuentasCorrientes"):
+            return proveedor
+        app_logger.warning(
+            f"BAS: proveedor '{codigo}' existe sin CuentasCorrientes -- reparando "
+            f"con ImputacionContable={imputacion_contable} (mismo bug 'cuenta 0' "
+            "ya documentado, ver docs/bas-comprobante-compra-cuenta-0-diagnostico.md)"
+        )
+        return self.actualizar_proveedor(
+            codigo,
+            {"CuentasCorrientes": [{"ImputacionContable": imputacion_contable, "PorDefecto": True}]},
+            dry_run=dry_run,
+        )
+
     def crear_comprobante_compra(
         self, payload: dict, *, ignora_advertencias: bool = False, dry_run: bool = False
     ) -> dict:
@@ -535,13 +592,24 @@ class BasClient:
         -- ver su docstring. El caller (routes/process_invoice_google_2.py) debe
         pasar `BAS_IMPUTACION_CONTABLE_PROVEEDORES`; si no se pasa nada, el
         proveedor queda sin cuenta contable propia (mismo bug que ya se dio
-        con SUPERCOOP).
+        con SUPERCOOP). Si el proveedor YA EXISTE pero le falta esa cuenta
+        (dado de alta antes de este fix), también se repara acá vía
+        `asegurar_cuenta_corriente_proveedor` -- no alcanza con protegerlo
+        solo en el alta, ver docstring de ese método.
         """
         encontrado = self.buscar_proveedor_por_cuit(cuit)
         if encontrado is not None:
             app_logger.info(
                 f"BAS: proveedor con CUIT {cuit} ya existe ({encontrado.get('Codigo')})"
             )
+            if imputacion_contable is not None and encontrado.get("Codigo"):
+                reparado = self.asegurar_cuenta_corriente_proveedor(
+                    codigo=encontrado["Codigo"],
+                    imputacion_contable=imputacion_contable,
+                    dry_run=dry_run,
+                )
+                if reparado is not None:
+                    encontrado = reparado
             return {**encontrado, "_nuevo": False}
 
         codigo = codigo_sugerido or _derivar_codigo_proveedor(razon_social)

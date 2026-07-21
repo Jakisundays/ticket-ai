@@ -1377,6 +1377,26 @@ class InvoiceOrchestrator:
             proveedor_cacheado = None
             app_logger.warning(f"PocketBase: error consultando get_provider_cache({cuit_normalizado}): {e}")
         if proveedor_cacheado is not None:
+            # OJO: "bas_providers" solo guarda Codigo/RazonSocial/nuevo (campos
+            # flat) -- NUNCA confirma si el proveedor tiene CuentasCorrientes.
+            # Un hit acá se saltaba por completo la verificación de cuenta
+            # contable, así que cualquier proveedor cacheado ANTES de este fix
+            # (o cuyo alta fue anterior al fix de "cuenta 0") quedaba roto para
+            # siempre en este path, aunque verificar_o_dar_de_alta_proveedor ya
+            # supiera repararlo -- nunca se llegaba a invocarlo. Reparar acá
+            # también, con un GET barato por Código (no la búsqueda cara por
+            # CUIT) -- ver BasClient.asegurar_cuenta_corriente_proveedor.
+            try:
+                reparado = self._bas_client.asegurar_cuenta_corriente_proveedor(
+                    codigo=proveedor_cacheado.get("Codigo"),
+                    imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
+                )
+                proveedor_cacheado = reparado or proveedor_cacheado
+            except Exception as e:
+                app_logger.warning(
+                    f"BAS: error verificando/reparando CuentasCorrientes de "
+                    f"'{proveedor_cacheado.get('Codigo')}' (cache hit, CUIT {cuit_normalizado}): {e}"
+                )
             self._proveedores_bas_cache[cuit_normalizado] = proveedor_cacheado
             return proveedor_cacheado
 
