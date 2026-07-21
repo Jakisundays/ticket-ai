@@ -1,6 +1,13 @@
-from utils.bas_config import CATEGORIAS_ITEM_BAS
+import copy
 
-tools = [
+from utils.bas_config import CATEGORIAS_ITEM_BAS, categorias_disponibles
+
+# Template estático -- build_tools() (al final del archivo) devuelve una copia
+# de esto con el enum de "categoria" parcheado con las categorías vigentes
+# (leídas en vivo de PocketBase, ver bas_config.categorias_disponibles()).
+# El valor de CATEGORIAS_ITEM_BAS de acá abajo es un placeholder cualquiera
+# -- siempre se pisa en build_tools(), nunca se usa tal cual en producción.
+_TOOLS_TEMPLATE = [
     {
         "prompt": (
             "Extrae los detalles estructurados de la factura. "
@@ -326,3 +333,37 @@ tools = [
         },
     },
 ]
+
+# Path fijo del enum de "categoria" dentro del template -- tool #1
+# ("detalle_de_items_facturados"), campo "detalles.items.categoria".
+_TOOL_ITEMS_IDX = 1
+
+
+def build_tools(categorias=None):
+    """Copia fresca de _TOOLS_TEMPLATE con el enum de "categoria" parcheado
+    con las categorías vigentes (por default, las lee en vivo de PocketBase
+    vía bas_config.categorias_disponibles() -- ver docstring de ese módulo).
+
+    deepcopy a propósito: cada llamada devuelve una lista independiente, sin
+    estado compartido entre requests concurrentes (el server procesa varias
+    facturas en paralelo -- ver _procesar_en_background en
+    routes/process_invoice_google_2.py).
+    """
+    categorias = categorias or categorias_disponibles() or CATEGORIAS_ITEM_BAS
+    tools = copy.deepcopy(_TOOLS_TEMPLATE)
+    tools[_TOOL_ITEMS_IDX]["data"]["function"]["parameters"]["properties"]["detalles"]["items"][
+        "properties"
+    ]["categoria"]["enum"] = categorias
+    return tools
+
+
+# Alias retrocompatible -- routes/process_invoice_google.py (invoice-api-wa,
+# el servicio de WhatsApp) todavía importa "tools" a la manera vieja
+# (`from tools_standard import tools as tools_standard`) y NO se tocó en este
+# cambio (integrarlo a PocketBase es un trabajo aparte, ver plan de WhatsApp).
+# Sin este alias, un rebuild futuro de ese servicio rompería con ImportError
+# apenas se sacó el nombre "tools" del módulo. Se computa una sola vez al
+# importar el módulo -- si PocketBase no está configurado/alcanzable en ese
+# proceso (categorias_disponibles() cae al fallback de bas_config.py), usa
+# las 8 categorías reales confirmadas de todos modos, mejor que las 4 viejas.
+tools = build_tools()
