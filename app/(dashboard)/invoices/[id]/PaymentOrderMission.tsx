@@ -1,15 +1,8 @@
 import { Check, CircleAlert, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { MissionStepState, MissionStepView } from "@/lib/payment-order-mission";
 
-export type MissionStepState = "pending" | "active" | "done" | "error" | "skipped";
-
-export interface MissionStepView {
-  key: string;
-  label: string;
-  state: MissionStepState;
-  /** Texto real del backend/BAS -- solo se muestra en el paso activo o el que falló. */
-  detail?: string | null;
-}
+export type { MissionStepState, MissionStepView } from "@/lib/payment-order-mission";
 
 const ICON_WRAP: Record<MissionStepState, string> = {
   pending: "bg-status-neutral-bg text-status-neutral-fg",

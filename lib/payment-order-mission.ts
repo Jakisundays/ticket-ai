@@ -22,6 +22,16 @@ export const MISSION_STEPS = [
 
 export type MissionStepKey = (typeof MISSION_STEPS)[number]["key"];
 
+export type MissionStepState = "pending" | "active" | "done" | "error" | "skipped";
+
+export interface MissionStepView {
+  key: string;
+  label: string;
+  state: MissionStepState;
+  /** Texto real del backend/BAS -- solo se muestra en el paso activo o el que falló. */
+  detail?: string | null;
+}
+
 export interface MissionOutcome {
   success: boolean;
   /** Índice en MISSION_STEPS donde ocurrió el fallo. null si success=true,
@@ -29,6 +39,35 @@ export interface MissionOutcome {
   failedStepIndex: number | null;
   /** Texto real del backend/BAS para ese paso -- nunca un mensaje genérico. */
   detailText: string | null;
+}
+
+/**
+ * Traduce (loading + índice coreografiado) o (resultado final) a la lista de
+ * estados por paso que renderiza <PaymentOrderMission>. Pura -- sin esto,
+ * PaymentOrderPanel.tsx y la demo de /demo terminarían con dos copias
+ * ligeramente distintas de la misma lógica.
+ */
+export function computeMissionSteps(
+  loading: boolean,
+  liveStepIndex: number,
+  outcome: MissionOutcome | null
+): MissionStepView[] | null {
+  if (loading) {
+    return MISSION_STEPS.map(
+      (step, i): MissionStepView => ({
+        ...step,
+        state: i < liveStepIndex ? "done" : i === liveStepIndex ? "active" : "pending",
+      })
+    );
+  }
+  if (!outcome || (!outcome.success && outcome.failedStepIndex === null)) return null;
+  return MISSION_STEPS.map((step, i): MissionStepView => {
+    if (outcome.success) return { ...step, state: "done" };
+    const failedAt = outcome.failedStepIndex as number;
+    if (i < failedAt) return { ...step, state: "done" };
+    if (i === failedAt) return { ...step, state: "error", detail: outcome.detailText };
+    return { ...step, state: "skipped" };
+  });
 }
 
 /**

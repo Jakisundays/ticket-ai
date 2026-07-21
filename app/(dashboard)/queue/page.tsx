@@ -81,12 +81,16 @@ export default async function QueuePage() {
     .collection<InvoicesRecord>(Collections.Invoices)
     .getList(1, 100, {
       filter: FILTRO_COLA,
-      sort: "+created",
+      // "-created": la más nueva primero -- así el equipo ve de inmediato
+      // lo que acaba de entrar (coherente con QueueRealtime.tsx, que refresca
+      // la lista apenas se crea un placeholder). Antes era "+created" (la más
+      // vieja primero, pensado como cola FIFO); cambiado a pedido explícito.
+      sort: "-created",
     });
 
   const rows: QueueRow[] = result.items.map((invoice) => {
     // "created" (campo de sistema de PocketBase, ya viene en cada fetch) es
-    // lo que efectivamente ordena la cola (`sort: "+created"`), así que la
+    // lo que efectivamente ordena la cola (`sort: "-created"`), así que la
     // antigüedad mostrada se calcula sobre esa fecha -- no sobre
     // fecha_emision, que es la fecha de emisión de la factura del proveedor,
     // no cuánto tiempo lleva esperando revisión en nuestra cola.
@@ -128,7 +132,7 @@ export default async function QueuePage() {
           {rows.length} en cola
         </span>
         <span className="ml-auto hidden truncate text-[13px] text-muted-foreground md:block">
-          Ordenadas por antigüedad · la más vieja primero · se actualiza sola
+          Ordenadas por antigüedad · la más nueva primero · se actualiza sola
         </span>
       </PageHeader>
 

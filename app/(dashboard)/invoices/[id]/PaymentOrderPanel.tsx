@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { CheckCircle, Loader2 } from "lucide-react";
@@ -15,15 +15,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import StatusBadge from "@/components/StatusBadge";
-import PaymentOrderMission, {
-  ConnectionLostBanner,
-  type MissionStepView,
-} from "./PaymentOrderMission";
+import PaymentOrderMission, { ConnectionLostBanner } from "./PaymentOrderMission";
 import {
-  MISSION_STEPS,
+  computeMissionSteps,
   inferMissionOutcome,
   type MissionOutcome,
 } from "@/lib/payment-order-mission";
+import { useMissionChoreography } from "@/hooks/use-mission-choreography";
 import type {
   BasPaymentMethodsRecord,
   MetodoPago,
@@ -31,40 +29,9 @@ import type {
 } from "@/lib/pocketbase-types";
 import { formatCurrency, formatDate } from "@/lib/format";
 
-/** Cada paso "coreografiado" avanza cada 750ms mientras esperamos la única
- * respuesta real del backend -- nunca completa el ÚLTIMO paso por timer, solo
- * la respuesta real lo hace (ver handleSubmit). */
-const STEP_ADVANCE_MS = 750;
-/** Si el paso activo lleva más que esto sin resolver, mostramos un hint de
- * "puede tardar" en vez de dejarlo mudo. */
-const SLOW_HINT_MS = 4000;
-
 function outcomeFromOrder(order: PaymentOrdersRecord | null): MissionOutcome | null {
   if (!order || order.status === "processing") return null;
   return inferMissionOutcome(200, { success: order.status === "success", error: order.bas_error || undefined });
-}
-
-function stepViewsFor(
-  loading: boolean,
-  liveStepIndex: number,
-  outcome: MissionOutcome | null
-): MissionStepView[] | null {
-  if (loading) {
-    return MISSION_STEPS.map(
-      (step, i): MissionStepView => ({
-        ...step,
-        state: i < liveStepIndex ? "done" : i === liveStepIndex ? "active" : "pending",
-      })
-    );
-  }
-  if (!outcome || (!outcome.success && outcome.failedStepIndex === null)) return null;
-  return MISSION_STEPS.map((step, i): MissionStepView => {
-    if (outcome.success) return { ...step, state: "done" };
-    const failedAt = outcome.failedStepIndex as number;
-    if (i < failedAt) return { ...step, state: "done" };
-    if (i === failedAt) return { ...step, state: "error", detail: outcome.detailText };
-    return { ...step, state: "skipped" };
-  });
 }
 
 const METODO_LABEL: Record<MetodoPago, string> = {
@@ -91,72 +58,41 @@ export default function PaymentOrderPanel({
     existingOrder?.metodo_pago ?? paymentMethods[0]?.metodo_pago ?? "efectivo"
   );
   const [monto, setMonto] = useState<number>(existingOrder?.monto ?? invoiceTotal);
-  const [loading, setLoading] = useState(false);
   const [order, setOrder] = useState<PaymentOrdersRecord | null>(existingOrder);
-  const [liveStepIndex, setLiveStepIndex] = useState(0);
-  const [slowHint, setSlowHint] = useState(false);
-  const [lastOutcome, setLastOutcome] = useState<MissionOutcome | null>(outcomeFromOrder(existingOrder));
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
-
-  function clearTimers() {
-    timers.current.forEach(clearTimeout);
-    timers.current = [];
-  }
-  useEffect(() => () => clearTimers(), []);
+  // El resultado inicial puede venir de un intento previo persistido (reload
+  // de página), no solo de una corrida en vivo -- mismo inferMissionOutcome()
+  // que usa la respuesta real, solo que aplicado al `order` ya guardado.
+  const { loading, liveStepIndex, slowHint, lastOutcome, run } = useMissionChoreography(
+    outcomeFromOrder(existingOrder)
+  );
 
   const selectedMethod = paymentMethods.find((m) => m.metodo_pago === metodoPago);
   const isStaleProcessing = order?.status === "processing" && !loading;
   const isRetry = order?.status === "failed" || (lastOutcome !== null && !lastOutcome.success) || isStaleProcessing;
-  const stepViews = stepViewsFor(loading, liveStepIndex, loading ? null : lastOutcome);
+  const stepViews = computeMissionSteps(loading, liveStepIndex, loading ? null : lastOutcome);
   const showConnectionLost = !loading && lastOutcome !== null && !lastOutcome.success && lastOutcome.failedStepIndex === null;
 
   async function handleSubmit() {
-    clearTimers();
-    setLoading(true);
-    setSlowHint(false);
-    setLiveStepIndex(0);
-    setLastOutcome(null);
-
-    // Coreografía optimista: avanza un paso genuino cada STEP_ADVANCE_MS
-    // mientras esperamos la única respuesta del backend. Se detiene en el
-    // anteúltimo paso a propósito -- "Confirmando en BAS" solo lo completa
-    // la respuesta real (ver más abajo), nunca un timer.
-    for (let i = 1; i <= MISSION_STEPS.length - 2; i++) {
-      timers.current.push(setTimeout(() => setLiveStepIndex(i), i * STEP_ADVANCE_MS));
-    }
-    timers.current.push(setTimeout(() => setSlowHint(true), SLOW_HINT_MS));
-
-    try {
+    const outcome = await run(async () => {
       const res = await fetch(`/api/payment-orders/${encodeURIComponent(processId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ metodo_pago: metodoPago, monto }),
       });
       const data = await res.json().catch(() => ({}));
-      clearTimers();
       if (data.payment_order) setOrder(data.payment_order);
-      const outcome = inferMissionOutcome(res.status, data);
-      setLastOutcome(outcome);
-      if (outcome.success) {
-        toast.success("Orden de pago creada en BAS.");
-      } else {
-        // El detalle completo (a veces un blob JSON largo de BAS) ya se
-        // muestra inline en el paso que falló -- ver PaymentOrderMission.
-        // Repetirlo acá infla el toast (llegó a medir 346px de alto en una
-        // prueba real) y termina tapando el panel entero.
-        toast.error("BAS rechazó la orden de pago.");
-      }
-      router.refresh();
-    } catch (error) {
-      clearTimers();
-      setLastOutcome({
-        success: false,
-        failedStepIndex: null,
-        detailText: error instanceof Error ? error.message : "No se pudo contactar al backend.",
-      });
-    } finally {
-      setLoading(false);
+      return { status: res.status, data };
+    });
+    if (outcome.success) {
+      toast.success("Orden de pago creada en BAS.");
+    } else if (outcome.failedStepIndex !== null) {
+      // El detalle completo (a veces un blob JSON largo de BAS) ya se
+      // muestra inline en el paso que falló -- ver PaymentOrderMission.
+      // Repetirlo acá infla el toast (llegó a medir 346px de alto en una
+      // prueba real) y termina tapando el panel entero.
+      toast.error("BAS rechazó la orden de pago.");
     }
+    router.refresh();
   }
 
   return (
