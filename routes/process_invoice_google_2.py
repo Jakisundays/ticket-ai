@@ -1476,7 +1476,17 @@ class InvoiceOrchestrator:
             comprobante_compra_payload = {
                 "Comprobante": "MA",
                 "Prefijo": BAS_PREFIJO_TALONARIO_MA,
-                "Fecha": comprobante.get("fecha_emision"),
+                # "Fecha" es la fecha de ASIENTO en el subdiario de BAS, no la
+                # fecha del documento -- usar fecha_emision real rompe con 409
+                # "fecha anterior al cierre operativo del subdiario"
+                # (NUETRANSAC/SP_ICR_COMPROB_COMPRA) en cuanto la factura tiene
+                # más de un período contable de atraso (ej. Litoral Gas,
+                # emitida 2025-05-21, registrada recién el 2026-07-21). La
+                # fecha real del documento va aparte en FechaComprobanteExterno
+                # (no participa de este chequeo, solo de la búsqueda por
+                # ConsultaComprobantesExternos). Sin fecha hardcodeada: "hoy"
+                # siempre cae en el período contable abierto, sea cual sea.
+                "Fecha": datetime.date.today().isoformat(),
                 "Total": total,
                 "TotalGravado": total,
                 "EmitidoPor": BAS_EMITIDO_POR_CAE,
@@ -3019,7 +3029,13 @@ async def crear_orden_pago(
     comprobante_compra_payload = {
         "Comprobante": "MA",
         "Prefijo": BAS_PREFIJO_TALONARIO_MA,
-        "Fecha": invoice.get("fecha_emision"),
+        # Ver comentario equivalente en InvoiceOrchestrator.procesar_factura_en_bas:
+        # "Fecha" es la fecha de asiento en BAS (subdiario), no la fecha del
+        # documento -- usar fecha_emision real dispara 409 "fecha anterior al
+        # cierre operativo del subdiario" (NUETRANSAC) para cualquier factura
+        # registrada tarde. FechaComprobanteExterno (abajo) sí lleva la fecha
+        # real del documento.
+        "Fecha": datetime.date.today().isoformat(),
         "Total": invoice.get("total"),
         "TotalGravado": invoice.get("total"),
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
