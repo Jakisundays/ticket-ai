@@ -35,7 +35,7 @@ export default async function InvoicesPage() {
     const result = await pb
       .collection<InvoiceListItemExpand>(Collections.Invoices)
       .getList(1, 50, {
-        filter: 'review_status = "confirmed"',
+        filter: 'review_status = "confirmed" && deleted_at = ""',
         sort: "-created",
         expand: "bas_processing_status_via_invoice",
       });
@@ -53,6 +53,7 @@ export default async function InvoicesPage() {
 
       return {
         id: invoice.id,
+        processId: invoice.process_id,
         numero: invoice.numero_comprobante || invoice.process_id,
         emisorNombre: invoice.emisor_nombre,
         fecha: formatDate(invoice.fecha_emision),

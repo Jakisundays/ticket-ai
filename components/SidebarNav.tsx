@@ -8,7 +8,6 @@ import {
   Tags,
   Wallet,
   UploadCloud,
-  FlaskConical,
 } from "lucide-react";
 import {
   SidebarContent,
@@ -46,10 +45,6 @@ const NAV_GROUPS = [
       { href: "/category-map", label: "Categorías BAS", icon: Tags },
       { href: "/payment-methods", label: "Métodos de pago", icon: Wallet },
     ],
-  },
-  {
-    label: "Herramientas",
-    items: [{ href: "/demo", label: "Demo: orden de pago", icon: FlaskConical }],
   },
 ];
 
@@ -94,7 +89,7 @@ export default function SidebarNav({
         <SidebarMenu>
           <SidebarMenuItem>
             <NavLink
-              href="/subir-factura"
+              href="/subir-factura-equipo"
               icon={UploadCloud}
               label="Subir factura"
             />

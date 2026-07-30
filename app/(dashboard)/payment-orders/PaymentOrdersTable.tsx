@@ -21,6 +21,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import StatusBadge from "@/components/StatusBadge";
+import DeleteRowMenu from "@/components/DeleteRowMenu";
 import type { MetodoPago, PaymentOrderStatus } from "@/lib/pocketbase-types";
 
 // Fila ya aplanada a valores serializables por el Server Component
@@ -28,6 +29,7 @@ import type { MetodoPago, PaymentOrderStatus } from "@/lib/pocketbase-types";
 // componentes/funciones (íconos, etc.) a este componente cliente.
 export type PaymentOrderRow = {
   id: string;
+  processId: string;
   numero: string;
   proveedor: string;
   metodo: MetodoPago;
@@ -141,7 +143,7 @@ export default function PaymentOrdersTable({ rows }: { rows: PaymentOrderRow[] }
             ))}
           </ul>
 
-          <div className="hidden overflow-hidden rounded-xl bg-card shadow-(--shadow-1) md:block">
+          <div className="hidden overflow-x-auto rounded-xl bg-card shadow-(--shadow-1) md:block">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -167,6 +169,7 @@ export default function PaymentOrdersTable({ rows }: { rows: PaymentOrderRow[] }
                 <TableHead className="overline text-[11px] text-muted-foreground">
                   Estado BAS
                 </TableHead>
+                <TableHead className="w-9 pr-3" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -207,10 +210,19 @@ export default function PaymentOrdersTable({ rows }: { rows: PaymentOrderRow[] }
                       <TableCell>
                         <StatusBadge status={row.status} />
                       </TableCell>
+                      <TableCell className="pr-3">
+                        <DeleteRowMenu
+                          processId={row.processId}
+                          endpoint="payment-order"
+                          itemLabel="esta orden de pago"
+                          requireReason={row.status === "success"}
+                          confirmText={row.numero}
+                        />
+                      </TableCell>
                     </TableRow>
                     {isOpen && (
                       <TableRow className="hover:bg-transparent">
-                        <TableCell colSpan={8} className="bg-muted/40 py-3.5 pr-5 pl-[66px]">
+                        <TableCell colSpan={9} className="bg-muted/40 py-3.5 pr-5 pl-[66px]">
                           <div className="flex flex-col gap-2 whitespace-normal">
                             {row.hasError && (
                               <div className="max-w-[640px] rounded-md border border-status-warning-dot/25 bg-status-warning-bg px-2.5 py-2 font-mono text-xs leading-relaxed text-status-warning-fg">
@@ -264,39 +276,51 @@ function OrderCard({
 }) {
   return (
     <div className="overflow-hidden rounded-xl bg-card shadow-(--shadow-1)">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={isOpen}
-        className="flex w-full items-center gap-3 px-4 py-3.5 text-left active:bg-accent"
-      >
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate font-mono text-[12.5px] text-foreground">
-              {row.numero}
-            </span>
-            <span className="shrink-0 font-mono text-[13px] font-semibold text-foreground">
-              {row.monto}
-            </span>
+      <div className="relative">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={isOpen}
+          className="flex w-full items-center gap-3 py-3.5 pr-11 pl-4 text-left active:bg-accent"
+        >
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="truncate font-mono text-[12.5px] text-foreground">
+                {row.numero}
+              </span>
+              <span className="shrink-0 font-mono text-[13px] font-semibold text-foreground">
+                {row.monto}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-[13px] font-medium text-foreground">
+              {row.proveedor}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px] text-muted-foreground">
+              <span>{METODO_LABEL[row.metodo] ?? row.metodo}</span>
+              <span>·</span>
+              <span>{row.fecha}</span>
+            </div>
+            <div className="mt-2">
+              <StatusBadge status={row.status} />
+            </div>
           </div>
-          <div className="mt-0.5 truncate text-[13px] font-medium text-foreground">
-            {row.proveedor}
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px] text-muted-foreground">
-            <span>{METODO_LABEL[row.metodo] ?? row.metodo}</span>
-            <span>·</span>
-            <span>{row.fecha}</span>
-          </div>
-          <div className="mt-2">
-            <StatusBadge status={row.status} />
-          </div>
-        </div>
-        <ChevronRight
-          className={`size-4 shrink-0 text-muted-foreground transition-transform duration-150 ${
-            isOpen ? "rotate-90" : ""
-          }`}
+          <ChevronRight
+            className={`size-4 shrink-0 text-muted-foreground transition-transform duration-150 ${
+              isOpen ? "rotate-90" : ""
+            }`}
+          />
+        </button>
+        {/* Hermano del <button> de arriba, no anidado adentro -- un botón
+            dentro de otro botón es HTML inválido y rompe el toggle. */}
+        <DeleteRowMenu
+          processId={row.processId}
+          endpoint="payment-order"
+          itemLabel="esta orden de pago"
+          requireReason={row.status === "success"}
+          confirmText={row.numero}
+          className="absolute top-4.5 right-2"
         />
-      </button>
+      </div>
       {isOpen && (
         <div className="flex flex-col gap-2 border-t bg-muted/40 px-4 py-3.5">
           {row.hasError && (

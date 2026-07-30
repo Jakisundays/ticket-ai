@@ -62,6 +62,13 @@ export interface InvoicesRecord extends BaseSystemFields {
   /** relation -> users; "" si nunca se confirmó */
   confirmed_by: string;
   confirmed_at: IsoDateString | "";
+  /** "" si nunca se soft-deleteó -- ver components/DeleteRowMenu.tsx. Nunca
+   * un borrado físico (BAS no se entera si se pierde el registro). Filtrar
+   * siempre `deleted_at = ""` en cualquier listado nuevo. */
+  deleted_at: IsoDateString | "";
+  /** relation -> users */
+  deleted_by: string;
+  delete_reason: string;
 }
 
 export interface InvoiceItemsRecord extends BaseSystemFields {
@@ -147,6 +154,11 @@ export interface PaymentOrdersRecord extends BaseSystemFields {
   requested_by: string;
   requested_at: IsoDateString;
   last_attempt_at: IsoDateString;
+  /** "" si nunca se soft-deleteó -- mismo criterio que InvoicesRecord.deleted_at. */
+  deleted_at: IsoDateString | "";
+  /** relation -> users */
+  deleted_by: string;
+  delete_reason: string;
 }
 
 /** Coleccion de auth "users" — humanos, login del dashboard Next.js. */

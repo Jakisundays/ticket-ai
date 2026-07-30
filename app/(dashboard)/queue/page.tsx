@@ -16,8 +16,10 @@ export const dynamic = "force-dynamic";
 // (ver /gemini2/website-upload/init en Invoicy), no recién cuando termina
 // de procesarse -- así el equipo ve la actividad en vivo, no solo el
 // resultado final.
+// deleted_at = "" al final (fuera del OR): excluye lo soft-deleted sin
+// importar cuál de las 4 ramas matcheó -- ver components/DeleteRowMenu.tsx.
 const FILTRO_COLA =
-  '(status = "completed" && review_status != "confirmed") || status = "pending" || status = "processing" || status = "error"';
+  '((status = "completed" && review_status != "confirmed") || status = "pending" || status = "processing" || status = "error") && deleted_at = ""';
 
 type Antiguedad = { label: string; urgente: boolean };
 
@@ -106,6 +108,7 @@ export default async function QueuePage() {
 
     return {
       id: invoice.id,
+      processId: invoice.process_id,
       href: `/invoices/${invoice.id}`,
       numero: enProceso
         ? invoice.process_id

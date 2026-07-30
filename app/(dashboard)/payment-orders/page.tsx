@@ -17,6 +17,7 @@ export default async function PaymentOrdersPage() {
   const orders = await pb
     .collection<PaymentOrdersWithExpand>(Collections.PaymentOrders)
     .getFullList({
+      filter: 'deleted_at = ""',
       expand: "invoice,requested_by",
       sort: "-last_attempt_at",
     });
@@ -26,6 +27,7 @@ export default async function PaymentOrdersPage() {
   // referencias de íconos/funciones desde acá.
   const rows: PaymentOrderRow[] = orders.map((row) => ({
     id: row.id,
+    processId: row.process_id,
     numero: row.expand?.invoice?.numero_comprobante || row.process_id,
     proveedor: row.expand?.invoice?.emisor_nombre || "—",
     metodo: row.metodo_pago,
