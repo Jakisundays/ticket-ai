@@ -45,6 +45,12 @@ MEDIOS_PAGO_VALIDOS = frozenset(
     }
 )
 
+# Código de comprobante de la Orden de Pago para aplicar comprobantes.
+# OJO: BAS DEVUELVE "OPG" al crear la OP, pero /api/AplicacionesComprobantes
+# valida este campo con maxLength=2 y rechaza "OPG" con un 400. Verificado
+# contra la API real: hay que mandar "OP".
+COMPROBANTE_ORDEN_PAGO = "OP"
+
 # Prefijo de cuenta corriente — schema pattern [CPA]: C=Clientes, P=Proveedores, A=Agentes.
 PREFIJOS_CTACTE_VALIDOS = frozenset({"C", "P", "A"})
 PREFIJO_CTACTE_PROVEEDORES = "P"  # una OP paga a un proveedor
@@ -582,6 +588,73 @@ class BasClient:
         resp = self._request("POST", "/api/OrdenesPago", json_body=payload)
         return _json_o_error(resp, "/api/OrdenesPago", ok=(200, 201))
 
+    def aplicar_comprobantes(
+        self,
+        *,
+        empresa: int,
+        sucursal: int,
+        comprobante: str,
+        prefijo: str,
+        numero: int,
+        comprobantes_aplicados: list,
+        imputacion_contable: int,
+        prefijo_ctacte: Optional[str] = None,
+        codigo_ctacte: Optional[str] = None,
+        reemplaza: bool = False,
+        dry_run: bool = False,
+    ) -> dict:
+        """
+        POST /api/AplicacionesComprobantes -- aplica facturas a un comprobante
+        de pago YA creado (una Orden de Pago suelta, sin aplicaciones).
+
+        Existe porque el camino de un solo paso (mandar `ComprobantesAplicados`
+        dentro del propio POST /api/OrdenesPago) está roto del lado del
+        servidor de BAS: siempre responde 409 "El usuario
+        SERVERBAS2\\Administrator no existe en la tabla de usuarios
+        (NUETRANSAC)(SP_VALIDA_APLICACIONES)(SP_ICR_COMPROB_CAJA)". Se probó
+        mandando `Usuario` explícito, con otros medios de pago, sin medio de
+        pago y con ImputacionContable: el error no cambia. Es la identidad de
+        Windows con la que el servicio de BAS se conecta a su SQL Server, no
+        algo que viaje en el payload. Este endpoint no pasa por esa validación.
+
+        Tres detalles que el schema de BAS no refleja, los tres encontrados
+        con 201 reales:
+          - `comprobante` va con el código de 2 caracteres ("OP"), NO con el
+            que devuelve la creación ("OPG", 3 chars): el campo valida
+            maxLength=2 y rechaza "OPG" con un 400.
+          - `imputacion_contable` es obligatorio (409 "Debe indicar la
+            imputación contable") aunque el schema lo marque nullable.
+          - los comprobantes aplicados van con la numeración EXTERNA de la
+            factura; con la interna BAS responde "no existe para aplicarlo"
+            (SP_ICR_COMPROB_APL). BAS resuelve externo -> interno por su
+            cuenta y lo confirma en la respuesta.
+        """
+        payload: dict = {
+            "Comprobante": comprobante,
+            "Prefijo": prefijo,
+            "Numero": numero,
+            "Empresa": empresa,
+            "Sucursal": sucursal,
+            "Reemplaza": reemplaza,
+            "ImputacionContable": imputacion_contable,
+            "ComprobantesAplicados": comprobantes_aplicados,
+        }
+        if prefijo_ctacte is not None:
+            payload["PrefijoCuentaCorriente"] = prefijo_ctacte
+        if codigo_ctacte is not None:
+            payload["CodigoCuentaCorriente"] = codigo_ctacte
+        if dry_run:
+            app_logger.info(
+                "BAS [dry_run]: NO se aplican comprobantes; se devuelve el payload"
+            )
+            return {
+                "dry_run": True,
+                "endpoint": "/api/AplicacionesComprobantes",
+                "payload": payload,
+            }
+        resp = self._request("POST", "/api/AplicacionesComprobantes", json_body=payload)
+        return _json_o_error(resp, "/api/AplicacionesComprobantes", ok=(200, 201))
+
     # ------------------------------------------------------------------ #
     # 4. Orquestación de alto nivel (flujo robusto)
     # ------------------------------------------------------------------ #
@@ -670,6 +743,7 @@ class BasClient:
         retenciones: Optional[list] = None,
         observacion: Optional[str] = None,
         comprobante_compra_payload: Optional[dict] = None,
+        imputacion_contable: Optional[int] = None,
         registrar_si_no_existe: bool = True,
         dry_run: bool = True,
     ) -> dict:
@@ -680,7 +754,10 @@ class BasClient:
              `comprobante_compra_payload`), y VERIFICA con un GET
              independiente que quedó realmente persistida antes de seguir
              -- no confía ciegamente en el 201 del POST.
-          3) Arma e (opcionalmente, según `dry_run`) crea la orden de pago.
+          3) Crea la orden de pago SUELTA (sin aplicaciones) y recién después
+             le aplica la factura con `aplicar_comprobantes`. Son dos llamadas
+             a propósito: el camino de un solo paso está roto del lado del
+             servidor de BAS -- ver el docstring de `aplicar_comprobantes`.
 
         `dry_run=True` (default) NO impacta el ERP: arma todo y devuelve el payload
         de la OP para revisión. Poné `dry_run=False` para ejecutar de verdad.
@@ -692,8 +769,21 @@ class BasClient:
         `caja_op`: código de caja de la OP (BAS también lo exige en runtime para
         poder registrar el medio de pago).
 
+        `imputacion_contable`: cuenta contable del proveedor, obligatoria para
+        aplicar (pasar `BAS_IMPUTACION_CONTABLE_PROVEEDORES`). Si no se pasa,
+        se saltea el paso de aplicación y la OP queda creada pero sin aplicar
+        -- se reporta igual que cualquier otra aplicación fallida.
+
         Devuelve un dict con las claves: `factura` (consulta o alta), `orden_pago`
-        (respuesta o payload en dry_run).
+        (respuesta o payload en dry_run) y, cuando corresponde, `aplicacion`.
+
+        ATENCIÓN -- el flujo NO es atómico: la OP y su aplicación son dos
+        escrituras separadas. Si la segunda falla, la OP YA existe en BAS sin
+        estar aplicada a ninguna factura (plata registrada contra nadie). Ese
+        caso se devuelve con `orden_pago["_aplicacion_fallida"] = True` y la
+        identidad real de la OP en `orden_pago["_op_sin_aplicar"]`, para poder
+        reconciliarla a mano en BAS. El caller NO debe reintentar el flujo
+        completo a ciegas: crearía una segunda OP.
         """
         fecha = fecha or datetime.date.today().isoformat()
 
@@ -767,21 +857,13 @@ class BasClient:
                 prefijo_int = verificada.get("Prefijo", prefijo_int)
                 numero_int = verificada.get("Numero", numero_int)
 
-        # 3) Construir y crear la orden de pago.
-        comprobantes_aplicados = [
-            {
-                "Comprobante": comprobante_factura,
-                "Prefijo": prefijo_int,
-                "Numero": int(numero_int) if numero_int not in (None, "") else None,
-                "Importe": importe,
-            }
-        ]
+        # 3) Crear la orden de pago SUELTA (sin aplicaciones).
         payload_op = self.construir_payload_orden_pago(
             empresa=empresa,
             sucursal=sucursal,
             fecha=fecha,
             total=importe,
-            comprobantes_aplicados=comprobantes_aplicados,
+            comprobantes_aplicados=[],
             pagos=pagos or {},
             prefijo=prefijo_op,
             caja=caja_op,
@@ -795,7 +877,9 @@ class BasClient:
         except BasApiError as e:
             # La factura YA quedó registrada (factura_resultado); no perder esa
             # información aunque la OP falle. El caller distingue éxito/error
-            # revisando si orden_pago trae la clave "_error".
+            # revisando si orden_pago trae la clave "_error". Acá todavía no
+            # hay nada que reconciliar: si la OP no se creó, no quedó colgado
+            # ningún registro de pago.
             app_logger.warning(
                 f"BAS: factura registrada OK, pero la orden de pago falló "
                 f"({e.status_code}): {e.detail}"
@@ -803,7 +887,143 @@ class BasClient:
             orden_pago = {"_error": True, "status_code": e.status_code, "detail": e.detail}
             if _es_error_no_resoluble_desde_cliente(e.detail):
                 orden_pago["_requiere_soporte_bas"] = True
-        return {"factura": factura_resultado, "orden_pago": orden_pago}
+            return {"factura": factura_resultado, "orden_pago": orden_pago}
+
+        # 4) Aplicar la factura a la OP recién creada (segunda escritura).
+        #
+        # Desde acá en adelante hay estado real en BAS: si algo falla, la OP
+        # existe y NO está aplicada. Por eso todo error de este bloque se
+        # devuelve con la identidad de la OP para poder reconciliar a mano.
+        if dry_run:
+            aplicacion = self.aplicar_comprobantes(
+                empresa=empresa,
+                sucursal=sucursal,
+                comprobante=COMPROBANTE_ORDEN_PAGO,
+                prefijo=prefijo_op or "",
+                numero=0,
+                comprobantes_aplicados=[
+                    {
+                        "Comprobante": comprobante_factura,
+                        "Prefijo": prefijo_externo,
+                        "Numero": int(numero_externo),
+                        "Importe": importe,
+                        "ImputacionContable": imputacion_contable,
+                    }
+                ],
+                imputacion_contable=imputacion_contable or 0,
+                prefijo_ctacte=prefijo_ctacte,
+                codigo_ctacte=codigo_ctacte,
+                dry_run=True,
+            )
+            return {
+                "factura": factura_resultado,
+                "orden_pago": orden_pago,
+                "aplicacion": aplicacion,
+            }
+
+        op_creada = _primer_comprobante(orden_pago) or {}
+        op_prefijo = op_creada.get("Prefijo")
+        op_numero = op_creada.get("Numero")
+
+        def _op_sin_aplicar(motivo: str, extra: Optional[dict] = None) -> dict:
+            """La OP quedó viva en BAS sin aplicar -- hay que reconciliarla."""
+            info = {
+                "_error": True,
+                "_aplicacion_fallida": True,
+                "_op_sin_aplicar": {
+                    "Comprobante": op_creada.get("Comprobante"),
+                    "Prefijo": op_prefijo,
+                    "Numero": op_numero,
+                    "IdTransaccion": orden_pago.get("IdTransaccion"),
+                },
+                "detail": motivo,
+                "respuesta_creacion": orden_pago,
+            }
+            info.update(extra or {})
+            app_logger.error(
+                "BAS: la Orden de Pago %s %s-%s se creó pero NO se pudo aplicar a la "
+                "factura (%s). Queda registrada en BAS sin aplicación -- reconciliar "
+                "a mano; NO reintentar el flujo completo o se crea una segunda OP.",
+                op_creada.get("Comprobante"),
+                op_prefijo,
+                op_numero,
+                motivo,
+            )
+            return info
+
+        if imputacion_contable is None:
+            return {
+                "factura": factura_resultado,
+                "orden_pago": _op_sin_aplicar(
+                    "No se pasó `imputacion_contable`, que BAS exige para aplicar."
+                ),
+            }
+
+        if not op_prefijo or op_numero in (None, ""):
+            return {
+                "factura": factura_resultado,
+                "orden_pago": _op_sin_aplicar(
+                    "BAS creó la OP pero no devolvió Prefijo/Numero, así que no hay "
+                    "forma de referenciarla para aplicarle la factura."
+                ),
+            }
+
+        try:
+            aplicacion = self.aplicar_comprobantes(
+                empresa=empresa,
+                sucursal=sucursal,
+                # El código de 2 chars, no el "OPG" que devuelve la creación.
+                comprobante=COMPROBANTE_ORDEN_PAGO,
+                prefijo=op_prefijo,
+                numero=int(op_numero),
+                # Numeración EXTERNA de la factura -- con la interna BAS
+                # responde "no existe para aplicarlo".
+                comprobantes_aplicados=[
+                    {
+                        "Comprobante": comprobante_factura,
+                        "Prefijo": prefijo_externo,
+                        "Numero": int(numero_externo),
+                        "Importe": importe,
+                        "ImputacionContable": imputacion_contable,
+                    }
+                ],
+                imputacion_contable=imputacion_contable,
+                prefijo_ctacte=prefijo_ctacte,
+                codigo_ctacte=codigo_ctacte,
+                dry_run=False,
+            )
+        except BasApiError as e:
+            extra: dict = {"status_code": e.status_code}
+            if _es_error_no_resoluble_desde_cliente(e.detail):
+                extra["_requiere_soporte_bas"] = True
+            return {
+                "factura": factura_resultado,
+                "orden_pago": _op_sin_aplicar(
+                    f"La aplicación falló ({e.status_code}): {e.detail}", extra
+                ),
+            }
+        except Exception as e:  # noqa: BLE001
+            # Timeout/red: la aplicación PUEDE haberse hecho igual (ya pasó con
+            # ComprobantesCompra). Se reporta como no aplicada a propósito --
+            # es el lado seguro: obliga a mirar BAS antes de tocar nada.
+            return {
+                "factura": factura_resultado,
+                "orden_pago": _op_sin_aplicar(
+                    f"La aplicación no se pudo confirmar ({type(e).__name__}: {e}). "
+                    "Verificar en BAS si quedó aplicada antes de reintentar."
+                ),
+            }
+
+        app_logger.info(
+            "BAS: OP %s-%s creada y factura aplicada correctamente",
+            op_prefijo,
+            op_numero,
+        )
+        return {
+            "factura": factura_resultado,
+            "orden_pago": orden_pago,
+            "aplicacion": aplicacion,
+        }
 
 
 # ---------------------------------------------------------------------- #

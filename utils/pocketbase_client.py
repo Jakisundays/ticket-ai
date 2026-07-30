@@ -300,6 +300,24 @@ class PocketBaseClient:
             return self._update(collection, existente["id"], payload)
         return self._create(collection, payload)
 
+    def _soft_delete(
+        self, collection: str, record_id: str, deleted_by: Optional[str], reason: Optional[str]
+    ) -> dict:
+        """
+        Nunca un borrado físico -- ver migración
+        1783483896_add_soft_delete_fields.js (BAS nunca se entera de un
+        borrado en PocketBase; perder el registro entero perdería toda la
+        trazabilidad sin revertir nada del lado de BAS). Solo marca
+        deleted_at/deleted_by/delete_reason; el caller es responsable de
+        filtrar deleted_at="" en cualquier listado.
+        """
+        payload = {
+            "deleted_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "deleted_by": deleted_by,
+            "delete_reason": reason or "",
+        }
+        return self._update(collection, record_id, payload)
+
     # ------------------------------------------------------------------ #
     # Métodos tipados (públicos) -- todos defensivos: devuelven None/False
     # en vez de propagar excepciones.
@@ -654,6 +672,53 @@ class PocketBaseClient:
             return self._create(PAYMENT_ORDERS_COLLECTION, payload)
         except Exception as e:
             app_logger.warning(f"PocketBase: error en upsert_payment_order({process_id}): {e}")
+            return None
+
+    def soft_delete_invoice(
+        self, process_id: str, *, deleted_by: Optional[str], reason: Optional[str] = None
+    ) -> Optional[dict]:
+        """
+        Soft-delete de una invoice (usado tanto para "Cola de revisión" como
+        "Facturas" -- ambas secciones del dashboard leen la misma colección,
+        solo con filtros de status/review_status distintos). Idempotente: si
+        el record ya tenía deleted_at seteado, lo devuelve tal cual sin
+        volver a escribir (evita pisar deleted_by/delete_reason originales
+        en una carrera de doble click). Las decisiones de negocio (bloquear
+        si hay una payment_order exitosa activa, etc.) viven en el endpoint
+        que llama a este método, no acá -- este método solo persiste.
+        `deleted_by` debe ser el id de PocketBase del user autenticado,
+        resuelto server-side desde la sesión, nunca del body del caller.
+        """
+        try:
+            if not process_id:
+                return None
+            record = self.get_invoice_by_process_id(process_id)
+            if record is None:
+                return None
+            if record.get("deleted_at"):
+                return record
+            return self._soft_delete(INVOICES_COLLECTION, record["id"], deleted_by, reason)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en soft_delete_invoice({process_id}): {e}")
+            return None
+
+    def soft_delete_payment_order(
+        self, process_id: str, *, deleted_by: Optional[str], reason: Optional[str] = None
+    ) -> Optional[dict]:
+        """Igual que soft_delete_invoice pero sobre PAYMENT_ORDERS_COLLECTION
+        -- ver ese docstring para el criterio de idempotencia y de dónde
+        vive `deleted_by`."""
+        try:
+            if not process_id:
+                return None
+            record = self.get_payment_order(process_id)
+            if record is None:
+                return None
+            if record.get("deleted_at"):
+                return record
+            return self._soft_delete(PAYMENT_ORDERS_COLLECTION, record["id"], deleted_by, reason)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en soft_delete_payment_order({process_id}): {e}")
             return None
 
 

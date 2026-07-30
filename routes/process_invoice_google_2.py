@@ -1523,24 +1523,33 @@ class InvoiceOrchestrator:
                 # que exponga el catálogo real -- ver docs/bas-orden-de-pago-research.md.
                 pagos={"Efectivos": [{"MedioPago": "1", "Importe": total, "IngresooEgreso": "E"}]},
                 comprobante_compra_payload=comprobante_compra_payload,
+                imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
                 dry_run=dry_run,
             )
             resultado["comprobante"] = flujo.get("factura")
             resultado["orden_pago"] = flujo.get("orden_pago")
             if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
-                # Bloqueador conocido y documentado (docs/bas-orden-de-pago-research.md):
-                # OrdenesPago hoy responde "el comprobante no existe para aplicarlo"
-                # (SP_ICR_COMPROB_APL) -- confirmado como limitación del lado de BAS,
-                # no de esta factura (ver utils/bas.py:_es_error_no_resoluble_desde_cliente).
-                # La factura SÍ quedó registrada (resultado["comprobante"] poblado);
-                # se loguea como advertencia esperada, no como error crítico.
-                sufijo = " -- requiere soporte de BAS, no reintentar" if resultado["orden_pago"].get("_requiere_soporte_bas") else ""
-                resultado["error"] = f"Orden de pago falló{sufijo}: {resultado['orden_pago']['detail']}"
-                app_logger.warning(
-                    f"[{process_id}] BAS: factura registrada OK; OP falló (esperado hasta que BAS lo resuelva): {resultado['error']}"
-                )
+                op_huerfana = resultado["orden_pago"].get("_op_sin_aplicar")
+                if op_huerfana:
+                    # Caso grave y distinto de un fallo limpio: la OP SÍ se creó
+                    # en BAS y quedó sin aplicar (ver la advertencia de no
+                    # atomicidad en crear_orden_de_pago_desde_factura). Hay que
+                    # reconciliarla a mano; reintentar el flujo crearía una
+                    # segunda OP por la misma factura.
+                    resultado["error"] = (
+                        f"Orden de pago {op_huerfana.get('Prefijo')}-{op_huerfana.get('Numero')} "
+                        f"creada en BAS pero SIN aplicar -- reconciliar a mano, no reintentar. "
+                        f"Detalle: {resultado['orden_pago']['detail']}"
+                    )
+                    app_logger.error(f"[{process_id}] BAS: {resultado['error']}")
+                else:
+                    sufijo = " -- requiere soporte de BAS, no reintentar" if resultado["orden_pago"].get("_requiere_soporte_bas") else ""
+                    resultado["error"] = f"Orden de pago falló{sufijo}: {resultado['orden_pago']['detail']}"
+                    app_logger.warning(
+                        f"[{process_id}] BAS: factura registrada OK; OP falló: {resultado['error']}"
+                    )
             else:
-                app_logger.info(f"[{process_id}] BAS: factura registrada; orden de pago creada.")
+                app_logger.info(f"[{process_id}] BAS: factura registrada; orden de pago creada y aplicada.")
 
         except BasApiError as e:
             # El fallo esperado de OrdenesPago ya se maneja arriba (queda contenido
@@ -2637,6 +2646,7 @@ async def retry_orden_pago(process_id: str):
             codigo_ctacte=proveedor_codigo,
             pagos={"Efectivos": [{"MedioPago": "1", "Importe": total, "IngresooEgreso": "E"}]},
             comprobante_compra_payload=None,
+            imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
             registrar_si_no_existe=False,
             dry_run=True,
         )
@@ -3091,13 +3101,28 @@ async def crear_orden_pago(
             codigo_ctacte=proveedor_codigo,
             pagos=pagos,
             comprobante_compra_payload=comprobante_compra_payload,
+            imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
             registrar_si_no_existe=True,
             dry_run=False,
         )
         resultado["orden_pago"] = flujo.get("orden_pago")
         if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
             detalle = resultado["orden_pago"].get("detail")
-            if resultado["orden_pago"].get("_requiere_soporte_bas"):
+            op_huerfana = resultado["orden_pago"].get("_op_sin_aplicar")
+            if op_huerfana:
+                # La OP existe en BAS pero quedó sin aplicar (el flujo son dos
+                # escrituras y falló la segunda -- ver la advertencia de no
+                # atomicidad en crear_orden_de_pago_desde_factura). Se marca
+                # explícito para que nadie reintente: un reintento crea una
+                # SEGUNDA orden de pago por la misma factura. El número real
+                # queda persistido más abajo para poder reconciliar.
+                resultado["error"] = (
+                    f"Orden de pago {op_huerfana.get('Prefijo')}-{op_huerfana.get('Numero')} "
+                    "se creó en BAS pero NO se pudo aplicar a la factura. Queda "
+                    "registrada sin aplicación: reconciliar a mano en BAS. "
+                    f"NO reintentar (crearía otra OP). Detalle: {detalle}"
+                )
+            elif resultado["orden_pago"].get("_requiere_soporte_bas"):
                 # Ver utils/bas.py:_es_error_no_resoluble_desde_cliente -- esta
                 # firma de error ya se confirmó (~37 variantes de payload
                 # probadas en total, incluido el endpoint alternativo
@@ -3121,6 +3146,12 @@ async def crear_orden_pago(
 
     op = resultado["orden_pago"] if isinstance(resultado["orden_pago"], dict) else {}
     op_cmp = (op.get("Comprobantes") or [{}])[0] if op.get("Comprobantes") else {}
+    # Si la OP se creó pero no se pudo aplicar, `orden_pago` es el dict de
+    # error (no la respuesta de BAS) y no trae "Comprobantes" -- el número real
+    # viene en `_op_sin_aplicar`. Persistirlo igual es lo único que después
+    # permite encontrar esa OP en BAS para reconciliarla a mano.
+    if not op_cmp and isinstance(op.get("_op_sin_aplicar"), dict):
+        op_cmp = op["_op_sin_aplicar"]
     actualizado = orchestrator._pb_client.upsert_payment_order(
         process_id,
         status="failed" if resultado["error"] else "success",
@@ -3135,5 +3166,167 @@ async def crear_orden_pago(
         "process_id": process_id,
         "orden_pago": resultado["orden_pago"],
         "error": resultado["error"],
+        "payment_order": actualizado,
+    }
+
+
+class EliminarInvoiceBody(BaseModel):
+    # id de PocketBase (colección "users"), resuelto por el dashboard Next.js
+    # desde la sesión -- mismo criterio que CrearOrdenPagoBody.requested_by:
+    # Invoicy no tiene noción propia de sesión de "users", así que confía en
+    # que el caller (siempre el backend de Next.js, nunca el navegador
+    # directo, protegido por _verificar_secreto_invoicy) ya la validó.
+    deleted_by: str
+    reason: Optional[str] = None
+
+
+class EliminarPaymentOrderBody(BaseModel):
+    deleted_by: str
+    reason: Optional[str] = None
+
+
+@router.delete(
+    "/invoices/{process_id}",
+    summary="Soft-delete de una factura (Cola de revisión o Facturas)",
+    tags=["Procesamiento de facturas"],
+)
+async def eliminar_invoice(
+    process_id: str,
+    body: EliminarInvoiceBody,
+    x_invoicy_secret: Optional[str] = Header(default=None, alias="X-Invoicy-Secret"),
+):
+    """
+    Soft-delete SIEMPRE -- nunca un borrado físico (ver
+    utils/pocketbase_client.py, migración 1783483896_add_soft_delete_fields.js:
+    BAS nunca se entera de un borrado en PocketBase, perder el registro
+    entero perdería toda la trazabilidad de auditoría sin revertir nada del
+    lado de BAS). Sirve tanto para "Cola de revisión" como para "Facturas":
+    ambas secciones del dashboard leen la misma colección `invoices`, solo
+    con filtros de status/review_status distintos -- un solo endpoint
+    alcanza para las dos.
+
+    Bloquea con 409 si existe una payment_order asociada, activa (no
+    soft-deleted), con status="success": BAS ya tiene esa Orden de Pago como
+    real, y borrar la factura sin resolver eso primero perdería la
+    trazabilidad de auditoría del lado de Invoicy sin revertir nada en BAS.
+    El caller debe eliminar esa Orden de Pago primero (endpoint separado,
+    con su propia fricción reforzada) -- no se cascadea automáticamente
+    desde acá a propósito, para que esa fricción no se pueda esquivar
+    borrando la factura en su lugar.
+
+    Si la payment_order asociada está en processing/failed (nada real
+    aplicado en BAS todavía), se soft-deletea junto con la factura -- bajo
+    riesgo, no hace falta fricción extra ahí.
+
+    Idempotente: si la factura ya estaba soft-deleted, responde 200 sin
+    volver a escribir (evita un error confuso ante doble click o una
+    carrera entre dos personas).
+    """
+    _verificar_secreto_invoicy(x_invoicy_secret)
+
+    invoice = orchestrator._pb_client.get_invoice_by_process_id(process_id)
+    if invoice is None:
+        raise HTTPException(
+            status_code=404, detail=f"No se encontró la factura para process_id={process_id}."
+        )
+
+    if invoice.get("deleted_at"):
+        return {
+            "success": True,
+            "process_id": process_id,
+            "already_deleted": True,
+            "message": "La factura ya estaba eliminada.",
+        }
+
+    payment_order = orchestrator._pb_client.get_payment_order(process_id)
+    if payment_order and not payment_order.get("deleted_at"):
+        if payment_order.get("status") == "success":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Esta factura tiene una Orden de Pago ya exitosa en BAS. "
+                    "Eliminá esa Orden de Pago primero (desde Órdenes de pago) "
+                    "antes de borrar la factura."
+                ),
+            )
+        # processing/failed: nada real en BAS todavía -- se soft-deletea
+        # junto con la factura, sin fricción extra.
+        orchestrator._pb_client.soft_delete_payment_order(
+            process_id, deleted_by=body.deleted_by, reason=body.reason
+        )
+
+    actualizado = orchestrator._pb_client.soft_delete_invoice(
+        process_id, deleted_by=body.deleted_by, reason=body.reason
+    )
+    if actualizado is None:
+        raise HTTPException(status_code=502, detail="No se pudo eliminar la factura en PocketBase.")
+
+    return {
+        "success": True,
+        "process_id": process_id,
+        "already_deleted": False,
+        "invoice": actualizado,
+    }
+
+
+@router.delete(
+    "/payment-orders/{process_id}",
+    summary="Soft-delete de una Orden de Pago",
+    tags=["Procesamiento de facturas"],
+)
+async def eliminar_payment_order(
+    process_id: str,
+    body: EliminarPaymentOrderBody,
+    x_invoicy_secret: Optional[str] = Header(default=None, alias="X-Invoicy-Secret"),
+):
+    """
+    Soft-delete SIEMPRE. Si `status=="success"` (plata/contabilidad real ya
+    aplicada en BAS -- utils/bas.py no expone ningún anular/cancelar vía
+    esta API, la única forma de revertir es manual y directamente en BAS),
+    exige `reason` no vacío: es la fricción reforzada decidida para este
+    caso específico -- se permite, pero nunca sin que quede escrito el
+    motivo. Nunca se confía en que el frontend ya validó esto (el frontend
+    hace la misma validación solo por UX, no por seguridad).
+
+    No toca la `invoice` asociada -- sigue existiendo, solo pierde su Orden
+    de Pago activa (se podría crear otra más adelante si hiciera falta).
+
+    Idempotente, mismo criterio que eliminar_invoice.
+    """
+    _verificar_secreto_invoicy(x_invoicy_secret)
+
+    payment_order = orchestrator._pb_client.get_payment_order(process_id)
+    if payment_order is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontró la Orden de Pago para process_id={process_id}.",
+        )
+
+    if payment_order.get("deleted_at"):
+        return {
+            "success": True,
+            "process_id": process_id,
+            "already_deleted": True,
+            "message": "La Orden de Pago ya estaba eliminada.",
+        }
+
+    if payment_order.get("status") == "success" and not (body.reason or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Se requiere un motivo para eliminar una Orden de Pago ya exitosa.",
+        )
+
+    actualizado = orchestrator._pb_client.soft_delete_payment_order(
+        process_id, deleted_by=body.deleted_by, reason=body.reason
+    )
+    if actualizado is None:
+        raise HTTPException(
+            status_code=502, detail="No se pudo eliminar la Orden de Pago en PocketBase."
+        )
+
+    return {
+        "success": True,
+        "process_id": process_id,
+        "already_deleted": False,
         "payment_order": actualizado,
     }
