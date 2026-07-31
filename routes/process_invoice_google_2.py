@@ -1518,21 +1518,35 @@ class InvoiceOrchestrator:
                     }
                 ]
             else:
-                items_bas = [
-                    {
-                        "CodigoItem": codigo_item_de_categoria(item.get("categoria", "")),
-                        "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
-                        "NumeroUnidadMedida": "1",
-                        "CantidadPrimeraUnidad": item.get("cantidad", 1),
-                        "PrecioUnitario": item.get("precio_unitario", 0),
-                        "ImporteGravado": item.get("precio_total", 0),
-                        "ImporteTotal": item.get("precio_total", 0),
-                        "TasaIva": 21,
-                        "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
-                        "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
-                    }
-                    for item in detalles
-                ]
+                items_bas = []
+                for item in detalles:
+                    importe_gravado = round(float(item.get("precio_total", 0) or 0), 2)
+                    tasa_iva = 21
+                    items_bas.append(
+                        {
+                            "CodigoItem": codigo_item_de_categoria(item.get("categoria", "")),
+                            "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
+                            "NumeroUnidadMedida": "1",
+                            "CantidadPrimeraUnidad": item.get("cantidad", 1),
+                            "PrecioUnitario": item.get("precio_unitario", 0),
+                            "ImporteGravado": importe_gravado,
+                            # BAS valida que Total (cabecera) == suma de
+                            # ImporteTotal de las líneas, igual que ya hace con
+                            # TotalGravado (409 "el total del comprobante no
+                            # coincide con la suma de los totales parciales",
+                            # SP_ICR_COMPROB_COMPRA) -- antes ImporteTotal
+                            # quedaba igual a ImporteGravado (sin IVA), lo que
+                            # rompía esa validación en cuanto el Total real de
+                            # la factura (con IVA) se usaba en la cabecera.
+                            # TasaIva está hardcodeada en 21 en todo este
+                            # archivo (no se desglosa por ítem en la
+                            # extracción) -- confirmado en runtime, 2026-07-31.
+                            "ImporteTotal": round(importe_gravado * (1 + tasa_iva / 100), 2),
+                            "TasaIva": tasa_iva,
+                            "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
+                            "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
+                        }
+                    )
 
             # BAS valida que TotalGravado == suma de ImporteGravado de los
             # ítems (409 "no coincide con la suma de los totales gravados de
@@ -1549,6 +1563,13 @@ class InvoiceOrchestrator:
             # 54981.340000000004) que BAS rechaza con 400 "must have not
             # more than 5 decimals" -- confirmado en runtime, 2026-07-31.
             total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
+            # Mismo razonamiento para Total (cabecera) == suma de
+            # ImporteTotal -- se usa en vez de `total` (crudo, extraído por
+            # Gemini) en todo lo que BAS valida contra las líneas: Total,
+            # Vencimientos.Importe, e importe/pagos de la orden de pago que
+            # aplica esta misma factura (deben coincidir con lo que BAS
+            # terminó registrando, no con el número original del documento).
+            total_comprobante = round(sum(float(it["ImporteTotal"] or 0) for it in items_bas), 2)
 
             # Número de comprobante externo: "PPPPP-NNNNNNNN" -> prefijo/numero.
             numero_completo = (comprobante.get("numero") or "").replace(" ", "")
@@ -1569,7 +1590,7 @@ class InvoiceOrchestrator:
                 # ConsultaComprobantesExternos). Sin fecha hardcodeada: "hoy"
                 # siempre cae en el período contable abierto, sea cual sea.
                 "Fecha": datetime.date.today().isoformat(),
-                "Total": total,
+                "Total": total_comprobante,
                 "TotalGravado": total_gravado,
                 "EmitidoPor": BAS_EMITIDO_POR_CAE,
                 "Empresa": BAS_EMPRESA,
@@ -1583,7 +1604,7 @@ class InvoiceOrchestrator:
                 "FechaComprobanteExterno": comprobante.get("fecha_emision"),
                 "NumeroCAIoCAE": otros.get("CAE"),
                 "VencimientoCAIoCAE": otros.get("vencimiento_CAE"),
-                "Vencimientos": [{"FechaVencimiento": comprobante.get("fecha_emision"), "Importe": total}],
+                "Vencimientos": [{"FechaVencimiento": comprobante.get("fecha_emision"), "Importe": total_comprobante}],
                 "Items": items_bas,
             }
 
@@ -1593,7 +1614,7 @@ class InvoiceOrchestrator:
                 comprobante_factura="MA",
                 prefijo_externo=prefijo_externo,
                 numero_externo=numero_externo,
-                importe=total,
+                importe=total_comprobante,
                 fecha_externo=comprobante.get("fecha_emision"),
                 prefijo_op=BAS_PREFIJO_TALONARIO_OP,
                 caja_op=BAS_CAJA,
@@ -1603,7 +1624,7 @@ class InvoiceOrchestrator:
                 # investigación previa (pasó la validación de existencia contra
                 # BAS a diferencia de otros códigos probados). No hay endpoint
                 # que exponga el catálogo real -- ver docs/bas-orden-de-pago-research.md.
-                pagos={"Efectivos": [{"MedioPago": "1", "Importe": total, "IngresooEgreso": "E"}]},
+                pagos={"Efectivos": [{"MedioPago": "1", "Importe": total_comprobante, "IngresooEgreso": "E"}]},
                 comprobante_compra_payload=comprobante_compra_payload,
                 imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
                 dry_run=dry_run,
@@ -3240,27 +3261,40 @@ async def crear_orden_pago(
     # InvoiceOrchestrator.procesar_factura_en_bas, pero leyendo invoice_items
     # DE POCKETBASE en vez de la extracción original de Gemini.
     items = orchestrator._pb_client.get_invoice_items(invoice["id"])
-    items_bas = [
-        {
-            "CodigoItem": it.get("bas_codigo_item"),
-            "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
-            "NumeroUnidadMedida": "1",
-            "CantidadPrimeraUnidad": it.get("cantidad", 1),
-            "PrecioUnitario": it.get("precio_unitario", 0),
-            "ImporteGravado": it.get("precio_total", 0),
-            "ImporteTotal": it.get("precio_total", 0),
-            "TasaIva": 21,
-            "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
-            "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
-        }
-        for it in items
-    ]
+    items_bas = []
+    for it in items:
+        _importe_gravado = round(float(it.get("precio_total", 0) or 0), 2)
+        _tasa_iva = 21
+        items_bas.append(
+            {
+                "CodigoItem": it.get("bas_codigo_item"),
+                "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
+                "NumeroUnidadMedida": "1",
+                "CantidadPrimeraUnidad": it.get("cantidad", 1),
+                "PrecioUnitario": it.get("precio_unitario", 0),
+                "ImporteGravado": _importe_gravado,
+                # Ver comentario equivalente en InvoiceOrchestrator.procesar_factura_en_bas:
+                # ImporteTotal debe incluir el IVA (Total de cabecera == suma
+                # de ImporteTotal de las líneas, mismo chequeo que ya hace
+                # BAS con TotalGravado).
+                "ImporteTotal": round(_importe_gravado * (1 + _tasa_iva / 100), 2),
+                "TasaIva": _tasa_iva,
+                "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
+                "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
+            }
+        )
     # Mismo fix que InvoiceOrchestrator.procesar_factura_en_bas: TotalGravado
     # tiene que ser la suma de ImporteGravado de las líneas, no invoice.total
     # (que incluye IVA) -- ver el comentario largo allá para el caso real que
     # lo confirmó. round(): idem, sumar floats sin redondear dispara 400
     # "must have not more than 5 decimals" en BAS.
     total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
+    # Mismo razonamiento para Total (cabecera): tiene que ser la suma de
+    # ImporteTotal, no invoice.get("total") directo. NO se toca `monto` (el
+    # importe de la orden de pago en sí) -- es un concepto aparte, puede ser
+    # un pago parcial de esta factura, no necesariamente igual al Total del
+    # comprobante.
+    total_comprobante = round(sum(float(it["ImporteTotal"] or 0) for it in items_bas), 2)
     prefijo_externo = status_bas.get("comprobante_prefijo")
     numero_externo = status_bas.get("comprobante_numero")
     comprobante_compra_payload = {
@@ -3273,7 +3307,7 @@ async def crear_orden_pago(
         # registrada tarde. FechaComprobanteExterno (abajo) sí lleva la fecha
         # real del documento.
         "Fecha": datetime.date.today().isoformat(),
-        "Total": invoice.get("total"),
+        "Total": total_comprobante,
         "TotalGravado": total_gravado,
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
         "Empresa": BAS_EMPRESA,
@@ -3287,7 +3321,7 @@ async def crear_orden_pago(
         "FechaComprobanteExterno": invoice.get("fecha_emision"),
         "NumeroCAIoCAE": invoice.get("cae"),
         "VencimientoCAIoCAE": invoice.get("cae_vencimiento"),
-        "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": invoice.get("total")}],
+        "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": total_comprobante}],
         "Items": items_bas,
     }
 
