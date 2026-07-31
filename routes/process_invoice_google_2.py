@@ -15,6 +15,7 @@ import shutil
 import json
 import base64
 import asyncio
+import hashlib
 import ssl
 import mimetypes
 import uuid
@@ -67,6 +68,21 @@ load_dotenv()
 
 # Crea una instancia del router de FastAPI
 router = APIRouter(prefix="/gemini2")
+
+# Cuántos pipelines completos (Gemini + BAS + Sheets + Drive + PocketBase)
+# pueden correr a la vez en todo el proceso. Vive a nivel módulo, no dentro
+# de un endpoint puntual, y envuelve _procesar_imagen_o_pdf en su propia
+# definición (ver más abajo) -- así protege por igual los dos loops de ZIP
+# ya existentes (/website-upload, /process-invoice) Y el nuevo flujo de
+# importación masiva (routes/batch_import.py), sin que ninguno le robe
+# recursos al otro. Default=1 (secuencial), mismo criterio ya deliberado en
+# el código de ZIP ("el Droplet tiene 1 vCPU/960MB... un ZIP gigante
+# saturaría el background task de abajo por horas"). Cap duro a 2 en código
+# -- que nadie lo suba a un valor que tumbe el droplet vía env var.
+# Ver docs/plan-importacion-masiva-facturas.md, sección 5.
+PROCESSING_SEMAPHORE = asyncio.Semaphore(
+    min(int(os.getenv("INVOICY_MAX_CONCURRENT_PROCESSING", "1")), 2)
+)
 
 
 # Encabezados de la pestaña de ítems (una fila por ítem de factura).
@@ -1416,7 +1432,13 @@ class InvoiceOrchestrator:
             app_logger.warning(f"PocketBase: error en set_provider_cache({cuit_normalizado}): {e}")
         return proveedor
 
-    def procesar_factura_en_bas(self, factura_data: dict, process_id: str, dry_run: bool = True):
+    def procesar_factura_en_bas(
+        self,
+        factura_data: dict,
+        process_id: str,
+        dry_run: bool = True,
+        monto_override: Optional[float] = None,
+    ):
         """
         Orquesta el registro de la factura y (best-effort) la orden de pago en BAS.
 
@@ -1428,6 +1450,16 @@ class InvoiceOrchestrator:
         `dry_run=True` (default) arma los payloads y consulta BAS pero NO
         escribe. Pasar dry_run=False solo tras validar en la verificación
         end-to-end -- ver plan de integración.
+
+        `monto_override`: para importar facturas REALES sin el impacto
+        contable real (ver Invoicy/docs/plan-importacion-masiva-facturas.md,
+        Fase 5/6) -- misma regla de seguridad ya establecida para cualquier
+        prueba real contra BAS (Total=1). Cuando se pasa, se descarta la
+        lista de ítems extraída y se manda un único ítem sintético por
+        `monto_override`, preservando la categoría del primer ítem real (si
+        hay) para seguir probando la resolución de CodigoItem de verdad.
+        Proveedor/CUIT/número de comprobante externo NUNCA se tocan -- son
+        la identidad real del documento, no el impacto contable.
         """
         resultado = {"proveedor": None, "comprobante": None, "orden_pago": None, "error": None}
         try:
@@ -1438,6 +1470,18 @@ class InvoiceOrchestrator:
             items_info = factura_data.get("items", {})
             detalles = items_info.get("detalles", []) or []
             total = items_info.get("total")
+
+            if monto_override is not None:
+                # OJO al leer este log: `total` acá puede ya venir pisado
+                # por _aplicar_monto_override (llamado antes, en
+                # _procesar_imagen_o_pdf_impl) -- este mensaje NO garantiza
+                # mostrar el monto original del documento, solo confirma
+                # que ESTE registro en BAS usa monto_override, no lo que
+                # sea que haya en `total` en este punto.
+                app_logger.info(
+                    f"[{process_id}] BAS: monto_override activo -- se registra con Total={monto_override}."
+                )
+                total = monto_override
 
             cuit_emisor = emisor.get("id_fiscal", "")
             if not cuit_emisor:
@@ -1452,21 +1496,56 @@ class InvoiceOrchestrator:
                 return resultado
             resultado["proveedor"] = {"codigo": proveedor.get("Codigo"), "nuevo": proveedor.get("_nuevo")}
 
-            items_bas = [
-                {
-                    "CodigoItem": codigo_item_de_categoria(item.get("categoria", "")),
-                    "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
-                    "NumeroUnidadMedida": "1",
-                    "CantidadPrimeraUnidad": item.get("cantidad", 1),
-                    "PrecioUnitario": item.get("precio_unitario", 0),
-                    "ImporteGravado": item.get("precio_total", 0),
-                    "ImporteTotal": item.get("precio_total", 0),
-                    "TasaIva": 21,
-                    "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
-                    "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
-                }
-                for item in detalles
-            ]
+            if monto_override is not None:
+                # Un único ítem sintético -- mismo patrón ya probado real
+                # contra BAS (scripts/test_crear_comprobante_compra.py).
+                # Se preserva la categoría del primer ítem real extraído
+                # (si hay) para seguir ejercitando la resolución real de
+                # CodigoItem, no una hardcodeada.
+                categoria_real = detalles[0].get("categoria", "") if detalles else ""
+                items_bas = [
+                    {
+                        "CodigoItem": codigo_item_de_categoria(categoria_real),
+                        "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
+                        "NumeroUnidadMedida": "1",
+                        "CantidadPrimeraUnidad": 1,
+                        "PrecioUnitario": monto_override,
+                        "ImporteGravado": monto_override,
+                        "ImporteTotal": monto_override,
+                        "TasaIva": 21,
+                        "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
+                        "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
+                    }
+                ]
+            else:
+                items_bas = [
+                    {
+                        "CodigoItem": codigo_item_de_categoria(item.get("categoria", "")),
+                        "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
+                        "NumeroUnidadMedida": "1",
+                        "CantidadPrimeraUnidad": item.get("cantidad", 1),
+                        "PrecioUnitario": item.get("precio_unitario", 0),
+                        "ImporteGravado": item.get("precio_total", 0),
+                        "ImporteTotal": item.get("precio_total", 0),
+                        "TasaIva": 21,
+                        "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
+                        "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
+                    }
+                    for item in detalles
+                ]
+
+            # BAS valida que TotalGravado == suma de ImporteGravado de los
+            # ítems (409 "no coincide con la suma de los totales gravados de
+            # las líneas" si no matchea, ver SP_ICR_COMPROB_COMPRA). Antes
+            # acá se mandaba `total` (con IVA incluido) en vez del gravado
+            # real -- confirmado con una factura real: BAS reportó
+            # TotalGravado=11959.08 (el total con 21% de IVA) contra una
+            # suma de líneas de 9883.54 (9883.54*1.21 = 11959.08 exacto).
+            # Se calcula sumando los mismos valores que ya se mandan en
+            # items_bas, no un campo "subtotal" extraído por separado --
+            # así queda estructuralmente garantizado que matchea, en vez de
+            # confiar en que Gemini haya calculado ambos de forma consistente.
+            total_gravado = sum(float(it["ImporteGravado"] or 0) for it in items_bas)
 
             # Número de comprobante externo: "PPPPP-NNNNNNNN" -> prefijo/numero.
             numero_completo = (comprobante.get("numero") or "").replace(" ", "")
@@ -1488,7 +1567,7 @@ class InvoiceOrchestrator:
                 # siempre cae en el período contable abierto, sea cual sea.
                 "Fecha": datetime.date.today().isoformat(),
                 "Total": total,
-                "TotalGravado": total,
+                "TotalGravado": total_gravado,
                 "EmitidoPor": BAS_EMITIDO_POR_CAE,
                 "Empresa": BAS_EMPRESA,
                 "Sucursal": BAS_SUCURSAL,
@@ -1780,6 +1859,86 @@ async def _procesar_imagen_o_pdf(
     extension: str,
     media_type: str,
     process_id: str,
+    monto_override: Optional[float] = None,
+) -> dict:
+    """Wrapper delgado de _procesar_imagen_o_pdf_impl() que solo agrega el
+    gate de concurrencia global (PROCESSING_SEMAPHORE, ver su comentario más
+    arriba) -- separado de la implementación para que el semáforo cubra a
+    TODOS los callers reales (el único hoy es _procesar_en_background, pero
+    eso alcanza para proteger tanto los dos loops de ZIP existentes como el
+    nuevo flujo de importación masiva, que también pasa por acá) sin tener
+    que reindentar toda la función.
+
+    `monto_override`: ver el docstring de InvoiceOrchestrator.procesar_factura_en_bas
+    -- se reenvía tal cual, None en el 100% de los callers salvo el flujo de
+    importación masiva cuando el batch se creó con esa opción."""
+    async with PROCESSING_SEMAPHORE:
+        return await _procesar_imagen_o_pdf_impl(
+            file_location, file_name, extension, media_type, process_id, monto_override
+        )
+
+
+def _calcular_content_hash(file_location: str) -> Optional[str]:
+    """sha256 del archivo en disco -- motor del dedup de importación masiva
+    (ver docs/plan-importacion-masiva-facturas.md, sección 3). Se calcula acá
+    (no solo en el flujo de batch) para que TODA factura, sin importar por
+    qué puerta entró (/website-upload, /process-invoice, o batch), quede con
+    su content_hash y sea detectable como duplicado en el futuro. None en
+    caso de error de lectura -- no debe frenar el resto del procesamiento."""
+    try:
+        h = hashlib.sha256()
+        with open(file_location, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception as e:
+        app_logger.warning(f"Error calculando content_hash de {file_location}: {e}")
+        return None
+
+
+def _aplicar_monto_override(factura_data: dict, monto_override: float) -> None:
+    """Muta factura_data["items"] IN PLACE para reemplazar el monto real
+    extraído por monto_override -- usado por la importación masiva de
+    facturas reales sin impacto contable real (ver
+    docs/plan-importacion-masiva-facturas.md, Fase 5/6). Se llama ANTES de
+    Sheets/BAS/PocketBase, así el monto de $1 queda consistente en todo lo
+    que se persiste, no solo en el payload de BAS -- si no, invoices.total
+    igual quedaría con el monto real, y ESE es el valor que usa
+    crear_orden_pago cuando alguien confirma la factura más tarde y pide la
+    Orden de Pago de verdad (un endpoint separado que no reextrae nada).
+
+    Preserva un solo ítem sintético con la categoría del primero real (si
+    hay), para seguir ejercitando la resolución real de CodigoItem en vez
+    de una hardcodeada. Proveedor/CUIT/número de comprobante externo/fechas
+    NO se tocan acá -- eso vive en emisor_receptor, intacto."""
+    items_info = factura_data.get("items") or {}
+    detalles = items_info.get("detalles") or []
+    categoria_real = detalles[0].get("categoria", "") if detalles else ""
+    descripcion_real = detalles[0].get("descripcion", "") if detalles else "Importación masiva (monto de prueba)"
+
+    factura_data["items"] = {
+        **items_info,
+        "detalles": [
+            {
+                "descripcion": descripcion_real,
+                "cantidad": 1,
+                "precio_unitario": monto_override,
+                "precio_total": monto_override,
+                "categoria": categoria_real,
+            }
+        ],
+        "subtotal": monto_override,
+        "total": monto_override,
+    }
+
+
+async def _procesar_imagen_o_pdf_impl(
+    file_location: str,
+    file_name: str,
+    extension: str,
+    media_type: str,
+    process_id: str,
+    monto_override: Optional[float] = None,
 ) -> dict:
     """Procesa sincrónicamente una imagen o PDF de factura: extracción Gemini,
     Sheets, integración BAS (dry_run por default) y persistencia en
@@ -1794,6 +1953,8 @@ async def _procesar_imagen_o_pdf(
         "media_type": media_type,
         "process_id": process_id,
     }
+
+    content_hash = _calcular_content_hash(file_location)
 
     # Placeholder "processing" ANTES de arrancar la extracción -- ver bug
     # real 2026-07-18: si run_image_toolchain/run_pdf_toolchain (Gemini) o
@@ -1818,6 +1979,10 @@ async def _procesar_imagen_o_pdf(
             "status": "processing",
             "error_message": "",
             "extraction_attempt": 1,
+            # Vacío si _calcular_content_hash falló -- no vale la pena
+            # bloquear el procesamiento por esto, el dedup simplemente no
+            # va a atrapar esta factura puntual si el hash no se pudo leer.
+            **({"content_hash": content_hash} if content_hash else {}),
         }
     )
 
@@ -1846,13 +2011,60 @@ async def _procesar_imagen_o_pdf(
         respuestas = await orchestrator.run_pdf_toolchain(item)
 
     factura = orchestrator.formatear_factura(respuestas["data"])
+
+    if monto_override is not None:
+        # Acá, ANTES de Sheets/PocketBase (no solo antes de BAS): si el
+        # override solo tocara procesar_factura_en_bas, el monto real
+        # extraído igual quedaría persistido en invoices.total/
+        # invoice_items.precio_total -- y ESE es el valor que lee
+        # crear_orden_pago cuando alguien confirma la factura más tarde y
+        # pide la Orden de Pago de verdad, un endpoint totalmente separado
+        # que no pasa por acá. Mutar la estructura extraída acá cubre todo
+        # el recorrido de una sola vez: Sheets, BAS y lo que se persiste.
+        _aplicar_monto_override(factura["data"], monto_override)
+
     saved_sheet = orchestrator.guardar_factura_completa_en_sheets(
         factura["data"]
     )
     saved_items = orchestrator.guardar_items_en_sheets(factura["data"], process_id)
 
     # Integración con BAS (ERP): mismo patrón aislado que en worker().
-    resultado_bas = orchestrator.procesar_factura_en_bas(factura["data"], process_id)
+    resultado_bas = orchestrator.procesar_factura_en_bas(
+        factura["data"], process_id, monto_override=monto_override
+    )
+
+    # Copia del archivo original en Google Drive. Hasta este cambio solo
+    # subía worker() (el flujo viejo de email/ZIP), así que las facturas
+    # que entran como archivo suelto -- que son el caso real de uso --
+    # quedaban sin drive_file_id: en producción las 5 facturas existentes
+    # lo tenían vacío y la columna "Drive" del dashboard mostraba "—".
+    #
+    # Es una copia de respaldo, NO la fuente de verdad: el archivo se sigue
+    # guardando en `documento_original` (campo file nativo de PocketBase),
+    # que es de donde lee el visor del panel de revisión. Por eso un fallo
+    # acá no rompe nada -- se loguea y se sigue, mismo criterio que worker().
+    #
+    # El archivo todavía está en disco (file_location se borra recién al
+    # final de esta función), así que se puede subir tal cual.
+    drive_file_id = None
+    try:
+        app_logger.info(f"[{process_id}] Subiendo archivo original a Google Drive: {file_name}")
+        drive_file_id = orchestrator.subir_archivo_a_drive(
+            file_path=file_location,
+            file_name=file_name,
+            mime_type=media_type,
+        )
+        if drive_file_id:
+            app_logger.info(f"[{process_id}] ✅ Archivo subido a Drive. ID: {drive_file_id}")
+        else:
+            # subir_archivo_a_drive ya loguea el motivo (faltan credenciales,
+            # error de la API, etc.) y devuelve None en vez de tirar.
+            app_logger.warning(
+                f"[{process_id}] No se pudo subir a Drive; la factura sigue "
+                "igual, el archivo original queda en PocketBase."
+            )
+    except Exception as e:
+        app_logger.warning(f"[{process_id}] Error inesperado subiendo a Drive: {e}")
 
     # Persistencia en PocketBase (invoice + items + estado BAS). Mismo
     # patrón y mismos nombres de campo que worker() (más abajo en esta
@@ -1860,10 +2072,7 @@ async def _procesar_imagen_o_pdf(
     # Sheets/BAS ni la respuesta al llamador. Necesario para que las
     # facturas subidas como archivo suelto (el caso real de uso -- a
     # diferencia del branch ZIP, que encola vía job_queue/worker())
-    # también queden persistidas y visibles en el dashboard. A
-    # diferencia de worker(), este camino no sube a Drive ni manda
-    # email (ver el resto del endpoint), así que no hay drive_file_id
-    # que setear -- status se marca "completed" directo.
+    # también queden persistidas y visibles en el dashboard.
     _pb_invoice_record = None
     try:
         _er = factura["data"].get("emisor_receptor", {})
@@ -1893,6 +2102,10 @@ async def _procesar_imagen_o_pdf(
                 "forma_pago": _otros.get("forma_pago"),
                 "sheets_saved": bool(saved_sheet),
                 "status": "completed",
+                # Solo si la subida funcionó: mandar None acá pisaría con
+                # vacío un drive_file_id ya guardado si esto se reprocesa
+                # (upsert_invoice hace merge por process_id).
+                **({"drive_file_id": drive_file_id} if drive_file_id else {}),
             }
         )
         if _pb_invoice_record and _pb_invoice_record.get("id"):
@@ -3039,6 +3252,11 @@ async def crear_orden_pago(
         }
         for it in items
     ]
+    # Mismo fix que InvoiceOrchestrator.procesar_factura_en_bas: TotalGravado
+    # tiene que ser la suma de ImporteGravado de las líneas, no invoice.total
+    # (que incluye IVA) -- ver el comentario largo allá para el caso real que
+    # lo confirmó.
+    total_gravado = sum(float(it["ImporteGravado"] or 0) for it in items_bas)
     prefijo_externo = status_bas.get("comprobante_prefijo")
     numero_externo = status_bas.get("comprobante_numero")
     comprobante_compra_payload = {
@@ -3052,7 +3270,7 @@ async def crear_orden_pago(
         # real del documento.
         "Fecha": datetime.date.today().isoformat(),
         "Total": invoice.get("total"),
-        "TotalGravado": invoice.get("total"),
+        "TotalGravado": total_gravado,
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
         "Empresa": BAS_EMPRESA,
         "Sucursal": BAS_SUCURSAL,

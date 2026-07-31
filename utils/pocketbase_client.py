@@ -73,6 +73,8 @@ BAS_PROVIDERS_COLLECTION = "bas_providers"
 BAS_PAYMENT_METHODS_COLLECTION = "bas_payment_methods"
 PAYMENT_ORDERS_COLLECTION = "payment_orders"
 BAS_CATEGORY_MAP_COLLECTION = "bas_category_map"
+IMPORT_BATCHES_COLLECTION = "import_batches"
+IMPORT_BATCH_ITEMS_COLLECTION = "import_batch_items"
 
 
 class PocketBaseApiError(Exception):
@@ -720,6 +722,179 @@ class PocketBaseClient:
         except Exception as e:
             app_logger.warning(f"PocketBase: error en soft_delete_payment_order({process_id}): {e}")
             return None
+
+    # ------------------------------------------------------------------ #
+    # Importación masiva de facturas (ver
+    # docs/plan-importacion-masiva-facturas.md)
+    # ------------------------------------------------------------------ #
+    def create_import_batch(
+        self,
+        *,
+        label: Optional[str],
+        total_files: int,
+        started_at: str,
+        created_by: Optional[str] = None,
+        monto_override: Optional[float] = None,
+    ) -> Optional[dict]:
+        try:
+            payload = {
+                "label": label or "",
+                "status": "running",
+                "total_files": total_files,
+                "started_at": started_at,
+            }
+            if created_by:
+                payload["created_by"] = created_by
+            if monto_override is not None:
+                payload["monto_override"] = monto_override
+            return self._create(IMPORT_BATCHES_COLLECTION, payload)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en create_import_batch: {e}")
+            return None
+
+    def get_import_batch(self, batch_id: str) -> Optional[dict]:
+        try:
+            if not batch_id:
+                return None
+            resp = self._request(
+                "GET", f"/api/collections/{IMPORT_BATCHES_COLLECTION}/records/{batch_id}"
+            )
+            if resp.status_code == 404:
+                return None
+            return _json_o_error(
+                resp, f"/api/collections/{IMPORT_BATCHES_COLLECTION}/records/{batch_id}", ok=(200,)
+            )
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_import_batch({batch_id}): {e}")
+            return None
+
+    def update_import_batch(self, batch_id: str, **campos) -> Optional[dict]:
+        try:
+            if not batch_id:
+                return None
+            return self._update(IMPORT_BATCHES_COLLECTION, batch_id, campos)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en update_import_batch({batch_id}): {e}")
+            return None
+
+    def create_batch_item(
+        self,
+        *,
+        batch: str,
+        original_path: str,
+        file_name: str,
+        content_hash: str,
+        status: str = "pending",
+        **campos,
+    ) -> Optional[dict]:
+        try:
+            payload = {
+                "batch": batch,
+                "original_path": original_path,
+                "file_name": file_name,
+                "content_hash": content_hash,
+                "status": status,
+                **campos,
+            }
+            return self._create(IMPORT_BATCH_ITEMS_COLLECTION, payload)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en create_batch_item({original_path}): {e}")
+            return None
+
+    def get_batch_item(self, item_id: str) -> Optional[dict]:
+        try:
+            if not item_id:
+                return None
+            resp = self._request(
+                "GET", f"/api/collections/{IMPORT_BATCH_ITEMS_COLLECTION}/records/{item_id}"
+            )
+            if resp.status_code == 404:
+                return None
+            return _json_o_error(
+                resp,
+                f"/api/collections/{IMPORT_BATCH_ITEMS_COLLECTION}/records/{item_id}",
+                ok=(200,),
+            )
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_batch_item({item_id}): {e}")
+            return None
+
+    def update_batch_item(self, item_id: str, **campos) -> Optional[dict]:
+        try:
+            if not item_id:
+                return None
+            return self._update(IMPORT_BATCH_ITEMS_COLLECTION, item_id, campos)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en update_batch_item({item_id}): {e}")
+            return None
+
+    def list_batch_items(self, batch_id: str) -> list:
+        """Todos los items de un batch, sin paginar de verdad -- a la escala
+        real (decenas de archivos por corrida, mismo orden de magnitud que el
+        MAX_ARCHIVOS_ZIP=20 ya existente), page_size generoso alcanza."""
+        try:
+            if not batch_id:
+                return []
+            return self._list_all(
+                IMPORT_BATCH_ITEMS_COLLECTION,
+                _pb_filter_eq("batch", batch_id),
+                page_size=500,
+            )
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en list_batch_items({batch_id}): {e}")
+            return []
+
+    def find_invoice_by_content_hash(self, content_hash: str) -> Optional[dict]:
+        """Dedup histórico/cross-batch: busca CUALQUIER invoice (de cualquier
+        fuente -- subida suelta o batch anterior) con este hash de contenido,
+        no soft-deleteada. Si existe, no hay que volver a registrar nada en
+        BAS -- ver docs/plan-importacion-masiva-facturas.md, sección 3."""
+        try:
+            if not content_hash:
+                return None
+            filtro = f'{_pb_filter_eq("content_hash", content_hash)} && deleted_at = ""'
+            return self._find_one(INVOICES_COLLECTION, filtro)
+        except Exception as e:
+            app_logger.warning(
+                f"PocketBase: error en find_invoice_by_content_hash({content_hash}): {e}"
+            )
+            return None
+
+    def find_stale_batch_items(self, batch_id: str, *, older_than_minutes: int = 15) -> list:
+        """Items de un batch que quedaron colgados en 'uploading'/'processing'
+        -- típicamente porque el backend se reinició a mitad de camino (ver
+        el gap de robustez documentado en el plan, sección 6: el cierre
+        "self-closing" del batch nunca dispara si el proceso muere antes de
+        terminar). Filtra por tiempo en Python, no en el filtro de PocketBase
+        -- a esta escala (decenas de items) es más simple y no depende de
+        adivinar el formato exacto de comparación de fechas que acepta la
+        API, que no está verificado en ningún otro lugar de este código."""
+        try:
+            if not batch_id:
+                return []
+            candidatos = self._list_all(
+                IMPORT_BATCH_ITEMS_COLLECTION,
+                f'{_pb_filter_eq("batch", batch_id)} && (status = "uploading" || status = "processing")',
+                page_size=500,
+            )
+            corte = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+                minutes=older_than_minutes
+            )
+            resultado = []
+            for item in candidatos:
+                actualizado = item.get("updated")
+                if not actualizado:
+                    continue
+                try:
+                    ts = datetime.datetime.fromisoformat(actualizado.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if ts < corte:
+                    resultado.append(item)
+            return resultado
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en find_stale_batch_items({batch_id}): {e}")
+            return []
 
 
 # ---------------------------------------------------------------------- #
