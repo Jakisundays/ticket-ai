@@ -1545,7 +1545,10 @@ class InvoiceOrchestrator:
             # items_bas, no un campo "subtotal" extraído por separado --
             # así queda estructuralmente garantizado que matchea, en vez de
             # confiar en que Gemini haya calculado ambos de forma consistente.
-            total_gravado = sum(float(it["ImporteGravado"] or 0) for it in items_bas)
+            # round(): sumar floats acumula ruido de precisión (ej.
+            # 54981.340000000004) que BAS rechaza con 400 "must have not
+            # more than 5 decimals" -- confirmado en runtime, 2026-07-31.
+            total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
 
             # Número de comprobante externo: "PPPPP-NNNNNNNN" -> prefijo/numero.
             numero_completo = (comprobante.get("numero") or "").replace(" ", "")
@@ -3255,8 +3258,9 @@ async def crear_orden_pago(
     # Mismo fix que InvoiceOrchestrator.procesar_factura_en_bas: TotalGravado
     # tiene que ser la suma de ImporteGravado de las líneas, no invoice.total
     # (que incluye IVA) -- ver el comentario largo allá para el caso real que
-    # lo confirmó.
-    total_gravado = sum(float(it["ImporteGravado"] or 0) for it in items_bas)
+    # lo confirmó. round(): idem, sumar floats sin redondear dispara 400
+    # "must have not more than 5 decimals" en BAS.
+    total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
     prefijo_externo = status_bas.get("comprobante_prefijo")
     numero_externo = status_bas.get("comprobante_numero")
     comprobante_compra_payload = {
