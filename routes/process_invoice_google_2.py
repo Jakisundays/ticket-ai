@@ -1522,6 +1522,17 @@ class InvoiceOrchestrator:
                 for item in detalles:
                     importe_gravado = round(float(item.get("precio_total", 0) or 0), 2)
                     tasa_iva = 21
+                    # ImporteIva es un campo PROPIO del schema de BAS
+                    # (Entidadesv2.CmpsCompra.Item), no un derivado implícito
+                    # de ImporteGravado/TasaIva -- si se omite, BAS lo toma
+                    # como 0/null y compara contra un ImporteTotal que ya
+                    # incluye el 21%, lo que dispara 409 "alguna línea de
+                    # ítems... no son consistentes" (SP_GENEROASI). Se calcula
+                    # ImporteIva primero y ImporteTotal como la SUMA de ambos
+                    # (no gravado*1.21 directo) para que la consistencia
+                    # quede exacta pase lo que pase con el redondeo de cada
+                    # término -- confirmado en runtime, 2026-07-31.
+                    importe_iva = round(importe_gravado * tasa_iva / 100, 2)
                     items_bas.append(
                         {
                             "CodigoItem": codigo_item_de_categoria(item.get("categoria", "")),
@@ -1530,6 +1541,7 @@ class InvoiceOrchestrator:
                             "CantidadPrimeraUnidad": item.get("cantidad", 1),
                             "PrecioUnitario": item.get("precio_unitario", 0),
                             "ImporteGravado": importe_gravado,
+                            "ImporteIva": importe_iva,
                             # BAS valida que Total (cabecera) == suma de
                             # ImporteTotal de las líneas, igual que ya hace con
                             # TotalGravado (409 "el total del comprobante no
@@ -1541,7 +1553,7 @@ class InvoiceOrchestrator:
                             # TasaIva está hardcodeada en 21 en todo este
                             # archivo (no se desglosa por ítem en la
                             # extracción) -- confirmado en runtime, 2026-07-31.
-                            "ImporteTotal": round(importe_gravado * (1 + tasa_iva / 100), 2),
+                            "ImporteTotal": round(importe_gravado + importe_iva, 2),
                             "TasaIva": tasa_iva,
                             "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
                             "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
@@ -3265,6 +3277,11 @@ async def crear_orden_pago(
     for it in items:
         _importe_gravado = round(float(it.get("precio_total", 0) or 0), 2)
         _tasa_iva = 21
+        # Ver comentario equivalente en InvoiceOrchestrator.procesar_factura_en_bas:
+        # ImporteIva es un campo propio del schema de BAS, no implícito --
+        # sin él, BAS compara un ImporteTotal con IVA contra un ImporteIva
+        # nulo y rechaza la línea como "no consistente" (SP_GENEROASI).
+        _importe_iva = round(_importe_gravado * _tasa_iva / 100, 2)
         items_bas.append(
             {
                 "CodigoItem": it.get("bas_codigo_item"),
@@ -3273,11 +3290,13 @@ async def crear_orden_pago(
                 "CantidadPrimeraUnidad": it.get("cantidad", 1),
                 "PrecioUnitario": it.get("precio_unitario", 0),
                 "ImporteGravado": _importe_gravado,
-                # Ver comentario equivalente en InvoiceOrchestrator.procesar_factura_en_bas:
+                "ImporteIva": _importe_iva,
                 # ImporteTotal debe incluir el IVA (Total de cabecera == suma
                 # de ImporteTotal de las líneas, mismo chequeo que ya hace
-                # BAS con TotalGravado).
-                "ImporteTotal": round(_importe_gravado * (1 + _tasa_iva / 100), 2),
+                # BAS con TotalGravado). Se suma ImporteGravado + ImporteIva
+                # (no gravado*1.21 directo) para que la consistencia entre
+                # los 3 campos sea exacta pase lo que pase con el redondeo.
+                "ImporteTotal": round(_importe_gravado + _importe_iva, 2),
                 "TasaIva": _tasa_iva,
                 "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
                 "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
