@@ -32,6 +32,14 @@ export type ProcessingJobStatus = "queued" | "processing" | "done" | "error";
 export type ReviewStatus = "" | "needs_review" | "confirmed";
 export type MetodoPago = "efectivo" | "cheque" | "transferencia" | "tarjeta";
 export type PaymentOrderStatus = "processing" | "success" | "failed";
+export type ImportBatchStatus = "running" | "completed" | "completed_with_errors" | "failed";
+export type ImportBatchItemStatus =
+  | "pending"
+  | "uploading"
+  | "processing"
+  | "completed"
+  | "error"
+  | "skipped_duplicate";
 
 export interface InvoicesRecord extends BaseSystemFields {
   process_id: string;
@@ -69,6 +77,11 @@ export interface InvoicesRecord extends BaseSystemFields {
   /** relation -> users */
   deleted_by: string;
   delete_reason: string;
+  /** sha256 del archivo original -- "" en filas anteriores a la importación
+   * masiva (ver components/DeleteRowMenu.tsx para el criterio análogo de
+   * deleted_at). Motor del dedup: scripts/batch_import.py y
+   * routes/batch_import.py en Invoicy. */
+  content_hash: string;
 }
 
 export interface InvoiceItemsRecord extends BaseSystemFields {
@@ -161,6 +174,55 @@ export interface PaymentOrdersRecord extends BaseSystemFields {
   delete_reason: string;
 }
 
+/** Importación masiva de facturas -- ver Invoicy/docs/plan-importacion-masiva-facturas.md. */
+export interface ImportBatchesRecord extends BaseSystemFields {
+  label: string;
+  status: ImportBatchStatus;
+  total_files: number;
+  total_unique: number;
+  total_duplicates: number;
+  started_at: IsoDateString;
+  finished_at: IsoDateString | "";
+  /** relation -> users; "" si lo disparó el script local sin created_by explícito */
+  created_by: string;
+  /** null/0 = comportamiento normal. Si tiene valor, TODOS los items de
+   * este batch se procesaron con este monto en vez del real extraído (BAS,
+   * Sheets e invoices.total) -- para importar facturas reales sin impacto
+   * contable real. Ver Invoicy/docs/plan-importacion-masiva-facturas.md. */
+  monto_override: number | null;
+}
+
+export interface ImportBatchItemsRecord extends BaseSystemFields {
+  /** relation -> import_batches */
+  batch: RecordIdString;
+  /** relation -> invoices; "" hasta que status="completed" */
+  invoice: RecordIdString | "";
+  /** ej. "facturas.zip/facturas/MercadoPago_4.pdf" -- conserva el linaje completo */
+  original_path: string;
+  file_name: string;
+  /** "" si el archivo no vino de un zip */
+  zip_source: string;
+  content_hash: string;
+  file_size: number;
+  status: ImportBatchItemStatus;
+  error_message: string;
+  attempt_count: number;
+  /** relation -> import_batch_items (self); item "ganador" cuando el
+   * duplicado es del MISMO batch */
+  duplicate_of: RecordIdString | "";
+  /** relation -> invoices; item "ganador" cuando el duplicado ya existía
+   * como factura de una corrida anterior o de una subida suelta previa */
+  duplicate_of_invoice: RecordIdString | "";
+  process_id: string;
+}
+
+export interface ImportBatchItemWithExpand extends ImportBatchItemsRecord {
+  expand?: {
+    invoice?: InvoicesRecord;
+    duplicate_of_invoice?: InvoicesRecord;
+  };
+}
+
 /** Coleccion de auth "users" — humanos, login del dashboard Next.js. */
 export interface UsersRecord extends BaseSystemFields {
   email: string;
@@ -226,6 +288,8 @@ export const Collections = {
   BasPaymentMethods: "bas_payment_methods",
   PaymentOrders: "payment_orders",
   ProcessingJobs: "processing_jobs",
+  ImportBatches: "import_batches",
+  ImportBatchItems: "import_batch_items",
   Users: "users",
   ServiceAccounts: "service_accounts",
 } as const;

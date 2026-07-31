@@ -14,6 +14,10 @@ const STATUS_META: Record<string, { label: string; bucket: StatusBucket }> = {
   success: { label: "Exitosa", bucket: "success" },
   error: { label: "Error", bucket: "destructive" },
   failed: { label: "Fallida", bucket: "destructive" },
+  running: { label: "Corriendo", bucket: "info" },
+  completed_with_errors: { label: "Completado con errores", bucket: "warning" },
+  uploading: { label: "Subiendo", bucket: "info" },
+  skipped_duplicate: { label: "Duplicado omitido", bucket: "neutral" },
 };
 
 const BUCKET_CLASSES: Record<StatusBucket, string> = {

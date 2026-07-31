@@ -8,6 +8,7 @@ import {
   Tags,
   Wallet,
   UploadCloud,
+  PackageOpen,
 } from "lucide-react";
 import {
   SidebarContent,
@@ -37,6 +38,7 @@ const NAV_GROUPS = [
       },
       { href: "/invoices", label: "Facturas", icon: FileText },
       { href: "/payment-orders", label: "Órdenes de pago", icon: CreditCard },
+      { href: "/lotes", label: "Lotes", icon: PackageOpen },
     ],
   },
   {
