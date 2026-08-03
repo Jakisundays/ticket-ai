@@ -661,6 +661,22 @@ class PocketBaseClient:
                 PAYMENT_ORDERS_COLLECTION, _pb_filter_eq("process_id", process_id)
             )
             if existente:
+                # Si el registro existente estaba soft-eliminado y esta
+                # llamada no es en sí un soft-delete (no trae `deleted_at`
+                # en `campos`), es un nuevo intento real reutilizando la
+                # misma fila -- limpiar los campos de borrado explícitamente.
+                # Si no se limpian, una Orden de Pago real y vigente puede
+                # quedar marcada `deleted_at` heredado de un borrado previo,
+                # y el guardrail de eliminar_invoice (que solo bloquea el
+                # borrado de la factura si encuentra una payment_order
+                # activa, es decir sin deleted_at) deja de detectarla.
+                if existente.get("deleted_at") and "deleted_at" not in campos:
+                    campos = {
+                        **campos,
+                        "deleted_at": None,
+                        "deleted_by": None,
+                        "delete_reason": None,
+                    }
                 return self._update(PAYMENT_ORDERS_COLLECTION, existente["id"], campos)
             if not invoice:
                 app_logger.warning(

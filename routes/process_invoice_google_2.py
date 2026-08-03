@@ -1,7 +1,7 @@
 # FastAPI imports
 from fastapi import Form, APIRouter, HTTPException, UploadFile, File, Request, Header
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import logging
 import smtplib
 from email.mime.text import MIMEText
@@ -15,6 +15,7 @@ import shutil
 import json
 import base64
 import asyncio
+import threading
 import hashlib
 import ssl
 import mimetypes
@@ -62,6 +63,7 @@ from utils.bas_config import (
     BAS_IMPUTACION_CONTABLE_PROVEEDORES,
     METODO_PAGO_ARRAY_BAS,
 )
+from utils.validaciones_pre_bas import validar_factura_antes_de_pago_real
 import google.auth.transport.requests as google_auth_requests
 
 load_dotenv()
@@ -83,6 +85,33 @@ router = APIRouter(prefix="/gemini2")
 PROCESSING_SEMAPHORE = asyncio.Semaphore(
     min(int(os.getenv("INVOICY_MAX_CONCURRENT_PROCESSING", "1")), 2)
 )
+
+# Lock en memoria de proceso, keyed por proveedor+comprobante externo, para
+# serializar la secuencia "GET ConsultaComprobantesExternos -> si no existe,
+# POST ComprobantesCompra" (dentro de BasClient.crear_orden_de_pago_desde_factura).
+# Sin esto, dos invocaciones concurrentes para LA MISMA factura -- worker()
+# automático, /retry-op, /payment-orders/create, o un ítem de importación
+# masiva -- podrían ambas leer "no existe" antes de que cualquiera confirme
+# su alta, duplicando el comprobante en BAS. threading.Lock (no asyncio.Lock)
+# a propósito: se usa tanto desde código sync (procesar_factura_en_bas) como
+# desde endpoints async, sin necesitar volver ese método async. Hoy esta
+# condición de carrera ya está mitigada de hecho porque los llamados HTTP a
+# BAS (utils/bas.py, librería `requests`) son bloqueantes y con un solo
+# worker de uvicorn no hay interleaving real -- este lock es la protección
+# explícita para que eso siga siendo cierto aunque cambie el despliegue
+# (más workers, o si se offloadea a un threadpool para no bloquear el loop).
+_comprobante_locks: Dict[str, threading.Lock] = {}
+_comprobante_locks_guard = threading.Lock()
+
+
+def _lock_comprobante(proveedor_codigo, prefijo_externo, numero_externo) -> threading.Lock:
+    clave = f"{proveedor_codigo}:{prefijo_externo}:{numero_externo}"
+    with _comprobante_locks_guard:
+        lock = _comprobante_locks.get(clave)
+        if lock is None:
+            lock = threading.Lock()
+            _comprobante_locks[clave] = lock
+        return lock
 
 
 # Encabezados de la pestaña de ítems (una fila por ítem de factura).
@@ -1611,27 +1640,28 @@ class InvoiceOrchestrator:
                 "Items": items_bas,
             }
 
-            flujo = self._bas_client.crear_orden_de_pago_desde_factura(
-                empresa=BAS_EMPRESA,
-                sucursal=BAS_SUCURSAL,
-                comprobante_factura="MA",
-                prefijo_externo=prefijo_externo,
-                numero_externo=numero_externo,
-                importe=total_gravado,
-                fecha_externo=comprobante.get("fecha_emision"),
-                prefijo_op=BAS_PREFIJO_TALONARIO_OP,
-                caja_op=BAS_CAJA,
-                prefijo_ctacte="P",
-                codigo_ctacte=proveedor.get("Codigo"),
-                # Medio de pago "1" (efectivo): candidato identificado en la
-                # investigación previa (pasó la validación de existencia contra
-                # BAS a diferencia de otros códigos probados). No hay endpoint
-                # que exponga el catálogo real -- ver docs/bas-orden-de-pago-research.md.
-                pagos={"Efectivos": [{"MedioPago": "1", "Importe": total_gravado, "IngresooEgreso": "E"}]},
-                comprobante_compra_payload=comprobante_compra_payload,
-                imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
-                dry_run=dry_run,
-            )
+            with _lock_comprobante(proveedor.get("Codigo"), prefijo_externo, numero_externo):
+                flujo = self._bas_client.crear_orden_de_pago_desde_factura(
+                    empresa=BAS_EMPRESA,
+                    sucursal=BAS_SUCURSAL,
+                    comprobante_factura="MA",
+                    prefijo_externo=prefijo_externo,
+                    numero_externo=numero_externo,
+                    importe=total_gravado,
+                    fecha_externo=comprobante.get("fecha_emision"),
+                    prefijo_op=BAS_PREFIJO_TALONARIO_OP,
+                    caja_op=BAS_CAJA,
+                    prefijo_ctacte="P",
+                    codigo_ctacte=proveedor.get("Codigo"),
+                    # Medio de pago "1" (efectivo): candidato identificado en la
+                    # investigación previa (pasó la validación de existencia contra
+                    # BAS a diferencia de otros códigos probados). No hay endpoint
+                    # que exponga el catálogo real -- ver docs/bas-orden-de-pago-research.md.
+                    pagos={"Efectivos": [{"MedioPago": "1", "Importe": total_gravado, "IngresooEgreso": "E"}]},
+                    comprobante_compra_payload=comprobante_compra_payload,
+                    imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
+                    dry_run=dry_run,
+                )
             resultado["comprobante"] = flujo.get("factura")
             resultado["orden_pago"] = flujo.get("orden_pago")
             if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
@@ -2797,18 +2827,40 @@ async def webhook_endpoint(request: Request):
 
 @router.post(
     "/retry-op/{process_id}",
-    summary="Reintentar la Orden de Pago en BAS para una factura ya procesada",
+    summary="Reintentar la SIMULACIÓN (dry-run) de Orden de Pago del pipeline automático",
     tags=["Procesamiento de facturas"],
-    response_description="Resultado del reintento de la orden de pago.",
+    response_description="Resultado del reintento de la simulación de orden de pago.",
 )
 async def retry_orden_pago(process_id: str):
     """
-    Reintenta SOLO el paso de Orden de Pago en BAS para un `process_id` que ya
-    pasó por InvoiceOrchestrator.worker() (o por /process-invoice) y quedó con
-    la factura registrada pero la OP sin resolver.
+    ⚠️ ESTE ENDPOINT NUNCA ESCRIBE UNA ORDEN DE PAGO REAL EN BAS. Reintenta
+    SOLO la simulación (dry_run=True, hardcodeado a propósito) del paso de
+    Orden de Pago que corre automáticamente en InvoiceOrchestrator.worker()
+    (o en /process-invoice) -- sirve para refrescar `bas_processing_status`
+    cuando esa simulación falló por un motivo transitorio (BAS caído,
+    timeout, etc.), NO para resolver una Orden de Pago real atascada.
 
-    Idempotente: si `orden_pago_status` ya es "success", NO se reintenta --
-    se devuelve 200 informando que ya estaba resuelta.
+    Para generar o reintentar un pago REAL, usar
+    POST /payment-orders/{process_id}/create -- ese es el ÚNICO endpoint
+    donde `dry_run` pasa a False, y ya es idempotente (no crea una segunda
+    OP real si `payment_orders.status` ya es "success") y reporta
+    explícitamente si una OP real quedó creada en BAS sin aplicar
+    (`_op_sin_aplicar`, para reconciliar a mano -- NO reintentar ciegamente
+    ahí tampoco).
+
+    Por qué `dry_run` está hardcodeado en `True` y no se expone como
+    parámetro: el payload que arma este endpoint es deliberadamente mínimo
+    (no reconstruye Items/CentroApropiacion/etc., y el medio de pago viene
+    fijo como "Efectivos") -- si se pusiera dry_run=False acá, cualquier
+    factura que en realidad debía pagarse por transferencia/cheque/tarjeta
+    terminaría con una Orden de Pago real registrada como pago en EFECTIVO,
+    que es peor que el estado actual (simulación inerte). El fix correcto
+    para "reintentar un pago real" es siempre por `/payment-orders/create`,
+    que sí arma el payload completo y respeta el método de pago elegido.
+
+    Idempotente: si `orden_pago_status` ya es "success" (de una simulación
+    previa), NO se reintenta -- se devuelve 200 informando que ya estaba
+    resuelta.
 
     No reconstruye el payload completo de ComprobantesCompra (solo el mínimo:
     proveedor_codigo, comprobante_prefijo/numero, total): asume que la factura
@@ -2816,13 +2868,6 @@ async def retry_orden_pago(process_id: str):
     `registrar_si_no_existe=False`, así que si por algún motivo la factura NO
     está en BAS, esto falla explícito en vez de registrar una factura
     reconstruida a medias con datos incompletos.
-
-    `dry_run`: se usa el MISMO valor que hoy usa worker() al llamar
-    procesar_factura_en_bas() -- ese código NO pasa el argumento `dry_run`
-    explícito, por lo que corre con el default `True` de esa función (ver
-    docstring de InvoiceOrchestrator.procesar_factura_en_bas()). Replicamos
-    ese mismo default acá a propósito, para no cambiar de comportamiento
-    respecto al flujo de producción actual.
     """
     status = orchestrator._pb_client.get_bas_processing_status(process_id)
     if status is None:
@@ -2843,7 +2888,12 @@ async def retry_orden_pago(process_id: str):
             "success": True,
             "process_id": process_id,
             "already_resolved": True,
-            "message": "La orden de pago ya estaba resuelta (success); no se reintenta.",
+            "dry_run": True,
+            "message": (
+                "La SIMULACIÓN de orden de pago ya estaba resuelta (success); no se "
+                "reintenta. Esto no implica que exista una Orden de Pago real en BAS -- "
+                "para eso usar /payment-orders/{process_id}/create."
+            ),
             "bas_processing_status": status,
         }
 
@@ -2872,24 +2922,25 @@ async def retry_orden_pago(process_id: str):
 
     resultado = {"orden_pago": None, "error": None}
     try:
-        flujo = orchestrator._bas_client.crear_orden_de_pago_desde_factura(
-            empresa=BAS_EMPRESA,
-            sucursal=BAS_SUCURSAL,
-            comprobante_factura="MA",
-            prefijo_externo=prefijo_externo,
-            numero_externo=numero_externo,
-            importe=total,
-            fecha_externo=invoice.get("fecha_emision"),
-            prefijo_op=BAS_PREFIJO_TALONARIO_OP,
-            caja_op=BAS_CAJA,
-            prefijo_ctacte="P",
-            codigo_ctacte=proveedor_codigo,
-            pagos={"Efectivos": [{"MedioPago": "1", "Importe": total, "IngresooEgreso": "E"}]},
-            comprobante_compra_payload=None,
-            imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
-            registrar_si_no_existe=False,
-            dry_run=True,
-        )
+        with _lock_comprobante(proveedor_codigo, prefijo_externo, numero_externo):
+            flujo = orchestrator._bas_client.crear_orden_de_pago_desde_factura(
+                empresa=BAS_EMPRESA,
+                sucursal=BAS_SUCURSAL,
+                comprobante_factura="MA",
+                prefijo_externo=prefijo_externo,
+                numero_externo=numero_externo,
+                importe=total,
+                fecha_externo=invoice.get("fecha_emision"),
+                prefijo_op=BAS_PREFIJO_TALONARIO_OP,
+                caja_op=BAS_CAJA,
+                prefijo_ctacte="P",
+                codigo_ctacte=proveedor_codigo,
+                pagos={"Efectivos": [{"MedioPago": "1", "Importe": total, "IngresooEgreso": "E"}]},
+                comprobante_compra_payload=None,
+                imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
+                registrar_si_no_existe=False,
+                dry_run=True,
+            )
         resultado["orden_pago"] = flujo.get("orden_pago")
         if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
             _detalle = resultado["orden_pago"].get("detail")
@@ -2918,6 +2969,12 @@ async def retry_orden_pago(process_id: str):
         "success": resultado["error"] is None,
         "process_id": process_id,
         "already_resolved": False,
+        "dry_run": True,
+        "nota": (
+            "Esta es una simulación (dry_run) del pipeline automático, no una "
+            "escritura real en BAS. Para generar el pago real, usar "
+            "POST /payment-orders/{process_id}/create."
+        ),
         "orden_pago": resultado["orden_pago"],
         "error": resultado["error"],
         "bas_processing_status": actualizado or status,
@@ -3128,7 +3185,10 @@ async def reintentar_extraccion(
 
 class CrearOrdenPagoBody(BaseModel):
     metodo_pago: str
-    monto: Optional[float] = None
+    # gt=0: nunca 0 ni negativo -- ver validación adicional server-side más
+    # abajo, que además exige que no supere el total de la factura (permite
+    # pago parcial, nunca un sobre-pago).
+    monto: Optional[float] = Field(default=None, gt=0)
     requested_by: str  # id de PocketBase (colección "users"), lo resuelve el dashboard Next.js
     # Solo aplica a metodo_pago="cheque": número del cheque de TERCEROS que se
     # está endosando para pagar (BAS lo exige como NumeroExterno en el array
@@ -3187,10 +3247,50 @@ async def crear_orden_pago(
     if invoice.get("review_status") != "confirmed":
         raise HTTPException(status_code=409, detail="La factura todavía no fue confirmada.")
 
+    # Idempotencia PRIMERO, antes de cualquier re-derivación o validación:
+    # un doble click, un reintento de red del dashboard, o dos requests
+    # concurrentes no deben crear una SEGUNDA Orden de Pago real en BAS para
+    # la misma factura (pagaría al proveedor dos veces). Se chequea acá
+    # arriba de todo -- igual que ya hace retry_orden_pago con
+    # bas_processing_status -- para que una factura YA pagada corte de
+    # inmediato aunque sus datos hayan cambiado después (ej. quedó
+    # soft-eliminada): no tiene sentido re-validar ni re-derivar nada si el
+    # pago real ya existe y fue exitoso.
+    existente = orchestrator._pb_client.get_payment_order(process_id)
+    if existente and existente.get("status") == "success":
+        return {
+            "success": True,
+            "process_id": process_id,
+            "already_resolved": True,
+            "message": "La orden de pago ya fue creada y aplicada exitosamente (success); no se genera un pago duplicado.",
+            "payment_order": existente,
+        }
+
     status_bas = orchestrator._pb_client.get_bas_processing_status(process_id) or {}
-    proveedor_codigo = status_bas.get("proveedor_codigo")
+
+    # Re-derivar proveedor_codigo DESDE la factura actual (invoices), no
+    # desde bas_processing_status: ese registro se escribió durante el
+    # procesamiento automático (dry_run), ANTES de cualquier corrección
+    # humana hecha en la revisión. Si un revisor corrigió el CUIT del
+    # emisor, reusar el proveedor_codigo viejo pagaría/aplicaría el
+    # comprobante contra el proveedor equivocado. `_obtener_o_verificar_proveedor_bas`
+    # es idempotente (cachea por CUIT, busca o da de alta) -- volver a
+    # llamarlo acá es seguro. Ver docs/plan-validaciones-pre-bas.md, V5.2.
+    proveedor_actual = orchestrator._obtener_o_verificar_proveedor_bas(
+        invoice.get("emisor_cuit"), invoice.get("emisor_nombre", "")
+    )
+    proveedor_codigo = proveedor_actual.get("Codigo") if proveedor_actual else None
     if not proveedor_codigo:
-        raise HTTPException(status_code=422, detail="Falta proveedor_codigo (bas_processing_status).")
+        raise HTTPException(
+            status_code=422,
+            detail="No se pudo resolver el proveedor en BAS (falta o es inválido el CUIT del emisor).",
+        )
+    if status_bas.get("proveedor_codigo") and status_bas.get("proveedor_codigo") != proveedor_codigo:
+        app_logger.warning(
+            f"[{process_id}] crear-orden-pago: proveedor_codigo re-derivado ({proveedor_codigo}) "
+            f"difiere del guardado en bas_processing_status ({status_bas.get('proveedor_codigo')}) -- "
+            "probablemente el CUIT del emisor fue corregido durante la revisión."
+        )
 
     metodo_bas = orchestrator._pb_client.get_payment_method(body.metodo_pago)
     if metodo_bas is None or not metodo_bas.get("bas_medio_pago_codigo"):
@@ -3200,6 +3300,18 @@ async def crear_orden_pago(
         )
 
     monto = body.monto if body.monto is not None else invoice.get("total")
+    total_factura = invoice.get("total")
+    # Tolerancia de 1 centavo por redondeo de floats -- nunca se permite un
+    # sobre-pago real (pagar más de lo que la factura vale). Un pago parcial
+    # SÍ es un caso de uso válido (monto < total_factura a propósito).
+    if monto is not None and total_factura is not None and monto > float(total_factura) + 0.01:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"El monto a pagar (${monto}) supera el total de la factura (${total_factura}). "
+                "Verificá el monto antes de generar la orden de pago."
+            ),
+        )
     fecha_pago = datetime.date.today().isoformat()
     medio_pago_codigo = metodo_bas["bas_medio_pago_codigo"]
 
@@ -3264,13 +3376,36 @@ async def crear_orden_pago(
     # InvoiceOrchestrator.procesar_factura_en_bas, pero leyendo invoice_items
     # DE POCKETBASE en vez de la extracción original de Gemini.
     items = orchestrator._pb_client.get_invoice_items(invoice["id"])
+
+    # Gate de validaciones críticas (ver docs/plan-validaciones-pre-bas.md,
+    # Etapa 0) ANTES de escribir dinero real. Se corre acá y no en el flujo
+    # automático porque procesar_factura_en_bas siempre corre en dry_run --
+    # este es el único punto donde vale la pena bloquear.
+    errores_validacion = validar_factura_antes_de_pago_real(invoice, items)
+    if errores_validacion:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": "La factura tiene datos que deben corregirse antes de generar el pago.",
+                "validaciones": errores_validacion,
+            },
+        )
+
     items_bas = []
     for it in items:
         _importe_gravado = round(float(it.get("precio_total", 0) or 0), 2)
         _tasa_iva = 21
+        # Recalcular SIEMPRE desde `categoria` actual, no confiar en
+        # `bas_codigo_item` guardado: ese campo se calculó una sola vez al
+        # persistir la factura originalmente. Si un revisor corrigió la
+        # categoría del ítem durante la revisión humana, `bas_codigo_item`
+        # queda desincronizado y el gasto se imputaría contablemente mal
+        # pese a que ya se corrigió en el dashboard. Ver
+        # docs/plan-validaciones-pre-bas.md, V5.2b.
+        codigo_item_actual = codigo_item_de_categoria(it.get("categoria", ""))
         items_bas.append(
             {
-                "CodigoItem": it.get("bas_codigo_item"),
+                "CodigoItem": codigo_item_actual,
                 "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
                 "NumeroUnidadMedida": "1",
                 "CantidadPrimeraUnidad": it.get("cantidad", 1),
@@ -3301,8 +3436,30 @@ async def crear_orden_pago(
     # (el importe de la orden de pago en sí) -- es un concepto aparte, puede
     # ser un pago parcial de esta factura, no necesariamente igual al Total
     # del comprobante.
-    prefijo_externo = status_bas.get("comprobante_prefijo")
-    numero_externo = status_bas.get("comprobante_numero")
+    # Igual criterio que proveedor_codigo más arriba: re-parsear DESDE
+    # invoice.numero_comprobante (el dato actual, post-revisión) en vez de
+    # confiar en el prefijo/número cacheados en bas_processing_status, que
+    # pueden haber quedado desactualizados si un revisor corrigió el número
+    # de comprobante durante la revisión. Ya se validó arriba
+    # (validar_factura_antes_de_pago_real) que numero_comprobante tiene un
+    # formato parseable -- este parseo no debería caer nunca en el fallback.
+    prefijo_externo, numero_externo = _extraer_prefijo_numero_comprobante_externo(
+        {"numero": invoice.get("numero_comprobante")}
+    )
+    if (
+        status_bas.get("comprobante_prefijo")
+        and (
+            status_bas.get("comprobante_prefijo") != prefijo_externo
+            or status_bas.get("comprobante_numero") != numero_externo
+        )
+    ):
+        app_logger.warning(
+            f"[{process_id}] crear-orden-pago: numeración externa re-derivada "
+            f"({prefijo_externo}-{numero_externo}) difiere de la guardada en "
+            f"bas_processing_status ({status_bas.get('comprobante_prefijo')}-"
+            f"{status_bas.get('comprobante_numero')}) -- probablemente el número de "
+            "comprobante fue corregido durante la revisión."
+        )
     comprobante_compra_payload = {
         "Comprobante": "MA",
         "Prefijo": BAS_PREFIJO_TALONARIO_MA,
@@ -3331,7 +3488,9 @@ async def crear_orden_pago(
         "Items": items_bas,
     }
 
-    existente = orchestrator._pb_client.get_payment_order(process_id)
+    # `existente` ya se obtuvo arriba de todo (chequeo de idempotencia) --
+    # no se vuelve a pedir acá para no correr el riesgo de una carrera entre
+    # ambas lecturas; se reusa la misma referencia.
     retry_count = 0 if existente is None else (existente.get("retry_count") or 0) + 1
     ahora = datetime.datetime.utcnow().isoformat() + "Z"
 
@@ -3349,24 +3508,25 @@ async def crear_orden_pago(
 
     resultado = {"orden_pago": None, "error": None}
     try:
-        flujo = orchestrator._bas_client.crear_orden_de_pago_desde_factura(
-            empresa=BAS_EMPRESA,
-            sucursal=BAS_SUCURSAL,
-            comprobante_factura="MA",
-            prefijo_externo=prefijo_externo,
-            numero_externo=numero_externo,
-            importe=monto,
-            fecha_externo=invoice.get("fecha_emision"),
-            prefijo_op=BAS_PREFIJO_TALONARIO_OP,
-            caja_op=BAS_CAJA,
-            prefijo_ctacte="P",
-            codigo_ctacte=proveedor_codigo,
-            pagos=pagos,
-            comprobante_compra_payload=comprobante_compra_payload,
-            imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
-            registrar_si_no_existe=True,
-            dry_run=False,
-        )
+        with _lock_comprobante(proveedor_codigo, prefijo_externo, numero_externo):
+            flujo = orchestrator._bas_client.crear_orden_de_pago_desde_factura(
+                empresa=BAS_EMPRESA,
+                sucursal=BAS_SUCURSAL,
+                comprobante_factura="MA",
+                prefijo_externo=prefijo_externo,
+                numero_externo=numero_externo,
+                importe=monto,
+                fecha_externo=invoice.get("fecha_emision"),
+                prefijo_op=BAS_PREFIJO_TALONARIO_OP,
+                caja_op=BAS_CAJA,
+                prefijo_ctacte="P",
+                codigo_ctacte=proveedor_codigo,
+                pagos=pagos,
+                comprobante_compra_payload=comprobante_compra_payload,
+                imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
+                registrar_si_no_existe=True,
+                dry_run=False,
+            )
         resultado["orden_pago"] = flujo.get("orden_pago")
         if isinstance(resultado["orden_pago"], dict) and resultado["orden_pago"].get("_error"):
             detalle = resultado["orden_pago"].get("detail")
