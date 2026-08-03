@@ -30,12 +30,28 @@ export default async function InvoicesPage() {
   // (InvoiceReviewForm.tsx, al confirmar). Todo lo anterior a eso
   // (pending/processing/error, o completed sin confirmar) vive solo en
   // /queue.
+  //
+  // Además, una vez que se crea una Orden de Pago (real, dry_run=False) para
+  // la factura, esta deja de listarse acá y pasa a vivir solo en /payment-orders
+  // -- cada factura tiene una sola pantalla "hogar" según su etapa, en vez de
+  // aparecer en Facturas Y en Órdenes de pago al mismo tiempo. El filtro de
+  // back-relation `payment_orders_via_invoice.id = ""` tiene una
+  // particularidad real de PocketBase: cuando NO hay ninguna fila
+  // relacionada, se evalúa como verdadero igual (JOIN con NULL) -- por eso
+  // no alcanza con `payment_orders_via_invoice.deleted_at != ""` solo (eso
+  // excluiría también a las facturas sin ninguna orden). La combinación con
+  // `||` cubre los dos casos que SÍ queremos mostrar: "no tiene ninguna
+  // orden" O "la que tiene está soft-eliminada" -- verificado con datos
+  // reales antes de escribir esto (ver docs/plan-validaciones-pre-bas.md
+  // para el patrón de verificar filtros de PocketBase empíricamente en vez
+  // de asumir la sintaxis).
   let items: InvoiceListItemExpand[] | null = null;
   try {
     const result = await pb
       .collection<InvoiceListItemExpand>(Collections.Invoices)
       .getList(1, 50, {
-        filter: 'review_status = "confirmed" && deleted_at = ""',
+        filter:
+          'review_status = "confirmed" && deleted_at = "" && (payment_orders_via_invoice.deleted_at != "" || payment_orders_via_invoice.id = "")',
         sort: "-created",
         expand: "bas_processing_status_via_invoice",
       });
