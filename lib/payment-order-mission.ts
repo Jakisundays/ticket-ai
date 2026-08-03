@@ -89,6 +89,34 @@ export function computeMissionSteps(
  *     Son la única forma de distinguir en qué paso se cortó, porque BAS no
  *     expone nombres de stored procedure en la respuesta de la API REST.
  */
+/**
+ * El `detail` de un HTTPException de FastAPI normalmente es un string, pero
+ * el gate de validaciones pre-BAS (routes/process_invoice_google_2.py,
+ * validar_factura_antes_de_pago_real) lo manda como un objeto
+ * {mensaje, validaciones: string[]} para poder listar cada motivo por
+ * separado. Sin esto, ese caso caía en el fallback genérico "Faltan datos
+ * para crear la orden de pago." en vez de mostrar el motivo real (ej. "Falta
+ * el CAE de esta factura...") -- fue exactamente lo que pasó con la factura
+ * de CENCOSUD que expuso este bug.
+ */
+function extraerDetalleTexto(rawDetail: unknown): string | null {
+  if (typeof rawDetail === "string") return rawDetail;
+  if (rawDetail && typeof rawDetail === "object") {
+    const detailObj = rawDetail as Record<string, unknown>;
+    if (
+      Array.isArray(detailObj.validaciones) &&
+      detailObj.validaciones.every((v) => typeof v === "string")
+    ) {
+      const mensaje =
+        typeof detailObj.mensaje === "string"
+          ? detailObj.mensaje
+          : "La factura tiene datos que deben corregirse.";
+      return `${mensaje} ${(detailObj.validaciones as string[]).join(" · ")}`;
+    }
+  }
+  return null;
+}
+
 export function inferMissionOutcome(status: number, data: unknown): MissionOutcome {
   const body = (data ?? {}) as Record<string, unknown>;
 
@@ -111,7 +139,7 @@ export function inferMissionOutcome(status: number, data: unknown): MissionOutco
     return { success: false, failedStepIndex: 2, detailText: text };
   }
 
-  const detail = typeof body.detail === "string" ? body.detail : null;
+  const detail = extraerDetalleTexto(body.detail);
 
   if (status === 409) {
     return { success: false, failedStepIndex: 0, detailText: detail ?? "La factura todavía no fue confirmada." };

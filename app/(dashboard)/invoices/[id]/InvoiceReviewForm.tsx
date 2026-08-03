@@ -11,7 +11,8 @@ import {
   type InvoiceItemsRecord,
   type InvoicesRecord,
 } from "@/lib/pocketbase-types";
-import { formatCurrency } from "@/lib/format";
+import { formatCurrency, formatRelativeDateTime } from "@/lib/format";
+import { validarFacturaParaConfirmar } from "@/lib/invoice-validation";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -139,19 +140,28 @@ export default function InvoiceReviewForm({
   // bruto; vs. una factura de un solo producto donde el ítem viene neto,
   // sumando exacto contra `subtotal`). Ambos son resultados de extracción
   // válidos -- lo único que indica un error real es que la suma de ítems no
-  // cierre contra NINGUNO de los dos.
-  const itemsTotal = items.reduce((sum, item) => sum + (itemDrafts[item.id]?.precio_total ?? 0), 0);
-  const TOLERANCIA = 0.05;
-  const coincideConSubtotal =
-    invoiceDraft.subtotal > 0 && Math.abs(itemsTotal - invoiceDraft.subtotal) <= TOLERANCIA;
-  const coincideConTotal =
-    invoiceDraft.total > 0 && Math.abs(itemsTotal - invoiceDraft.total) <= TOLERANCIA;
-  // Si ninguno de los dos campos de referencia existe (factura vieja, o
-  // extracción incompleta) no hay contra qué verificar -- preferimos no
-  // mostrar nada a comparar contra una base en 0.
-  const hayBaseParaVerificar = invoiceDraft.subtotal > 0 || invoiceDraft.total > 0;
-  const itemsTotalMismatch =
-    items.length > 0 && hayBaseParaVerificar && !coincideConSubtotal && !coincideConTotal;
+  // cierre contra NINGUNO de los dos. Ver lib/invoice-validation.ts para el
+  // detalle -- son las mismas 6 reglas que ya bloquean el pago real
+  // (Invoicy/utils/validaciones_pre_bas.py) y que la barrera real de
+  // confirmación (ticket-ai-infra/pocketbase/pb_hooks/invoices.pb.js).
+  const itemsForValidation = useMemo(
+    () =>
+      items.map((item) => {
+        const draft = itemDrafts[item.id];
+        return {
+          id: item.id,
+          cantidad: draft.cantidad,
+          precio_unitario: draft.precio_unitario,
+          precio_total: draft.precio_total,
+        };
+      }),
+    [items, itemDrafts]
+  );
+  const validation = useMemo(
+    () => validarFacturaParaConfirmar(invoiceDraft, itemsForValidation),
+    [invoiceDraft, itemsForValidation]
+  );
+  const itemsTotal = itemsForValidation.reduce((sum, item) => sum + item.precio_total, 0);
 
   async function handleConfirm() {
     setStatus("saving");
@@ -217,7 +227,7 @@ export default function InvoiceReviewForm({
       const isConfirmShortcut = (event.metaKey || event.ctrlKey) && isEnterKey;
       if (isConfirmShortcut) {
         event.preventDefault();
-        if (status !== "saving") handleConfirm();
+        if (status !== "saving" && validation.isValid) handleConfirm();
         return;
       }
 
@@ -240,27 +250,41 @@ export default function InvoiceReviewForm({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, nextInvoiceId, prevInvoiceId]);
+  }, [status, nextInvoiceId, prevInvoiceId, validation.isValid]);
 
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto px-7 py-5">
       <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
         <h2 className="mb-4 text-[13px] font-semibold text-foreground">Datos de la factura</h2>
+        {!validation.isValid && (
+          <p className="mb-4 flex items-start gap-1.5 rounded-sm bg-status-destructive-bg px-2.5 py-2 text-xs font-medium text-status-destructive-fg">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            <span>
+              Faltan {validation.messages.length} dato{validation.messages.length === 1 ? "" : "s"} obligatorio
+              {validation.messages.length === 1 ? "" : "s"} para poder generar el pago después: {validation.messages.join(" · ")}.
+            </span>
+          </p>
+        )}
         <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
-          <TextField label="Número de comprobante" value={invoiceDraft.numero_comprobante} onChange={(v) => setInvoiceField("numero_comprobante", v)} mono />
-          <TextField label="Fecha de emisión" value={invoiceDraft.fecha_emision} onChange={(v) => setInvoiceField("fecha_emision", v)} />
+          <Field label="Subida el">
+            <p className="flex h-9 items-center text-[13.5px] font-medium text-foreground">
+              {formatRelativeDateTime(invoice.created)}
+            </p>
+          </Field>
+          <TextField label="Número de comprobante" value={invoiceDraft.numero_comprobante} onChange={(v) => setInvoiceField("numero_comprobante", v)} mono error={validation.fieldErrors.numero_comprobante} />
+          <TextField label="Fecha de emisión" value={invoiceDraft.fecha_emision} onChange={(v) => setInvoiceField("fecha_emision", v)} error={validation.fieldErrors.fecha_emision} />
           <TextField label="Tipo" value={invoiceDraft.tipo_comprobante} onChange={(v) => setInvoiceField("tipo_comprobante", v)} />
           <TextField label="Subtipo" value={invoiceDraft.subtipo_comprobante} onChange={(v) => setInvoiceField("subtipo_comprobante", v)} />
           <TextField label="Emisor" value={invoiceDraft.emisor_nombre} onChange={(v) => setInvoiceField("emisor_nombre", v)} />
-          <TextField label="CUIT emisor" value={invoiceDraft.emisor_cuit} onChange={(v) => setInvoiceField("emisor_cuit", v)} mono />
+          <TextField label="CUIT emisor" value={invoiceDraft.emisor_cuit} onChange={(v) => setInvoiceField("emisor_cuit", v)} mono error={validation.fieldErrors.emisor_cuit} />
           <TextField label="Receptor" value={invoiceDraft.receptor_nombre} onChange={(v) => setInvoiceField("receptor_nombre", v)} />
           <TextField label="CUIT receptor" value={invoiceDraft.receptor_cuit} onChange={(v) => setInvoiceField("receptor_cuit", v)} mono />
           <TextField label="Forma de pago" value={invoiceDraft.forma_pago} onChange={(v) => setInvoiceField("forma_pago", v)} />
-          <TextField label="Moneda" value={invoiceDraft.moneda} onChange={(v) => setInvoiceField("moneda", v)} />
+          <TextField label="Moneda" value={invoiceDraft.moneda} onChange={(v) => setInvoiceField("moneda", v)} error={validation.fieldErrors.moneda} />
           <NumberField label="Subtotal" value={invoiceDraft.subtotal} onChange={(v) => setInvoiceField("subtotal", v)} />
           <NumberField label="Total" value={invoiceDraft.total} onChange={(v) => setInvoiceField("total", v)} />
-          <TextField label="CAE" value={invoiceDraft.cae} onChange={(v) => setInvoiceField("cae", v)} mono />
-          <TextField label="Vencimiento CAE" value={invoiceDraft.cae_vencimiento} onChange={(v) => setInvoiceField("cae_vencimiento", v)} />
+          <TextField label="CAE" value={invoiceDraft.cae} onChange={(v) => setInvoiceField("cae", v)} mono error={validation.fieldErrors.cae} />
+          <TextField label="Vencimiento CAE" value={invoiceDraft.cae_vencimiento} onChange={(v) => setInvoiceField("cae_vencimiento", v)} error={validation.fieldErrors.cae_vencimiento} />
         </div>
       </section>
 
@@ -280,6 +304,7 @@ export default function InvoiceReviewForm({
           <TableBody>
             {items.map((item) => {
               const draft = itemDrafts[item.id];
+              const itemError = validation.itemErrors[item.id];
               return (
                 <TableRow key={item.id} className="hover:bg-transparent">
                   <TableCell className="p-1.5 align-middle">
@@ -313,7 +338,11 @@ export default function InvoiceReviewForm({
                       step="0.01"
                       value={draft.precio_total}
                       onChange={(e) => setItemField(item.id, "precio_total", Number(e.target.value))}
-                      className="h-8 w-24 text-right font-mono"
+                      title={itemError}
+                      className={cn(
+                        "h-8 w-24 text-right font-mono",
+                        itemError && "border-destructive focus-visible:ring-destructive/40"
+                      )}
                     />
                   </TableCell>
                   <TableCell className="p-1.5 align-middle">
@@ -353,8 +382,8 @@ export default function InvoiceReviewForm({
             <p className="text-xs text-muted-foreground">
               La categoría define el código BAS automáticamente al guardar.
             </p>
-            {itemsTotalMismatch && (
-              <p className="flex items-center gap-1.5 rounded-sm bg-status-warning-bg px-2.5 py-1 text-xs font-medium text-status-warning-fg">
+            {validation.itemsSummaryError && (
+              <p className="flex items-center gap-1.5 rounded-sm bg-status-destructive-bg px-2.5 py-1 text-xs font-medium text-status-destructive-fg">
                 <AlertTriangle className="size-3.5 shrink-0" />
                 Los ítems suman {formatCurrency(itemsTotal, invoiceDraft.moneda)} -- no coincide ni con el subtotal
                 ({formatCurrency(invoiceDraft.subtotal, invoiceDraft.moneda)}) ni con el total{" "}
@@ -383,7 +412,8 @@ export default function InvoiceReviewForm({
           <Button
             type="button"
             onClick={handleConfirm}
-            disabled={status === "saving"}
+            disabled={status === "saving" || !validation.isValid}
+            title={!validation.isValid ? "Completá los datos obligatorios marcados arriba antes de confirmar." : undefined}
             className="h-9 gap-2 px-4"
           >
             {status === "saving" && <Loader2 className="size-3.5 animate-spin" />}
@@ -411,19 +441,25 @@ function TextField({
   value,
   onChange,
   mono = false,
+  error,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   mono?: boolean;
+  error?: string | null;
 }) {
   return (
-    <Field label={label}>
+    <Field label={label} error={error}>
       <Input
         type="text"
         value={value ?? ""}
         onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
-        className={cn("h-9", mono && "font-mono text-[13px]")}
+        className={cn(
+          "h-9",
+          mono && "font-mono text-[13px]",
+          error && "border-destructive focus-visible:ring-destructive/40"
+        )}
       />
     </Field>
   );
@@ -451,11 +487,20 @@ function NumberField({
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({
+  label,
+  children,
+  error,
+}: {
+  label: string;
+  children: ReactNode;
+  error?: string | null;
+}) {
   return (
     <label className="flex flex-col gap-1.5">
       <span className="overline text-[11px] text-muted-foreground">{label}</span>
       {children}
+      {error && <span className="text-[11.5px] font-medium text-destructive">{error}</span>}
     </label>
   );
 }

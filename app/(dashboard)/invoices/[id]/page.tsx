@@ -26,7 +26,7 @@ import {
   type InvoiceItemsRecord,
   type InvoiceWithItemsExpand,
 } from "@/lib/pocketbase-types";
-import { formatCurrency, formatDate, driveFileUrl } from "@/lib/format";
+import { formatCurrency, formatDate, formatRelativeDateTime, driveFileUrl } from "@/lib/format";
 import PageHeader from "@/components/PageHeader";
 
 export const dynamic = "force-dynamic";
@@ -308,6 +308,7 @@ export default async function InvoiceDetailPage({
                     {invoice.process_id}
                   </code>
                 </Field>
+                <Field label="Subida el">{formatRelativeDateTime(invoice.created)}</Field>
                 <Field label="Confirmada el">
                   {invoice.confirmed_at ? formatDate(invoice.confirmed_at) : "—"}
                   {confirmedByEmail ? ` · ${confirmedByEmail}` : ""}
