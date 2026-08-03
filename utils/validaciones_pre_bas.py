@@ -138,6 +138,35 @@ def validar_monto_vs_total(monto: Optional[float], total_factura: Optional[float
     return None
 
 
+def validar_monto_aplicable_vs_neto(monto: Optional[float], total_gravado: Optional[float]) -> Optional[str]:
+    """BAS solo admite registrar el vencimiento de un comprobante por el neto
+    (total_gravado, sin IVA): ImporteTotal de cada ítem se manda siempre
+    igual a ImporteGravado (si no, BAS rechaza la línea con 409 "no son
+    consistentes"), y esa regla deja matemáticamente forzados a "Total" y
+    "Vencimientos" al neto también (confirmado con pruebas reales,
+    2026-08-03 -- ver comentarios en process_invoice_google_2.py). Aplicar
+    un monto mayor al neto SIEMPRE dispara 409 "el saldo del vencimiento no
+    puede ser negativo" DESPUÉS de haber creado ya la Orden de Pago real en
+    BAS: queda huérfana, sin aplicar, y hay que reconciliarla a mano.
+    Confirmado dos veces en producción sobre la misma factura (MEDINA FLOR
+    LUCIO DANIEL, 00003-00000021): OPs huérfanas 00001-00035009 y
+    00001-00035010. Bloquear acá, antes de escribir nada, evita seguir
+    generando OPs huérfanas mientras no esté resuelto cómo declarar/aplicar
+    la diferencia de IVA (ver docs/plan-validaciones-pre-bas.md)."""
+    if monto is None or total_gravado is None:
+        return None
+    if monto > float(total_gravado) + 0.01:
+        return (
+            f"No se puede aplicar ${monto}: BAS solo admite registrar el vencimiento de "
+            f"este comprobante por el neto (${total_gravado}, sin IVA). Aplicar el monto "
+            "bruto completo dejaría el saldo del vencimiento en negativo y BAS "
+            "rechazaría la aplicación después de haber creado ya la Orden de Pago real "
+            "(quedaría huérfana, sin aplicar, y habría que reconciliarla a mano en BAS). "
+            f"Por ahora, el máximo aplicable automáticamente es ${total_gravado}."
+        )
+    return None
+
+
 def validar_factura_antes_de_pago_real(invoice: dict, items: list) -> list:
     """
     Corre las validaciones críticas de datos de la factura (Etapa 0 del plan

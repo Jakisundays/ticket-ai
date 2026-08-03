@@ -63,7 +63,10 @@ from utils.bas_config import (
     BAS_IMPUTACION_CONTABLE_PROVEEDORES,
     METODO_PAGO_ARRAY_BAS,
 )
-from utils.validaciones_pre_bas import validar_factura_antes_de_pago_real
+from utils.validaciones_pre_bas import (
+    validar_factura_antes_de_pago_real,
+    validar_monto_aplicable_vs_neto,
+)
 import google.auth.transport.requests as google_auth_requests
 
 load_dotenv()
@@ -1622,6 +1625,14 @@ class InvoiceOrchestrator:
                 # ConsultaComprobantesExternos). Sin fecha hardcodeada: "hoy"
                 # siempre cae en el período contable abierto, sea cual sea.
                 "Fecha": datetime.date.today().isoformat(),
+                # "Total" == "TotalGravado" (NO total, que incluye IVA). Ver
+                # comentario largo equivalente en crear_orden_pago: se probó
+                # real (2026-08-03) mandar Total bruto y BAS lo rechazó,
+                # porque TAMBIÉN valida Total contra la suma de
+                # Items[].ImporteTotal (que acá siempre es neto, ver
+                # comentario en items_bas más arriba) -- "Total" queda
+                # matemáticamente forzado al neto mientras ImporteTotal se
+                # siga mandando igual a ImporteGravado.
                 "Total": total_gravado,
                 "TotalGravado": total_gravado,
                 "EmitidoPor": BAS_EMITIDO_POR_CAE,
@@ -1636,6 +1647,10 @@ class InvoiceOrchestrator:
                 "FechaComprobanteExterno": comprobante.get("fecha_emision"),
                 "NumeroCAIoCAE": otros.get("CAE"),
                 "VencimientoCAIoCAE": otros.get("vencimiento_CAE"),
+                # Importe = total_gravado (neto), NO total (bruto) -- tiene
+                # que coincidir con "Total" de la cabecera (ver comentario
+                # ahí arriba). Este flujo siempre corre en dry_run así que
+                # hoy no escribe nada real.
                 "Vencimientos": [{"FechaVencimiento": comprobante.get("fecha_emision"), "Importe": total_gravado}],
                 "Items": items_bas,
             }
@@ -3431,6 +3446,20 @@ async def crear_orden_pago(
     # lo confirmó. round(): idem, sumar floats sin redondear dispara 400
     # "must have not more than 5 decimals" en BAS.
     total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
+
+    # Gate real de negocio (no de calidad de datos, por eso separado del gate
+    # de arriba): BAS solo admite registrar/aplicar este comprobante por el
+    # neto -- ver el docstring de validar_monto_aplicable_vs_neto para el
+    # detalle completo y los dos casos reales (OPs huérfanas 00001-00035009
+    # y 00001-00035010) que confirmaron este límite. Corre DESPUÉS de
+    # total_gravado porque recién acá se conoce.
+    error_monto_neto = validar_monto_aplicable_vs_neto(monto, total_gravado)
+    if error_monto_neto:
+        raise HTTPException(
+            status_code=422,
+            detail={"mensaje": error_monto_neto, "validaciones": [error_monto_neto]},
+        )
+
     # Total (cabecera) == TotalGravado (no invoice.get("total"), que incluye
     # IVA) -- BAS calcula e imputa el IVA aparte, solo. NO se toca `monto`
     # (el importe de la orden de pago en sí) -- es un concepto aparte, puede
@@ -3470,6 +3499,20 @@ async def crear_orden_pago(
         # registrada tarde. FechaComprobanteExterno (abajo) sí lleva la fecha
         # real del documento.
         "Fecha": datetime.date.today().isoformat(),
+        # "Total" == "TotalGravado" (neto, NO invoice.total/monto que incluyen
+        # IVA). Se probó real (2026-08-03, factura de prueba Total=1) mandar
+        # "Total" bruto para que coincidiera con la suma de "Vencimientos"
+        # bruta -- BAS lo rechazó con un TERCER error: "Total" TAMBIÉN se
+        # valida contra la suma de Items[].ImporteTotal, que acá siempre es
+        # neto (ImporteTotal == ImporteGravado, ver comentario en items_bas).
+        # Mientras esa regla se mantenga (y romperla dispara el 409 "no son
+        # consistentes" ya documentado), "Total" queda matemáticamente
+        # forzado al neto -- no hay combinación de Total/Vencimientos que
+        # sea bruta y pase las tres validaciones de BAS a la vez. El bug real
+        # de MEDINA (saldo del vencimiento negativo) está en que se APLICABA
+        # `monto` (bruto) contra un Vencimiento que solo puede registrarse en
+        # neto -- ver el fix real más abajo, en el `importe` que se pasa a
+        # crear_orden_de_pago_desde_factura.
         "Total": total_gravado,
         "TotalGravado": total_gravado,
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
@@ -3484,6 +3527,12 @@ async def crear_orden_pago(
         "FechaComprobanteExterno": invoice.get("fecha_emision"),
         "NumeroCAIoCAE": invoice.get("cae"),
         "VencimientoCAIoCAE": invoice.get("cae_vencimiento"),
+        # Importe = total_gravado (neto) -- tiene que coincidir con "Total"
+        # de la cabecera (ver comentario ahí arriba: matemáticamente forzado
+        # al neto). ESTE es justo el límite que causó el bug real de MEDINA:
+        # más abajo se sigue aplicando `importe=monto` (bruto) contra este
+        # vencimiento (registrado en neto) -- eso es lo que hay que resolver
+        # todavía, no este campo. Ver docs/plan-validaciones-pre-bas.md.
         "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": total_gravado}],
         "Items": items_bas,
     }
