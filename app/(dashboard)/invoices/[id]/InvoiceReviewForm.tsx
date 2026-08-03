@@ -12,7 +12,7 @@ import {
   type InvoicesRecord,
 } from "@/lib/pocketbase-types";
 import { formatCurrency, formatRelativeDateTime } from "@/lib/format";
-import { validarFacturaParaConfirmar } from "@/lib/invoice-validation";
+import { validarFacturaParaConfirmar, fechaComoInputDate } from "@/lib/invoice-validation";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -272,7 +272,7 @@ export default function InvoiceReviewForm({
             </p>
           </Field>
           <TextField label="Número de comprobante" value={invoiceDraft.numero_comprobante} onChange={(v) => setInvoiceField("numero_comprobante", v)} mono error={validation.fieldErrors.numero_comprobante} />
-          <TextField label="Fecha de emisión" value={invoiceDraft.fecha_emision} onChange={(v) => setInvoiceField("fecha_emision", v)} error={validation.fieldErrors.fecha_emision} />
+          <DateField label="Fecha de emisión" value={invoiceDraft.fecha_emision} onChange={(v) => setInvoiceField("fecha_emision", v)} error={validation.fieldErrors.fecha_emision} />
           <TextField label="Tipo" value={invoiceDraft.tipo_comprobante} onChange={(v) => setInvoiceField("tipo_comprobante", v)} />
           <TextField label="Subtipo" value={invoiceDraft.subtipo_comprobante} onChange={(v) => setInvoiceField("subtipo_comprobante", v)} />
           <TextField label="Emisor" value={invoiceDraft.emisor_nombre} onChange={(v) => setInvoiceField("emisor_nombre", v)} />
@@ -284,7 +284,7 @@ export default function InvoiceReviewForm({
           <NumberField label="Subtotal" value={invoiceDraft.subtotal} onChange={(v) => setInvoiceField("subtotal", v)} />
           <NumberField label="Total" value={invoiceDraft.total} onChange={(v) => setInvoiceField("total", v)} />
           <TextField label="CAE" value={invoiceDraft.cae} onChange={(v) => setInvoiceField("cae", v)} mono error={validation.fieldErrors.cae} />
-          <TextField label="Vencimiento CAE" value={invoiceDraft.cae_vencimiento} onChange={(v) => setInvoiceField("cae_vencimiento", v)} error={validation.fieldErrors.cae_vencimiento} />
+          <DateField label="Vencimiento CAE" value={invoiceDraft.cae_vencimiento} onChange={(v) => setInvoiceField("cae_vencimiento", v)} error={validation.fieldErrors.cae_vencimiento} />
         </div>
       </section>
 
@@ -460,6 +460,37 @@ function TextField({
           mono && "font-mono text-[13px]",
           error && "border-destructive focus-visible:ring-destructive/40"
         )}
+      />
+    </Field>
+  );
+}
+
+function DateField({
+  label,
+  value,
+  onChange,
+  error,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  error?: string | null;
+}) {
+  // Input nativo type="date" -- calendario del navegador en vez de texto
+  // libre, y el formato que devuelve el picker (YYYY-MM-DD) ya es uno de
+  // los 3 que acepta la validación, así que editar acá normaliza a ISO de
+  // paso. fechaComoInputDate convierte facturas viejas en DD/MM/YYYY o
+  // DD-MM-YYYY (Gemini no estaba forzado a un formato único antes de esto)
+  // para que el picker las muestre en vez de aparecer vacío -- si no es
+  // parseable, queda vacío a propósito (ya se marca aparte con `error`, no
+  // se inventa una fecha).
+  return (
+    <Field label={label} error={error}>
+      <Input
+        type="date"
+        value={fechaComoInputDate(value)}
+        onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
+        className={cn("h-9", error && "border-destructive focus-visible:ring-destructive/40")}
       />
     </Field>
   );

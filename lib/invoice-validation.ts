@@ -54,7 +54,7 @@ export interface InvoiceValidationResult {
 // Mismo parseo manual que utils/validaciones_pre_bas.py e invoices.pb.js --
 // new Date(string) interpreta "01/08/2026" como MM/DD/YYYY (US), no como
 // DD/MM/YYYY (argentino), dando fechas silenciosamente equivocadas.
-function parsearFecha(valor: string | null | undefined): Date | null {
+export function parsearFecha(valor: string | null | undefined): Date | null {
   const texto = (valor || "").trim();
   if (!texto) return null;
 
@@ -71,6 +71,21 @@ function parsearFecha(valor: string | null | undefined): Date | null {
   }
 
   return null;
+}
+
+/**
+ * Convierte cualquiera de los 3 formatos aceptados (o ya ISO) al formato
+ * YYYY-MM-DD que exige <input type="date">. Facturas viejas con
+ * fecha_emision/cae_vencimiento en DD/MM/YYYY o DD-MM-YYYY (Gemini no
+ * estaba forzado a un formato único antes de esto) mostrarían el picker
+ * nativo en blanco si se le pasa el string crudo tal cual -- este helper
+ * evita esa pérdida de visibilidad. Si el valor no es parseable, devuelve
+ * "" (el picker queda vacío, honesto -- ya se marca aparte con
+ * fieldErrors, no se inventa una fecha).
+ */
+export function fechaComoInputDate(valor: string | null | undefined): string {
+  const fecha = parsearFecha(valor);
+  return fecha ? fecha.toISOString().slice(0, 10) : "";
 }
 
 export function validarFacturaParaConfirmar(
@@ -157,6 +172,18 @@ export function validarFacturaParaConfirmar(
     if ((subtotal > 0 || total > 0) && !coincideConSubtotal && !coincideConTotal) {
       itemsSummaryError = "La suma de los ítems no coincide ni con el subtotal ni con el total.";
       messages.push("Los ítems no cierran contra el subtotal/total");
+    } else if (total > 0 && total > suma + TOLERANCIA_TOTAL) {
+      // Límite real de BAS (no de calidad de datos, por eso separado del
+      // chequeo de arriba): crear_orden_pago (Invoicy) solo puede aplicar
+      // el neto (suma, sin IVA) contra el vencimiento que se registra en
+      // BAS -- ver validar_monto_aplicable_vs_neto en
+      // Invoicy/utils/validaciones_pre_bas.py y la misma regla en
+      // ticket-ai-infra/pocketbase/pb_hooks/invoices.pb.js (la barrera
+      // real). Este caso es justo "coincideConSubtotal=true" (ítems en
+      // neto, total en bruto con IVA) -- pasa el chequeo de arriba pero hoy
+      // no se puede pagar automáticamente el monto completo.
+      itemsSummaryError = `Esta factura tiene IVA (el total, $${total.toFixed(2)}, supera la suma de los ítems, $${suma.toFixed(2)}). Por ahora el sistema solo puede aplicar automáticamente el pago sin IVA.`;
+      messages.push("La factura tiene IVA -- todavía no se puede pagar automáticamente");
     }
   }
 
