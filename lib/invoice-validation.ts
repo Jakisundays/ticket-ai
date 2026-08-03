@@ -170,7 +170,7 @@ export function validarFacturaParaConfirmar(
     const coincideConSubtotal = subtotal > 0 && Math.abs(suma - subtotal) <= TOLERANCIA_TOTAL;
     const coincideConTotal = total > 0 && Math.abs(suma - total) <= TOLERANCIA_TOTAL;
     if ((subtotal > 0 || total > 0) && !coincideConSubtotal && !coincideConTotal) {
-      itemsSummaryError = "La suma de los ítems no coincide ni con el subtotal ni con el total.";
+      itemsSummaryError = `Los ítems suman $${suma.toFixed(2)} -- no coincide ni con el subtotal ($${subtotal.toFixed(2)}) ni con el total ($${total.toFixed(2)}).`;
       messages.push("Los ítems no cierran contra el subtotal/total");
     } else if (total > 0 && total > suma + TOLERANCIA_TOTAL) {
       // Límite real de BAS (no de calidad de datos, por eso separado del

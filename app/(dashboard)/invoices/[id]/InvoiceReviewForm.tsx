@@ -11,7 +11,7 @@ import {
   type InvoiceItemsRecord,
   type InvoicesRecord,
 } from "@/lib/pocketbase-types";
-import { formatCurrency, formatRelativeDateTime } from "@/lib/format";
+import { formatRelativeDateTime } from "@/lib/format";
 import { validarFacturaParaConfirmar, fechaComoInputDate } from "@/lib/invoice-validation";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
@@ -161,8 +161,6 @@ export default function InvoiceReviewForm({
     () => validarFacturaParaConfirmar(invoiceDraft, itemsForValidation),
     [invoiceDraft, itemsForValidation]
   );
-  const itemsTotal = itemsForValidation.reduce((sum, item) => sum + item.precio_total, 0);
-
   async function handleConfirm() {
     setStatus("saving");
     setError(null);
@@ -385,9 +383,7 @@ export default function InvoiceReviewForm({
             {validation.itemsSummaryError && (
               <p className="flex items-center gap-1.5 rounded-sm bg-status-destructive-bg px-2.5 py-1 text-xs font-medium text-status-destructive-fg">
                 <AlertTriangle className="size-3.5 shrink-0" />
-                Los ítems suman {formatCurrency(itemsTotal, invoiceDraft.moneda)} -- no coincide ni con el subtotal
-                ({formatCurrency(invoiceDraft.subtotal, invoiceDraft.moneda)}) ni con el total{" "}
-                ({formatCurrency(invoiceDraft.total, invoiceDraft.moneda)})
+                {validation.itemsSummaryError}
               </p>
             )}
           </div>
