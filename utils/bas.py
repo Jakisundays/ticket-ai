@@ -18,11 +18,12 @@ devuelve el payload SIN hacer el POST, para poder revisarlo antes de impactar el
 import os
 import time
 import logging
-import datetime
 import unicodedata
 from typing import Any, Optional
 
 import requests
+
+from utils.bas_config import fecha_hoy_bas
 
 app_logger = logging.getLogger("app_logger")
 
@@ -785,7 +786,11 @@ class BasClient:
         reconciliarla a mano en BAS. El caller NO debe reintentar el flujo
         completo a ciegas: crearía una segunda OP.
         """
-        fecha = fecha or datetime.date.today().isoformat()
+        # Fecha en huso argentino, NO datetime.date.today() (toma la del
+        # contenedor, hoy UTC) -- ver el comentario largo en
+        # utils/bas_config.py:ZONA_HORARIA_BAS sobre por qué esto importa acá
+        # específicamente (la Fecha de la Orden de Pago).
+        fecha = fecha or fecha_hoy_bas().isoformat()
 
         # 1) Validar factura por número externo.
         encontrada = self.consultar_comprobante_externo(
@@ -1124,7 +1129,7 @@ if __name__ == "__main__":
     payload = cli.construir_payload_orden_pago(
         empresa=1,
         sucursal=1,
-        fecha=datetime.date.today().isoformat(),
+        fecha=fecha_hoy_bas().isoformat(),  # huso argentino, ver bas_config.py
         total=104694.0,
         comprobantes_aplicados=[
             {"Comprobante": "MA", "Prefijo": "0001", "Numero": 99, "Importe": 104694.0}

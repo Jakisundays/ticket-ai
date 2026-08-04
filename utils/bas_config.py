@@ -28,21 +28,66 @@ esta instalación de BAS (PLATINUM HOMES es una residencia/centro de cuidado,
 no tiene bar) -- usarlas habría ensuciado la contabilidad real.
 """
 
+import datetime
 import logging
 import time
+from typing import Optional
+from zoneinfo import ZoneInfo
 
 app_logger = logging.getLogger("app_logger")
 
-# Fallback de último recurso -- confirmado contra el catálogo real de BAS.
+# El servidor de BAS valida ciertas reglas de negocio (ej. "la fecha de la
+# aplicación debe ser igual o superior a la de los comprobantes que se están
+# aplicando") contra SU PROPIO reloj de servidor -- no contra lo que le
+# mandemos en el campo "Fecha" del payload. Confirmado real, 2026-08-04: un
+# ComprobanteCompra registrado con `datetime.date.today()` calculado en el
+# contenedor (que corre en UTC) quedó con Fecha "de mañana" para BAS durante
+# la ventana diaria 00:00-03:00 UTC (21:00-23:59 en Argentina, donde corre
+# el servidor de BAS) -- la aplicación del pago se rechazó con 409
+# "SP_VALIDA_APLICACIONES" porque, en ese momento, el propio reloj de BAS
+# todavía estaba en el día anterior. Reproducido y resuelto con una prueba
+# real: mandando la Fecha en huso argentino en vez de UTC, el mismo flujo
+# (registrar + crear OP + aplicar) funcionó sin error.
+#
+# CUALQUIER fecha que se le mande a BAS (Fecha de ComprobanteCompra, de la
+# Orden de Pago, de medios de pago, etc.) tiene que salir de acá
+# (fecha_hoy_bas()), NUNCA de datetime.date.today()/datetime.datetime.utcnow()
+# "pelado" -- esos toman la zona horaria del sistema del contenedor (hoy
+# UTC), no la de Argentina. NO reemplazar por conveniencia sin volver a leer
+# este comentario: el bug es intermitente (~3hs por día) y fácil de no
+# reproducir en una prueba manual que no pegue justo en esa ventana.
+ZONA_HORARIA_BAS = ZoneInfo("America/Argentina/Buenos_Aires")
+
+
+def fecha_hoy_bas() -> datetime.date:
+    """"Hoy" en la fecha de Argentina (no la del sistema/contenedor). Ver
+    ZONA_HORARIA_BAS. Devuelve un date -- para el string que espera BAS,
+    usar fecha_hoy_bas().isoformat()."""
+    return datetime.datetime.now(ZONA_HORARIA_BAS).date()
+
+# Fallback de último recurso -- confirmado contra el catálogo real de BAS
+# (GET /api/Servicios + /api/Bienes + /api/Impuestos/1 + /api/PosicionesContables,
+# 2026-08-03). {categoria: {alicuota: codigo_item}} -- antes era 1 código fijo
+# por categoria, siempre a 21%, lo cual rompía cualquier factura con otra
+# alícuota real (ver docstring de resolver_item_bas). Mismo criterio que la
+# migración 1783483945_add_alicuota_to_bas_category_map.js: solo se agregan acá
+# variantes de tasa CONFIRMADAS contra el catálogo real, no inventadas -- las
+# categorías/tasas sin variante confirmada caen al código de 21% (comportamiento
+# histórico) vía el fallback de resolver_item_bas.
 CATEGORIA_A_CODIGO_ITEM = {
-    "Limpieza": "Limp 21%",
-    "Economato Alimentos": "Ec. Alim 21%",
-    "Vajilla y Cocina": "Vaj. 21%",
-    "Farmacia": "Gs.Farm. 21%",
-    "Combustible": "Comb 21%",
-    "Mantenimiento": "Mant21%",
-    "Seguros": "Seg. 21%",
-    "Gastos Generales": "Gs Gs 21%",  # catch-all, verificado con un 201 real
+    "Limpieza": {21: "Limp 21%", 0: "Limp Ex."},
+    "Economato Alimentos": {
+        21: "Ec. Alim 21%",
+        10.5: "Ec. Alim 10.5%",
+        5: "Ec. Alim 5%",
+        0: "Ec. Alim Exe",
+    },
+    "Vajilla y Cocina": {21: "Vaj. 21%", 10.5: "Vaj. 10.5%", 0: "Vaj. Exe"},
+    "Farmacia": {21: "Gs.Farm. 21%", 0: "Gs.Farm. Exe."},
+    "Combustible": {21: "Comb 21%"},
+    "Mantenimiento": {21: "Mant21%", 10.5: "Mant10,5%", 0: "Mant Ex"},
+    "Seguros": {21: "Seg. 21%", 0: "Segu Ex"},
+    "Gastos Generales": {21: "Gs Gs 21%", 10.5: "Gs Gs 10, 5"},  # catch-all
 }
 
 CATEGORIA_CATCH_ALL = "Gastos Generales"
@@ -86,14 +131,45 @@ def categorias_disponibles() -> list:
     return list(_categoria_map_vigente().keys())
 
 
-def codigo_item_de_categoria(categoria: str) -> str:
-    """CodigoItem de BAS para una categoría (elegida por el LLM). Cae al
-    catch-all -- de PocketBase si está, si no del fallback hardcodeado -- si
-    la categoría no matchea ninguna fila real."""
+def resolver_item_bas(categoria: str, alicuota: Optional[float] = None) -> tuple:
+    """(codigo_item, alicuota_real_del_codigo) para una categoría + la
+    alícuota real de IVA de la factura (ver invoices.iva_alicuota,
+    extraída por Gemini pero antes descartada).
+
+    Devuelve la alícuota REAL del código elegido, no necesariamente la
+    pedida: si no hay una variante confirmada en el catálogo de BAS para esa
+    alícuota exacta (ver CATEGORIA_A_CODIGO_ITEM / bas_category_map), cae al
+    código de 21% de esa categoría (comportamiento histórico) y devuelve 21,
+    no la alícuota pedida -- así el caller nunca arma un ImporteTotal
+    "bruto" que no coincide con lo que BAS calcula internamente para el
+    código que realmente se está usando (eso dispara 409 "no son
+    consistentes", ver comentario largo en items_bas de
+    process_invoice_google_2.py).
+
+    Si la categoría en sí no matchea ninguna fila real, cae al catch-all
+    ("Gastos Generales") con el mismo criterio de alícuota."""
     mapa = _categoria_map_vigente()
-    if categoria in mapa:
-        return mapa[categoria]
-    return mapa.get(CATEGORIA_CATCH_ALL) or CATEGORIA_A_CODIGO_ITEM[CATEGORIA_CATCH_ALL]
+    variantes = mapa.get(categoria) or mapa.get(CATEGORIA_CATCH_ALL) or CATEGORIA_A_CODIGO_ITEM[CATEGORIA_CATCH_ALL]
+
+    if alicuota is not None:
+        clave = round(float(alicuota), 2)
+        if clave in variantes:
+            return variantes[clave], clave
+
+    # Fallback: la variante de 21% de esa categoría (o la que exista, si por
+    # algún motivo ni siquiera esa está cargada) -- comportamiento histórico.
+    if 21 in variantes:
+        return variantes[21], 21.0
+    alicuota_disponible = next(iter(variantes))
+    return variantes[alicuota_disponible], float(alicuota_disponible)
+
+
+def codigo_item_de_categoria(categoria: str, alicuota: Optional[float] = None) -> str:
+    """Compat: solo el CodigoItem, para los sitios que solo lo guardan a
+    título informativo y no necesitan saber qué alícuota terminó aplicando
+    (ver resolver_item_bas para eso)."""
+    codigo, _ = resolver_item_bas(categoria, alicuota)
+    return codigo
 
 
 # --- Config de negocio fija de esta instalación (Empresa 1 = PLATINUM HOMES) ---

@@ -49,6 +49,7 @@ from utils.bas_config import (  # noqa: E402
     BAS_PREFIJO_TALONARIO_OP,
     BAS_SUCURSAL,
     BAS_TIPO_ENTREGA_SIN_STOCK,
+    fecha_hoy_bas,
 )
 
 logging.basicConfig(
@@ -118,7 +119,7 @@ def main() -> None:
     )
 
     prefijo_externo, numero_externo = _numero_externo_de_prueba()
-    fecha_hoy = datetime.date.today().isoformat()
+    fecha_hoy = fecha_hoy_bas().isoformat()  # huso argentino, ver utils/bas_config.py
 
     log.info("=" * 78)
     log.info("PASO 2 — Armar payload de ComprobanteCompra (Total=1)")
@@ -127,8 +128,11 @@ def main() -> None:
         "Comprobante": "MA",
         "Prefijo": BAS_PREFIJO_TALONARIO_MA,
         "Fecha": fecha_hoy,
+        # Sin IVA a propósito -- ver comentario equivalente en
+        # scripts/test_crear_comprobante_compra.py.
         "Total": 1,
         "TotalGravado": 1,
+        "TotalIva": 0,
         "MonedaComprobante": "L",
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
         "Empresa": BAS_EMPRESA,
@@ -151,8 +155,9 @@ def main() -> None:
                 "CantidadPrimeraUnidad": 1,
                 "PrecioUnitario": 1,
                 "ImporteGravado": 1,
+                "ImporteIva": 0,
                 "ImporteTotal": 1,
-                "TasaIva": 21,
+                "TasaIva": 0,
                 "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
                 "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
             }

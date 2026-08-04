@@ -373,19 +373,46 @@ class PocketBaseClient:
 
     def obtener_categoria_map(self) -> dict:
         """
-        {categoria: codigo_item} desde "bas_category_map", solo filas con
-        confirmado=true (las sin confirmar son borradores del dashboard,
-        todavía no verificadas contra el catálogo real de BAS -- no deben
-        llegar al LLM ni usarse para armar un ComprobanteCompra real).
+        {categoria: {alicuota: codigo_item}} desde "bas_category_map", solo
+        filas con confirmado=true (las sin confirmar son borradores del
+        dashboard, todavía no verificadas contra el catálogo real de BAS --
+        no deben llegar al LLM ni usarse para armar un ComprobanteCompra
+        real). Una categoria puede tener varias filas, una por cada alicuota
+        de IVA con CodigoItem real en el catálogo de BAS (ver migración
+        1783483945_add_alicuota_to_bas_category_map.js) -- antes había una
+        sola fila por categoria, siempre a 21%, lo cual rompía cualquier
+        factura con otra alícuota real (ver bas_config.py:resolver_item_bas).
         Devuelve {} (no None) en caso de error -- el caller (bas_config.py)
         decide el fallback.
         """
         try:
             records = self._list_all(BAS_CATEGORY_MAP_COLLECTION, filter_str="confirmado = true")
-            return {r["categoria"]: r["codigo_item"] for r in records if r.get("categoria") and r.get("codigo_item")}
         except Exception as e:
             app_logger.warning(f"PocketBase: error en obtener_categoria_map: {e}")
             return {}
+        mapa: dict = {}
+        for r in records:
+            categoria = r.get("categoria")
+            codigo_item = r.get("codigo_item")
+            alicuota = r.get("alicuota")
+            if not categoria or not codigo_item or alicuota is None:
+                continue
+            # Conversión por FILA, no en el try de arriba (que solo cubre la
+            # llamada de red): una sola fila con un valor de alicuota no
+            # numérico (dato corrupto de una edición manual) no debe tirar
+            # TODA la colección al fallback hardcodeado -- eso rompería
+            # silenciosamente la resolución de CodigoItem para TODAS las
+            # categorías, no solo la fila con el dato malo.
+            try:
+                alicuota = round(float(alicuota), 2)
+            except (TypeError, ValueError):
+                app_logger.warning(
+                    f"PocketBase: fila de bas_category_map con alicuota no numérica "
+                    f"({categoria!r}: {alicuota!r}), se ignora esa fila."
+                )
+                continue
+            mapa.setdefault(categoria, {})[alicuota] = codigo_item
+        return mapa
 
     def obtener_file_token(self) -> Optional[str]:
         """

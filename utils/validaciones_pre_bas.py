@@ -17,6 +17,8 @@ import re
 import datetime
 from typing import Optional
 
+from utils.bas_config import fecha_hoy_bas
+
 FORMATOS_FECHA_ACEPTADOS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y")
 
 # BAS_EMITIDO_POR_CAE está hardcodeado a "2" (factura electrónica) para TODA
@@ -77,7 +79,10 @@ def validar_fecha_emision(fecha_emision: Optional[str]) -> Optional[str]:
             "La fecha de emisión de la factura no es válida o no pudo leerse "
             "correctamente. Verificala antes de continuar."
         )
-    if fecha > datetime.date.today():
+    # Huso ARGENTINO, no datetime.date.today() -- ver
+    # utils/bas_config.py:ZONA_HORARIA_BAS (mismo motivo que las fechas que
+    # se le mandan a BAS: "hoy" tiene que ser el de Argentina).
+    if fecha > fecha_hoy_bas():
         return "La fecha de emisión de esta factura es futura. Verificala antes de continuar."
     return None
 
@@ -125,6 +130,37 @@ def validar_items(items: list) -> Optional[str]:
     return None
 
 
+def validar_alicuota_iva(alicuota: Optional[float]) -> Optional[str]:
+    """`invoices.iva_alicuota` se escribe directo en el registro contable
+    real de BAS (ImporteIva/TotalIva/Total del ComprobanteCompra, ver
+    process_invoice_google_2.py) -- a diferencia de `monto` (lo que
+    efectivamente se paga, ya acotado por invoice.total), nada más limita
+    este valor. Un typo del revisor (ej. "215" en vez de "21.5") produciría
+    un comprobante internamente consistente para BAS (ImporteGravado +
+    ImporteIva == ImporteTotal siempre cierra, sea cual sea la tasa) pero
+    con un Total que no corresponde a la factura real -- BAS no lo
+    rechazaría, así que hay que frenarlo acá.
+
+    None (alícuota no determinada) NO es un error -- ese caso ya cae al
+    neto puro (ver _extraer_alicuota_iva). Rango 0-27: cubre todas las
+    alícuotas reales de IVA en Argentina (0/2,5/5/10,5/21/27, confirmadas
+    contra el catálogo real de BAS, GET /api/Impuestos/1) con margen. No
+    asume que `alicuota` ya viene convertida a número -- PocketBase puede
+    devolver lo que sea que haya quedado guardado tras una edición manual."""
+    if alicuota is None:
+        return None
+    try:
+        alicuota = float(alicuota)
+    except (TypeError, ValueError):
+        return "La alícuota de IVA de esta factura no es un número válido. Verificala antes de continuar."
+    if alicuota < 0 or alicuota > 27:
+        return (
+            f"La alícuota de IVA de esta factura ({alicuota}%) no parece válida. "
+            "Verificala antes de continuar."
+        )
+    return None
+
+
 def validar_monto_vs_total(monto: Optional[float], total_factura: Optional[float]) -> Optional[str]:
     if monto is None:
         return None
@@ -138,31 +174,44 @@ def validar_monto_vs_total(monto: Optional[float], total_factura: Optional[float
     return None
 
 
-def validar_monto_aplicable_vs_neto(monto: Optional[float], total_gravado: Optional[float]) -> Optional[str]:
-    """BAS solo admite registrar el vencimiento de un comprobante por el neto
-    (total_gravado, sin IVA): ImporteTotal de cada ítem se manda siempre
-    igual a ImporteGravado (si no, BAS rechaza la línea con 409 "no son
-    consistentes"), y esa regla deja matemáticamente forzados a "Total" y
-    "Vencimientos" al neto también (confirmado con pruebas reales,
-    2026-08-03 -- ver comentarios en process_invoice_google_2.py). Aplicar
-    un monto mayor al neto SIEMPRE dispara 409 "el saldo del vencimiento no
-    puede ser negativo" DESPUÉS de haber creado ya la Orden de Pago real en
-    BAS: queda huérfana, sin aplicar, y hay que reconciliarla a mano.
-    Confirmado dos veces en producción sobre la misma factura (MEDINA FLOR
-    LUCIO DANIEL, 00003-00000021): OPs huérfanas 00001-00035009 y
-    00001-00035010. Bloquear acá, antes de escribir nada, evita seguir
-    generando OPs huérfanas mientras no esté resuelto cómo declarar/aplicar
-    la diferencia de IVA (ver docs/plan-validaciones-pre-bas.md)."""
-    if monto is None or total_gravado is None:
+def validar_monto_aplicable_vs_neto(monto: Optional[float], total_registrado: Optional[float]) -> Optional[str]:
+    """BAS solo admite aplicar contra el vencimiento de un comprobante el
+    mismo importe con el que se registró ("Total"/"Vencimientos" del
+    ComprobanteCompra, ver comprobante_compra_payload en
+    process_invoice_google_2.py) -- `total_registrado` es ese importe
+    (TotalGravado + TotalIva, el bruto real, cuando la alícuota de IVA de la
+    factura se pudo determinar; el neto puro si no, porque en ese caso
+    TotalIva se manda en 0 -- nunca se inventa una tasa).
+
+    Causa raíz real (2026-08-04, ver docs/bas-orden-de-pago-research.md):
+    durante un tiempo esto SIEMPRE fue el neto, porque nunca se mandaban los
+    campos "TotalIva" (cabecera) / "ImporteIva" (por línea) del schema real
+    de BAS -- sin ellos, "Total" queda matemáticamente forzado a
+    "TotalGravado". Con esos campos poblados, "Total" (y por lo tanto el
+    vencimiento) sí puede ser el bruto real -- confirmado con una prueba
+    real de punta a punta (comprobante + Orden de Pago + aplicación, sin
+    error, por el bruto completo).
+
+    Aplicar un monto mayor a `total_registrado` SIEMPRE dispara 409 "el
+    saldo del vencimiento no puede ser negativo" DESPUÉS de haber creado ya
+    la Orden de Pago real en BAS: queda huérfana, sin aplicar, y hay que
+    reconciliarla a mano. Confirmado en producción sobre la misma factura
+    (MEDINA FLOR LUCIO DANIEL, 00003-00000021): OPs huérfanas
+    00001-00035009 y 00001-00035010 (antes de este fix, cuando
+    total_registrado todavía era siempre el neto). Bloquear acá, antes de
+    escribir nada, evita seguir generando OPs huérfanas en cualquier caso
+    donde la alícuota no se haya podido determinar (ver
+    docs/plan-validaciones-pre-bas.md)."""
+    if monto is None or total_registrado is None:
         return None
-    if monto > float(total_gravado) + 0.01:
+    if monto > float(total_registrado) + 0.01:
         return (
-            f"No se puede aplicar ${monto}: BAS solo admite registrar el vencimiento de "
-            f"este comprobante por el neto (${total_gravado}, sin IVA). Aplicar el monto "
-            "bruto completo dejaría el saldo del vencimiento en negativo y BAS "
-            "rechazaría la aplicación después de haber creado ya la Orden de Pago real "
-            "(quedaría huérfana, sin aplicar, y habría que reconciliarla a mano en BAS). "
-            f"Por ahora, el máximo aplicable automáticamente es ${total_gravado}."
+            f"No se puede aplicar ${monto}: BAS solo admite aplicar contra este comprobante "
+            f"el mismo importe con el que se registró (${total_registrado}). Aplicar más "
+            "dejaría el saldo del vencimiento en negativo y BAS rechazaría la aplicación "
+            "después de haber creado ya la Orden de Pago real (quedaría huérfana, sin "
+            "aplicar, y habría que reconciliarla a mano en BAS). Por ahora, el máximo "
+            f"aplicable automáticamente es ${total_registrado}."
         )
     return None
 
@@ -180,5 +229,6 @@ def validar_factura_antes_de_pago_real(invoice: dict, items: list) -> list:
         validar_numero_comprobante(invoice.get("numero_comprobante")),
         validar_cae(invoice.get("cae"), invoice.get("cae_vencimiento")),
         validar_items(items),
+        validar_alicuota_iva(invoice.get("iva_alicuota")),
     )
     return [mensaje for mensaje in validaciones if mensaje]

@@ -48,6 +48,7 @@ from utils.pocketbase_client import PocketBaseClient
 from utils.rate_limit import limiter
 from utils.bas_config import (
     codigo_item_de_categoria,
+    fecha_hoy_bas,
     BAS_EMPRESA,
     BAS_SUCURSAL,
     BAS_DEPOSITO,
@@ -244,6 +245,53 @@ def formatear_impuestos(impuestos):
     return "\n".join(resultado)
 
 
+def _extraer_alicuota_iva(impuestos: list) -> Optional[float]:
+    """Alícuota real de IVA de la factura, a partir de la lista extraída por
+    Gemini (tool impuestos_y_retenciones_de_la_factura) -- hasta ahora ese
+    dato se calculaba pero solo se usaba para formatear_impuestos (texto de
+    Sheets/email), nunca se persistía ni llegaba al payload de BAS. Se usa
+    para calcular ImporteIva/TotalIva por línea/cabecera (ver items_bas en
+    procesar_factura_en_bas y crear_orden_pago) -- NO para elegir el
+    CodigoItem: confirmado real que BAS no cruza ImporteIva/TasaIva contra
+    la tasa configurada del catálogo para el CodigoItem elegido, así que
+    codigo_item_de_categoria sigue llamándose siempre sin alícuota (cae al
+    código de 21% de esa categoría, comportamiento histórico). Ver
+    utils/bas_config.py:resolver_item_bas si en algún momento se decide
+    conectar la selección de CodigoItem a la alícuota real -- hoy esa rama
+    existe pero ningún caller real la ejercita.
+
+    Solo devuelve un valor si hay EXACTAMENTE un impuesto tipo "IVA" con
+    alícuota -- si Gemini no detectó ninguno, o detectó más de uno (factura
+    con líneas a distintas tasas, caso que este pipeline no modela por
+    ítem), se prefiere no adivinar: devuelve None y el caller cae al
+    comportamiento histórico (neto, código de 21% por defecto)."""
+    if not impuestos:
+        return None
+    ivas = [
+        imp
+        for imp in impuestos
+        if str(imp.get("tipo", "")).strip().upper() == "IVA" and imp.get("alicuota") is not None
+    ]
+    if len(ivas) != 1:
+        if impuestos and not ivas:
+            # Hay impuestos extraídos pero ninguno matcheó "IVA" exacto --
+            # puede ser una factura sin IVA (legítimo) o Gemini devolvió una
+            # variante del string ("IVA 21%", "I.V.A.", etc.) que este match
+            # exacto no captura. No se puede distinguir un caso del otro
+            # acá, así que se cae al comportamiento seguro (neto) igual --
+            # pero se loguea para poder notar el patrón en producción, no
+            # perderlo en silencio.
+            app_logger.info(
+                f"_extraer_alicuota_iva: {len(impuestos)} impuesto(s) extraído(s), "
+                "ninguno con tipo='IVA' exacto -- cae a neto."
+            )
+        return None
+    try:
+        return round(float(ivas[0]["alicuota"]), 2)
+    except (TypeError, ValueError):
+        return None
+
+
 # Definición de tipo para elementos en cola que contienen información del archivo
 class QueueItem(TypedDict):
     file_name: str
@@ -434,6 +482,8 @@ class InvoiceOrchestrator:
                             _otros = _er.get("otros", {})
                             _items_info = factura["data"].get("items", {})
                             _detalles = _items_info.get("detalles", []) or []
+                            _impuestos_info = factura["data"].get("impuestos", {})
+                            _alicuota_iva = _extraer_alicuota_iva(_impuestos_info.get("impuestos", []))
 
                             _pb_invoice_record = self._pb_client.upsert_invoice(
                                 {
@@ -452,6 +502,7 @@ class InvoiceOrchestrator:
                                     "cae": _otros.get("CAE"),
                                     "cae_vencimiento": _otros.get("vencimiento_CAE"),
                                     "forma_pago": _otros.get("forma_pago"),
+                                    "iva_alicuota": _alicuota_iva,
                                     "sheets_saved": bool(saved),
                                     "status": "processing",
                                 }
@@ -1502,6 +1553,8 @@ class InvoiceOrchestrator:
             items_info = factura_data.get("items", {})
             detalles = items_info.get("detalles", []) or []
             total = items_info.get("total")
+            impuestos_info = factura_data.get("impuestos", {})
+            alicuota_iva = _extraer_alicuota_iva(impuestos_info.get("impuestos", []))
 
             if monto_override is not None:
                 # OJO al leer este log: `total` acá puede ya venir pisado
@@ -1543,8 +1596,15 @@ class InvoiceOrchestrator:
                         "CantidadPrimeraUnidad": 1,
                         "PrecioUnitario": monto_override,
                         "ImporteGravado": monto_override,
+                        # Sin IVA a propósito -- es un monto de prueba
+                        # sintético, sin impacto contable real (ver
+                        # docstring de monto_override más abajo). "ImporteIva"
+                        # tiene que estar presente (aunque sea 0): el cálculo
+                        # de total_iva más abajo suma esta clave de TODOS los
+                        # ítems de items_bas, monto_override incluido.
+                        "ImporteIva": 0,
                         "ImporteTotal": monto_override,
-                        "TasaIva": 21,
+                        "TasaIva": 0,
                         "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
                         "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
                     }
@@ -1553,7 +1613,35 @@ class InvoiceOrchestrator:
                 items_bas = []
                 for item in detalles:
                     importe_gravado = round(float(item.get("precio_total", 0) or 0), 2)
-                    tasa_iva = 21
+                    # ImporteIva/TasaIva con la alícuota REAL de la factura
+                    # (iva_alicuota, extraída por Gemini -- ver
+                    # _extraer_alicuota_iva). Si no se pudo determinar una
+                    # alícuota única, 0 (neto puro, comportamiento histórico
+                    # -- no se inventa una tasa).
+                    #
+                    # CodigoItem NO necesita coincidir con esa alícuota: se
+                    # confirmó real (2026-08-04) que BAS no cruza
+                    # ImporteIva/TasaIva contra la tasa configurada en el
+                    # catálogo para el CodigoItem elegido -- solo valida
+                    # consistencia interna (ImporteGravado + ImporteIva ==
+                    # ImporteTotal). Un ítem con CodigoItem="Gs Gs 21%" pero
+                    # TasaIva=10.5/ImporteIva real dio 201 real sin problema.
+                    # Por eso NO hace falta resolver_item_bas acá -- alcanza
+                    # con el código de categoría de siempre.
+                    #
+                    # Durante mucho tiempo se creyó que "ImporteTotal ==
+                    # ImporteGravado, sin ImporteIva" era la única forma de
+                    # evitar el 409 "no son consistentes" (SP_GENEROASI) --
+                    # confirmado real (2026-08-04) que la causa real de ese
+                    # error era otra (mandar un ImporteTotal inflado SIN el
+                    # ImporteIva que lo respalda, dejando
+                    # ImporteGravado+ImporteIva != ImporteTotal). Con
+                    # ImporteIva correctamente poblado, BAS acepta el bruto
+                    # real sin problema (201 real + aplicación real exitosa
+                    # por el bruto completo, ver docs/...).
+                    tasa_iva = alicuota_iva if alicuota_iva is not None else 0
+                    importe_iva = round(importe_gravado * tasa_iva / 100, 2)
+                    importe_total = round(importe_gravado + importe_iva, 2)
                     items_bas.append(
                         {
                             "CodigoItem": codigo_item_de_categoria(item.get("categoria", "")),
@@ -1562,23 +1650,8 @@ class InvoiceOrchestrator:
                             "CantidadPrimeraUnidad": item.get("cantidad", 1),
                             "PrecioUnitario": item.get("precio_unitario", 0),
                             "ImporteGravado": importe_gravado,
-                            # ImporteTotal == ImporteGravado (SIN sumarle el
-                            # IVA a mano). BAS calcula el IVA solo a partir
-                            # del `Impuesto` configurado en el propio ítem
-                            # del catálogo (confirmado: GET /api/Servicios
-                            # -> Impuesto "3" -> GET /api/Impuestos/1/3 ->
-                            # ImputacionIvaCompras=112101, cuenta real "IVA
-                            # Crédito Fiscal") y lo imputa aparte, separado
-                            # del gasto neto -- NO desde lo que mandemos acá.
-                            # Mandar un ImporteTotal con el IVA ya sumado
-                            # (o un ImporteIva explícito) hace que BAS
-                            # compare nuestro cálculo contra el que hace
-                            # internamente y, al no coincidir exacto,
-                            # rechace la línea con 409 "no son consistentes"
-                            # (SP_GENEROASI). TasaIva se manda igual (21,
-                            # informativo/validación) -- confirmado con dos
-                            # 201 reales, 2026-07-01 y 2026-07-31.
-                            "ImporteTotal": importe_gravado,
+                            "ImporteIva": importe_iva,
+                            "ImporteTotal": importe_total,
                             "TasaIva": tasa_iva,
                             "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
                             "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
@@ -1600,11 +1673,8 @@ class InvoiceOrchestrator:
             # 54981.340000000004) que BAS rechaza con 400 "must have not
             # more than 5 decimals" -- confirmado en runtime, 2026-07-31.
             total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
-            # Total (cabecera) == TotalGravado, NO el total real de la
-            # factura (que incluye IVA) -- ver comentario en la construcción
-            # de items_bas. El monto con IVA que efectivamente le queda
-            # adeudado al proveedor en su cuenta corriente lo calcula BAS
-            # solo, sumando la imputación de IVA (112101) que hace aparte.
+            total_iva = round(sum(float(it["ImporteIva"] or 0) for it in items_bas), 2)
+            total_bruto = round(total_gravado + total_iva, 2)
 
             # Número de comprobante externo: "PPPPP-NNNNNNNN" -> prefijo/numero.
             numero_completo = (comprobante.get("numero") or "").replace(" ", "")
@@ -1622,19 +1692,27 @@ class InvoiceOrchestrator:
                 # emitida 2025-05-21, registrada recién el 2026-07-21). La
                 # fecha real del documento va aparte en FechaComprobanteExterno
                 # (no participa de este chequeo, solo de la búsqueda por
-                # ConsultaComprobantesExternos). Sin fecha hardcodeada: "hoy"
-                # siempre cae en el período contable abierto, sea cual sea.
-                "Fecha": datetime.date.today().isoformat(),
-                # "Total" == "TotalGravado" (NO total, que incluye IVA). Ver
-                # comentario largo equivalente en crear_orden_pago: se probó
-                # real (2026-08-03) mandar Total bruto y BAS lo rechazó,
-                # porque TAMBIÉN valida Total contra la suma de
-                # Items[].ImporteTotal (que acá siempre es neto, ver
-                # comentario en items_bas más arriba) -- "Total" queda
-                # matemáticamente forzado al neto mientras ImporteTotal se
-                # siga mandando igual a ImporteGravado.
-                "Total": total_gravado,
+                # ConsultaComprobantesExternos). "hoy" en huso ARGENTINO
+                # (fecha_hoy_bas(), NO datetime.date.today() -- ver
+                # utils/bas_config.py:ZONA_HORARIA_BAS) siempre cae en el
+                # período contable abierto, sea cual sea.
+                "Fecha": fecha_hoy_bas().isoformat(),
+                # "Total" = "TotalGravado" + "TotalIva" (bruto real). Causa
+                # raíz confirmada real (2026-08-04): el schema real de BAS
+                # (/swagger/v1/swagger.json, ComprobanteCompra) tiene un
+                # campo "TotalIva" (cabecera) y cada Item tiene "ImporteIva"
+                # -- NINGUNO de los dos se mandaba antes. BAS valida "Total"
+                # contra la suma de sus propios totales parciales de
+                # cabecera (TotalGravado + TotalIva + ...), NO contra una
+                # suma re-derivada de los ítems -- por eso, sin TotalIva
+                # (quedaba en 0/null), "Total" quedaba matemáticamente
+                # forzado a "TotalGravado" (neto) sin importar qué se
+                # mandara en Items[].ImporteTotal. Con TotalIva/ImporteIva
+                # poblados (ver items_bas más arriba), un 201 real registró
+                # el comprobante por el bruto completo sin error.
+                "Total": total_bruto,
                 "TotalGravado": total_gravado,
+                "TotalIva": total_iva,
                 "EmitidoPor": BAS_EMITIDO_POR_CAE,
                 "Empresa": BAS_EMPRESA,
                 "Sucursal": BAS_SUCURSAL,
@@ -1647,11 +1725,10 @@ class InvoiceOrchestrator:
                 "FechaComprobanteExterno": comprobante.get("fecha_emision"),
                 "NumeroCAIoCAE": otros.get("CAE"),
                 "VencimientoCAIoCAE": otros.get("vencimiento_CAE"),
-                # Importe = total_gravado (neto), NO total (bruto) -- tiene
-                # que coincidir con "Total" de la cabecera (ver comentario
-                # ahí arriba). Este flujo siempre corre en dry_run así que
-                # hoy no escribe nada real.
-                "Vencimientos": [{"FechaVencimiento": comprobante.get("fecha_emision"), "Importe": total_gravado}],
+                # Importe = total_bruto -- tiene que coincidir con "Total" de
+                # la cabecera (ver comentario ahí arriba). Este flujo siempre
+                # corre en dry_run así que hoy no escribe nada real.
+                "Vencimientos": [{"FechaVencimiento": comprobante.get("fecha_emision"), "Importe": total_bruto}],
                 "Items": items_bas,
             }
 
@@ -1662,7 +1739,7 @@ class InvoiceOrchestrator:
                     comprobante_factura="MA",
                     prefijo_externo=prefijo_externo,
                     numero_externo=numero_externo,
-                    importe=total_gravado,
+                    importe=total_bruto,
                     fecha_externo=comprobante.get("fecha_emision"),
                     prefijo_op=BAS_PREFIJO_TALONARIO_OP,
                     caja_op=BAS_CAJA,
@@ -1672,7 +1749,7 @@ class InvoiceOrchestrator:
                     # investigación previa (pasó la validación de existencia contra
                     # BAS a diferencia de otros códigos probados). No hay endpoint
                     # que exponga el catálogo real -- ver docs/bas-orden-de-pago-research.md.
-                    pagos={"Efectivos": [{"MedioPago": "1", "Importe": total_gravado, "IngresooEgreso": "E"}]},
+                    pagos={"Efectivos": [{"MedioPago": "1", "Importe": total_bruto, "IngresooEgreso": "E"}]},
                     comprobante_compra_payload=comprobante_compra_payload,
                     imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
                     dry_run=dry_run,
@@ -2154,6 +2231,8 @@ async def _procesar_imagen_o_pdf_impl(
         _otros = _er.get("otros", {})
         _items_info = factura["data"].get("items", {})
         _detalles = _items_info.get("detalles", []) or []
+        _impuestos_info = factura["data"].get("impuestos", {})
+        _alicuota_iva = _extraer_alicuota_iva(_impuestos_info.get("impuestos", []))
 
         _pb_invoice_record = orchestrator._pb_client.upsert_invoice(
             {
@@ -2172,6 +2251,7 @@ async def _procesar_imagen_o_pdf_impl(
                 "cae": _otros.get("CAE"),
                 "cae_vencimiento": _otros.get("vencimiento_CAE"),
                 "forma_pago": _otros.get("forma_pago"),
+                "iva_alicuota": _alicuota_iva,
                 "sheets_saved": bool(saved_sheet),
                 "status": "completed",
                 # Solo si la subida funcionó: mandar None acá pisaría con
@@ -3280,6 +3360,31 @@ async def crear_orden_pago(
             "message": "La orden de pago ya fue creada y aplicada exitosamente (success); no se genera un pago duplicado.",
             "payment_order": existente,
         }
+    # Si hubo un intento real previo que llegó a crear una Orden de Pago en
+    # BAS (bas_op_prefijo/bas_op_numero seteados, ver más abajo donde se
+    # persisten) pero no se pudo aplicar, NO reintentar automáticamente: el
+    # comprobante YA existe en BAS, registrado con lo que sea que tenía la
+    # lógica vigente en ESE momento -- podría ser de antes de este fix
+    # (neto puro, sin TotalIva/ImporteIva). La API de lectura de BAS
+    # (ConsultaComprobantesExternos) no expone el Total/Vencimientos real
+    # ya registrado (confirmado, ver investigación de causa raíz), así que
+    # no hay forma de verificar desde acá si el `total_bruto` recalculado
+    # localmente coincide con lo que BAS realmente tiene abierto para ese
+    # comprobante. Aplicar un monto que no coincida vuelve a fallar con
+    # "saldo del vencimiento no puede ser negativo" y crea OTRA OP
+    # huérfana (confirmado real: factura MEDINA FLOR LUCIO DANIEL,
+    # 00003-00000021, ya tiene dos -- 00001-00035009, 00001-00035010).
+    if existente and existente.get("status") != "success" and existente.get("bas_op_prefijo"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Esta factura ya tiene un intento real fallido contra BAS (Orden de Pago "
+                f"{existente.get('bas_op_prefijo')}-{existente.get('bas_op_numero')}, creada pero sin "
+                "aplicar). No se puede reintentar automáticamente: el comprobante ya existe en BAS y no "
+                "hay forma de confirmar desde acá con qué importe quedó registrado su vencimiento. "
+                "Reconciliá manualmente en BAS antes de continuar."
+            ),
+        )
 
     status_bas = orchestrator._pb_client.get_bas_processing_status(process_id) or {}
 
@@ -3327,7 +3432,9 @@ async def crear_orden_pago(
                 "Verificá el monto antes de generar la orden de pago."
             ),
         )
-    fecha_pago = datetime.date.today().isoformat()
+    # Huso ARGENTINO, no datetime.date.today() -- ver
+    # utils/bas_config.py:ZONA_HORARIA_BAS.
+    fecha_pago = fecha_hoy_bas().isoformat()
     medio_pago_codigo = metodo_bas["bas_medio_pago_codigo"]
 
     # Cada array de BAS exige campos runtime distintos más allá de lo que
@@ -3406,10 +3513,31 @@ async def crear_orden_pago(
             },
         )
 
+    # Alícuota real de IVA de la factura, extraída por Gemini y persistida en
+    # invoices.iva_alicuota (ver _extraer_alicuota_iva) -- editable en la
+    # revisión humana igual que cualquier otro campo. Conversión con guarda
+    # de tipo (no confiar en que PocketBase devuelva siempre un number --
+    # una edición manual corrupta no debe tirar un 500 sin manejar en el
+    # único endpoint que mueve plata real, tiene que degradar al
+    # comportamiento seguro de "alícuota desconocida" como cualquier otro
+    # caso ambiguo).
+    try:
+        alicuota_iva = float(invoice.get("iva_alicuota")) if invoice.get("iva_alicuota") is not None else None
+    except (TypeError, ValueError):
+        alicuota_iva = None
     items_bas = []
     for it in items:
         _importe_gravado = round(float(it.get("precio_total", 0) or 0), 2)
-        _tasa_iva = 21
+        # ImporteIva/TasaIva con la alícuota REAL -- ver comentario largo
+        # equivalente en InvoiceOrchestrator.procesar_factura_en_bas (mismo
+        # criterio, mismo caso real MEDINA FLOR LUCIO DANIEL que confirmó
+        # esto, 2026-08-04): BAS no cruza ImporteIva contra la tasa
+        # configurada en el catálogo del CodigoItem, solo valida
+        # ImporteGravado + ImporteIva == ImporteTotal a nivel de línea. Sin
+        # alícuota conocida, 0 (neto puro, no se inventa una tasa).
+        _tasa_iva = alicuota_iva if alicuota_iva is not None else 0
+        _importe_iva = round(_importe_gravado * _tasa_iva / 100, 2)
+        _importe_total = round(_importe_gravado + _importe_iva, 2)
         # Recalcular SIEMPRE desde `categoria` actual, no confiar en
         # `bas_codigo_item` guardado: ese campo se calculó una sola vez al
         # persistir la factura originalmente. Si un revisor corrigió la
@@ -3426,15 +3554,8 @@ async def crear_orden_pago(
                 "CantidadPrimeraUnidad": it.get("cantidad", 1),
                 "PrecioUnitario": it.get("precio_unitario", 0),
                 "ImporteGravado": _importe_gravado,
-                # Ver comentario equivalente en InvoiceOrchestrator.procesar_factura_en_bas:
-                # ImporteTotal == ImporteGravado, SIN sumarle el IVA a mano.
-                # BAS lo calcula solo desde el `Impuesto` del ítem del
-                # catálogo (confirmado vía API: Impuesto "3" ->
-                # ImputacionIvaCompras=112101 "IVA Crédito Fiscal") y lo
-                # imputa aparte -- mandar un ImporteTotal/ImporteIva propio
-                # hace que no coincida con lo que BAS calcula y dispara 409
-                # "no son consistentes" (SP_GENEROASI).
-                "ImporteTotal": _importe_gravado,
+                "ImporteIva": _importe_iva,
+                "ImporteTotal": _importe_total,
                 "TasaIva": _tasa_iva,
                 "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
                 "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
@@ -3446,25 +3567,27 @@ async def crear_orden_pago(
     # lo confirmó. round(): idem, sumar floats sin redondear dispara 400
     # "must have not more than 5 decimals" en BAS.
     total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
+    total_iva = round(sum(float(it["ImporteIva"] or 0) for it in items_bas), 2)
+    total_bruto = round(total_gravado + total_iva, 2)
 
     # Gate real de negocio (no de calidad de datos, por eso separado del gate
-    # de arriba): BAS solo admite registrar/aplicar este comprobante por el
-    # neto -- ver el docstring de validar_monto_aplicable_vs_neto para el
-    # detalle completo y los dos casos reales (OPs huérfanas 00001-00035009
-    # y 00001-00035010) que confirmaron este límite. Corre DESPUÉS de
-    # total_gravado porque recién acá se conoce.
-    error_monto_neto = validar_monto_aplicable_vs_neto(monto, total_gravado)
+    # de arriba): BAS solo admite aplicar contra el vencimiento el mismo
+    # importe con el que se registra el comprobante -- ahora total_bruto
+    # (TotalGravado + TotalIva) en vez de siempre el neto, ver el docstring
+    # de validar_monto_aplicable_vs_neto para el detalle completo. Sigue
+    # colapsando a total_gravado cuando no hay alícuota resuelta (TotalIva=0
+    # en ese caso), así que el comportamiento histórico (bloquear si no se
+    # conoce el IVA real) no cambia.
+    error_monto_neto = validar_monto_aplicable_vs_neto(monto, total_bruto)
     if error_monto_neto:
         raise HTTPException(
             status_code=422,
             detail={"mensaje": error_monto_neto, "validaciones": [error_monto_neto]},
         )
 
-    # Total (cabecera) == TotalGravado (no invoice.get("total"), que incluye
-    # IVA) -- BAS calcula e imputa el IVA aparte, solo. NO se toca `monto`
-    # (el importe de la orden de pago en sí) -- es un concepto aparte, puede
-    # ser un pago parcial de esta factura, no necesariamente igual al Total
-    # del comprobante.
+    # NO se toca `monto` (el importe de la orden de pago en sí) -- es un
+    # concepto aparte, puede ser un pago parcial de esta factura, no
+    # necesariamente igual al Total del comprobante.
     # Igual criterio que proveedor_codigo más arriba: re-parsear DESDE
     # invoice.numero_comprobante (el dato actual, post-revisión) en vez de
     # confiar en el prefijo/número cacheados en bas_processing_status, que
@@ -3497,24 +3620,24 @@ async def crear_orden_pago(
         # documento -- usar fecha_emision real dispara 409 "fecha anterior al
         # cierre operativo del subdiario" (NUETRANSAC) para cualquier factura
         # registrada tarde. FechaComprobanteExterno (abajo) sí lleva la fecha
-        # real del documento.
-        "Fecha": datetime.date.today().isoformat(),
-        # "Total" == "TotalGravado" (neto, NO invoice.total/monto que incluyen
-        # IVA). Se probó real (2026-08-03, factura de prueba Total=1) mandar
-        # "Total" bruto para que coincidiera con la suma de "Vencimientos"
-        # bruta -- BAS lo rechazó con un TERCER error: "Total" TAMBIÉN se
-        # valida contra la suma de Items[].ImporteTotal, que acá siempre es
-        # neto (ImporteTotal == ImporteGravado, ver comentario en items_bas).
-        # Mientras esa regla se mantenga (y romperla dispara el 409 "no son
-        # consistentes" ya documentado), "Total" queda matemáticamente
-        # forzado al neto -- no hay combinación de Total/Vencimientos que
-        # sea bruta y pase las tres validaciones de BAS a la vez. El bug real
-        # de MEDINA (saldo del vencimiento negativo) está en que se APLICABA
-        # `monto` (bruto) contra un Vencimiento que solo puede registrarse en
-        # neto -- ver el fix real más abajo, en el `importe` que se pasa a
-        # crear_orden_de_pago_desde_factura.
-        "Total": total_gravado,
+        # real del documento. Huso ARGENTINO (fecha_hoy_bas(), NO
+        # datetime.date.today()) -- ver utils/bas_config.py:ZONA_HORARIA_BAS.
+        "Fecha": fecha_hoy_bas().isoformat(),
+        # "Total" = "TotalGravado" + "TotalIva" (bruto real). Ver el
+        # comentario largo equivalente en
+        # InvoiceOrchestrator.procesar_factura_en_bas -- causa raíz real
+        # (2026-08-04): faltaba mandar "TotalIva" (cabecera) e "ImporteIva"
+        # (por línea, ver items_bas más arriba), campos reales del schema de
+        # BAS que nunca se habían usado. El bug real de MEDINA (saldo del
+        # vencimiento negativo) era la consecuencia: se aplicaba `monto`
+        # (bruto) contra un Vencimiento que solo se registraba en neto. Con
+        # TotalIva/ImporteIva poblados, Vencimientos también se registra en
+        # bruto (ver más abajo) y coincide con lo que efectivamente se
+        # aplica -- confirmado real, flujo completo (comprobante + OP +
+        # aplicación) sin error.
+        "Total": total_bruto,
         "TotalGravado": total_gravado,
+        "TotalIva": total_iva,
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
         "Empresa": BAS_EMPRESA,
         "Sucursal": BAS_SUCURSAL,
@@ -3527,13 +3650,9 @@ async def crear_orden_pago(
         "FechaComprobanteExterno": invoice.get("fecha_emision"),
         "NumeroCAIoCAE": invoice.get("cae"),
         "VencimientoCAIoCAE": invoice.get("cae_vencimiento"),
-        # Importe = total_gravado (neto) -- tiene que coincidir con "Total"
-        # de la cabecera (ver comentario ahí arriba: matemáticamente forzado
-        # al neto). ESTE es justo el límite que causó el bug real de MEDINA:
-        # más abajo se sigue aplicando `importe=monto` (bruto) contra este
-        # vencimiento (registrado en neto) -- eso es lo que hay que resolver
-        # todavía, no este campo. Ver docs/plan-validaciones-pre-bas.md.
-        "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": total_gravado}],
+        # Importe = total_bruto -- tiene que coincidir con "Total" de la
+        # cabecera (ver comentario ahí arriba).
+        "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": total_bruto}],
         "Items": items_bas,
     }
 
