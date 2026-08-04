@@ -174,48 +174,6 @@ def validar_monto_vs_total(monto: Optional[float], total_factura: Optional[float
     return None
 
 
-def validar_monto_aplicable_vs_neto(monto: Optional[float], total_registrado: Optional[float]) -> Optional[str]:
-    """BAS solo admite aplicar contra el vencimiento de un comprobante el
-    mismo importe con el que se registró ("Total"/"Vencimientos" del
-    ComprobanteCompra, ver comprobante_compra_payload en
-    process_invoice_google_2.py) -- `total_registrado` es ese importe
-    (TotalGravado + TotalIva, el bruto real, cuando la alícuota de IVA de la
-    factura se pudo determinar; el neto puro si no, porque en ese caso
-    TotalIva se manda en 0 -- nunca se inventa una tasa).
-
-    Causa raíz real (2026-08-04, ver docs/bas-orden-de-pago-research.md):
-    durante un tiempo esto SIEMPRE fue el neto, porque nunca se mandaban los
-    campos "TotalIva" (cabecera) / "ImporteIva" (por línea) del schema real
-    de BAS -- sin ellos, "Total" queda matemáticamente forzado a
-    "TotalGravado". Con esos campos poblados, "Total" (y por lo tanto el
-    vencimiento) sí puede ser el bruto real -- confirmado con una prueba
-    real de punta a punta (comprobante + Orden de Pago + aplicación, sin
-    error, por el bruto completo).
-
-    Aplicar un monto mayor a `total_registrado` SIEMPRE dispara 409 "el
-    saldo del vencimiento no puede ser negativo" DESPUÉS de haber creado ya
-    la Orden de Pago real en BAS: queda huérfana, sin aplicar, y hay que
-    reconciliarla a mano. Confirmado en producción sobre la misma factura
-    (MEDINA FLOR LUCIO DANIEL, 00003-00000021): OPs huérfanas
-    00001-00035009 y 00001-00035010 (antes de este fix, cuando
-    total_registrado todavía era siempre el neto). Bloquear acá, antes de
-    escribir nada, evita seguir generando OPs huérfanas en cualquier caso
-    donde la alícuota no se haya podido determinar (ver
-    docs/plan-validaciones-pre-bas.md)."""
-    if monto is None or total_registrado is None:
-        return None
-    if monto > float(total_registrado) + 0.01:
-        return (
-            f"No se puede aplicar ${monto}: BAS solo admite aplicar contra este comprobante "
-            f"el mismo importe con el que se registró (${total_registrado}). Aplicar más "
-            "dejaría el saldo del vencimiento en negativo y BAS rechazaría la aplicación "
-            "después de haber creado ya la Orden de Pago real (quedaría huérfana, sin "
-            "aplicar, y habría que reconciliarla a mano en BAS). Por ahora, el máximo "
-            f"aplicable automáticamente es ${total_registrado}."
-        )
-    return None
-
-
 def validar_factura_antes_de_pago_real(invoice: dict, items: list) -> list:
     """
     Corre las validaciones críticas de datos de la factura (Etapa 0 del plan

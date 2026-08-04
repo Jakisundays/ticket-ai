@@ -66,7 +66,6 @@ from utils.bas_config import (
 )
 from utils.validaciones_pre_bas import (
     validar_factura_antes_de_pago_real,
-    validar_monto_aplicable_vs_neto,
 )
 import google.auth.transport.requests as google_auth_requests
 
@@ -3570,20 +3569,19 @@ async def crear_orden_pago(
     total_iva = round(sum(float(it["ImporteIva"] or 0) for it in items_bas), 2)
     total_bruto = round(total_gravado + total_iva, 2)
 
-    # Gate real de negocio (no de calidad de datos, por eso separado del gate
-    # de arriba): BAS solo admite aplicar contra el vencimiento el mismo
-    # importe con el que se registra el comprobante -- ahora total_bruto
-    # (TotalGravado + TotalIva) en vez de siempre el neto, ver el docstring
-    # de validar_monto_aplicable_vs_neto para el detalle completo. Sigue
-    # colapsando a total_gravado cuando no hay alícuota resuelta (TotalIva=0
-    # en ese caso), así que el comportamiento histórico (bloquear si no se
-    # conoce el IVA real) no cambia.
-    error_monto_neto = validar_monto_aplicable_vs_neto(monto, total_bruto)
-    if error_monto_neto:
-        raise HTTPException(
-            status_code=422,
-            detail={"mensaje": error_monto_neto, "validaciones": [error_monto_neto]},
-        )
+    # Deliberadamente SIN gate local que compare `monto` contra total_bruto
+    # (existió como validar_monto_aplicable_vs_neto hasta 2026-08-04, ver
+    # docs/incidente-2026-08-04-pagos-solo-neto.md). Se quitó porque
+    # comparaba contra un total_bruto calculado acá mismo por Invoicy --
+    # nunca contra el importe realmente registrado en BAS (eso solo se
+    # confirma más abajo, dentro de crear_orden_de_pago_desde_factura, vía
+    # consultar_comprobante_externo) -- así que podía bloquear con una
+    # suposición en vez de un dato real. Ahora el flujo llega hasta BAS
+    # siempre; si el importe no cierra contra el vencimiento real, BAS lo
+    # rechaza en el paso de aplicación (ver el comentario ATENCIÓN en
+    # crear_orden_de_pago_desde_factura sobre la OP huérfana que deja ese
+    # rechazo, y op_huerfana/resultado["error"] más abajo, que sigue
+    # manejando y reportando ese caso).
 
     # NO se toca `monto` (el importe de la orden de pago en sí) -- es un
     # concepto aparte, puede ser un pago parcial de esta factura, no
