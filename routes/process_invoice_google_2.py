@@ -262,32 +262,62 @@ def _extraer_alicuota_iva(impuestos: list) -> Optional[float]:
     Solo devuelve un valor si hay EXACTAMENTE un impuesto tipo "IVA" con
     alícuota -- si Gemini no detectó ninguno, o detectó más de uno (factura
     con líneas a distintas tasas, caso que este pipeline no modela por
-    ítem), se prefiere no adivinar: devuelve None y el caller cae al
-    comportamiento histórico (neto, código de 21% por defecto)."""
+    ítem), se prefiere no adivinar: devuelve None.
+
+    IMPORTANTE -- `None` significa "no se pudo determinar", NUNCA "es 0%".
+    El caller (ver upsert_invoice en process_invoice_google_2.py y
+    worker()) debe tratar `None` como "no tocar iva_alicuota" (omitir el
+    campo del payload, no mandar 0 ni mandar None -- PocketBase convierte
+    None a 0 en un campo number, confirmado real, ver
+    docs/incidente-2026-08-04-pagos-solo-neto.md sección 10), para no pisar
+    con un 0 espurio un valor bueno ya guardado de un intento anterior en un
+    reprocesamiento. Solo cuando esta función devuelve un float (0.0
+    incluido -- Gemini puede decir explícitamente "IVA 0%") es seguro
+    persistirlo: ahí sí es un 0 confirmado, no un "no sé".
+
+    Cada rama que devuelve None loguea el motivo (a propósito, en las
+    cuatro) -- así se puede detectar el patrón en producción grepeando
+    logs, sin depender de mirar la base de datos."""
     if not impuestos:
+        app_logger.info(
+            "_extraer_alicuota_iva: no se extrajo ningún impuesto -- no se puede "
+            "determinar la alícuota (se conserva el valor previo si lo había)."
+        )
         return None
     ivas = [
         imp
         for imp in impuestos
         if str(imp.get("tipo", "")).strip().upper() == "IVA" and imp.get("alicuota") is not None
     ]
-    if len(ivas) != 1:
-        if impuestos and not ivas:
-            # Hay impuestos extraídos pero ninguno matcheó "IVA" exacto --
-            # puede ser una factura sin IVA (legítimo) o Gemini devolvió una
-            # variante del string ("IVA 21%", "I.V.A.", etc.) que este match
-            # exacto no captura. No se puede distinguir un caso del otro
-            # acá, así que se cae al comportamiento seguro (neto) igual --
-            # pero se loguea para poder notar el patrón en producción, no
-            # perderlo en silencio.
-            app_logger.info(
-                f"_extraer_alicuota_iva: {len(impuestos)} impuesto(s) extraído(s), "
-                "ninguno con tipo='IVA' exacto -- cae a neto."
-            )
+    if not ivas:
+        # Hay impuestos extraídos pero ninguno matcheó "IVA" exacto -- puede
+        # ser una factura sin IVA (legítimo) o Gemini devolvió una variante
+        # del string ("IVA 21%", "I.V.A.", etc.) que este match exacto no
+        # captura. No se puede distinguir un caso del otro acá, así que no
+        # se adivina.
+        app_logger.info(
+            f"_extraer_alicuota_iva: {len(impuestos)} impuesto(s) extraído(s), "
+            "ninguno con tipo='IVA' exacto -- no se puede determinar la alícuota "
+            "(se conserva el valor previo si lo había)."
+        )
+        return None
+    if len(ivas) > 1:
+        # Más de un impuesto tipo "IVA" (ej. factura con líneas a distintas
+        # tasas) -- este pipeline no modela IVA por ítem, así que no hay una
+        # única alícuota de cabecera que elegir.
+        app_logger.info(
+            f"_extraer_alicuota_iva: {len(ivas)} impuestos con tipo='IVA' -- "
+            "ambiguo, no se puede determinar una única alícuota (se conserva "
+            "el valor previo si lo había)."
+        )
         return None
     try:
         return round(float(ivas[0]["alicuota"]), 2)
     except (TypeError, ValueError):
+        app_logger.info(
+            f"_extraer_alicuota_iva: alícuota no numérica ({ivas[0].get('alicuota')!r}) "
+            "-- no se puede determinar (se conserva el valor previo si lo había)."
+        )
         return None
 
 
@@ -484,24 +514,43 @@ class InvoiceOrchestrator:
                             _impuestos_info = factura["data"].get("impuestos", {})
                             _alicuota_iva = _extraer_alicuota_iva(_impuestos_info.get("impuestos", []))
 
+                            # Campos extraídos por Gemini -- CUALQUIERA de ellos puede
+                            # venir None si la corrida actual falló/fue ambigua en esa
+                            # parte puntual (ver el comentario largo de
+                            # _extraer_alicuota_iva sobre el caso real que lo confirmó,
+                            # 2026-08-04, factura MEDINA/SHOW IMPORT: la extracción de
+                            # impuestos falló en un reintento y pisó con 0 una alícuota
+                            # de 21% ya guardada de un intento anterior bueno). Si esto
+                            # es un reprocesamiento del mismo process_id, mandar None
+                            # explícito PISARÍA un valor bueno ya guardado (o, para
+                            # campos number como iva_alicuota, PocketBase lo convierte
+                            # en 0 -- ver docs/incidente-2026-08-04-pagos-solo-neto.md
+                            # sección 10). Se omite el campo entero en vez de mandar
+                            # None, así upsert_invoice (merge por process_id) conserva
+                            # lo que ya había. Si es la primera vez (no hay valor
+                            # previo), omitir tampoco pierde nada: PocketBase usa su
+                            # default de todos modos.
+                            _campos_extraidos = {
+                                "numero_comprobante": _cmp.get("numero"),
+                                "fecha_emision": _cmp.get("fecha_emision"),
+                                "tipo_comprobante": _cmp.get("tipo"),
+                                "subtipo_comprobante": _cmp.get("subtipo"),
+                                "moneda": _cmp.get("moneda"),
+                                "emisor_nombre": _emisor.get("nombre"),
+                                "emisor_cuit": _emisor.get("id_fiscal"),
+                                "receptor_nombre": _receptor.get("nombre"),
+                                "receptor_cuit": _receptor.get("id_fiscal"),
+                                "subtotal": _items_info.get("subtotal"),
+                                "total": _items_info.get("total"),
+                                "cae": _otros.get("CAE"),
+                                "cae_vencimiento": _otros.get("vencimiento_CAE"),
+                                "forma_pago": _otros.get("forma_pago"),
+                                "iva_alicuota": _alicuota_iva,
+                            }
                             _pb_invoice_record = self._pb_client.upsert_invoice(
                                 {
                                     "process_id": process_id,
-                                    "numero_comprobante": _cmp.get("numero"),
-                                    "fecha_emision": _cmp.get("fecha_emision"),
-                                    "tipo_comprobante": _cmp.get("tipo"),
-                                    "subtipo_comprobante": _cmp.get("subtipo"),
-                                    "moneda": _cmp.get("moneda"),
-                                    "emisor_nombre": _emisor.get("nombre"),
-                                    "emisor_cuit": _emisor.get("id_fiscal"),
-                                    "receptor_nombre": _receptor.get("nombre"),
-                                    "receptor_cuit": _receptor.get("id_fiscal"),
-                                    "subtotal": _items_info.get("subtotal"),
-                                    "total": _items_info.get("total"),
-                                    "cae": _otros.get("CAE"),
-                                    "cae_vencimiento": _otros.get("vencimiento_CAE"),
-                                    "forma_pago": _otros.get("forma_pago"),
-                                    "iva_alicuota": _alicuota_iva,
+                                    **{k: v for k, v in _campos_extraidos.items() if v is not None},
                                     "sheets_saved": bool(saved),
                                     "status": "processing",
                                 }
@@ -2233,30 +2282,44 @@ async def _procesar_imagen_o_pdf_impl(
         _impuestos_info = factura["data"].get("impuestos", {})
         _alicuota_iva = _extraer_alicuota_iva(_impuestos_info.get("impuestos", []))
 
+        # Campos extraídos por Gemini -- CUALQUIERA de ellos puede venir None
+        # si la corrida actual falló/fue ambigua en esa parte puntual (ver el
+        # comentario largo de _extraer_alicuota_iva sobre el caso real que lo
+        # confirmó, 2026-08-04, factura MEDINA/SHOW IMPORT: la extracción de
+        # impuestos falló en un reintento y pisó con 0 una alícuota de 21%
+        # ya guardada de un intento anterior bueno). Si esto es un
+        # reprocesamiento del mismo process_id (retry-extraction, o una
+        # subida duplicada), mandar None explícito PISARÍA un valor bueno ya
+        # guardado (o, para campos number como iva_alicuota, PocketBase lo
+        # convierte en 0 -- ver docs/incidente-2026-08-04-pagos-solo-neto.md
+        # sección 10). Se omite el campo entero en vez de mandar None, así
+        # upsert_invoice (merge por process_id) conserva lo que ya había.
+        # Mismo criterio que ya se usaba para drive_file_id, ahora
+        # generalizado a todos los campos extraídos.
+        _campos_extraidos = {
+            "numero_comprobante": _cmp.get("numero"),
+            "fecha_emision": _cmp.get("fecha_emision"),
+            "tipo_comprobante": _cmp.get("tipo"),
+            "subtipo_comprobante": _cmp.get("subtipo"),
+            "moneda": _cmp.get("moneda"),
+            "emisor_nombre": _emisor.get("nombre"),
+            "emisor_cuit": _emisor.get("id_fiscal"),
+            "receptor_nombre": _receptor.get("nombre"),
+            "receptor_cuit": _receptor.get("id_fiscal"),
+            "subtotal": _items_info.get("subtotal"),
+            "total": _items_info.get("total"),
+            "cae": _otros.get("CAE"),
+            "cae_vencimiento": _otros.get("vencimiento_CAE"),
+            "forma_pago": _otros.get("forma_pago"),
+            "iva_alicuota": _alicuota_iva,
+            "drive_file_id": drive_file_id,
+        }
         _pb_invoice_record = orchestrator._pb_client.upsert_invoice(
             {
                 "process_id": process_id,
-                "numero_comprobante": _cmp.get("numero"),
-                "fecha_emision": _cmp.get("fecha_emision"),
-                "tipo_comprobante": _cmp.get("tipo"),
-                "subtipo_comprobante": _cmp.get("subtipo"),
-                "moneda": _cmp.get("moneda"),
-                "emisor_nombre": _emisor.get("nombre"),
-                "emisor_cuit": _emisor.get("id_fiscal"),
-                "receptor_nombre": _receptor.get("nombre"),
-                "receptor_cuit": _receptor.get("id_fiscal"),
-                "subtotal": _items_info.get("subtotal"),
-                "total": _items_info.get("total"),
-                "cae": _otros.get("CAE"),
-                "cae_vencimiento": _otros.get("vencimiento_CAE"),
-                "forma_pago": _otros.get("forma_pago"),
-                "iva_alicuota": _alicuota_iva,
+                **{k: v for k, v in _campos_extraidos.items() if v is not None},
                 "sheets_saved": bool(saved_sheet),
                 "status": "completed",
-                # Solo si la subida funcionó: mandar None acá pisaría con
-                # vacío un drive_file_id ya guardado si esto se reprocesa
-                # (upsert_invoice hace merge por process_id).
-                **({"drive_file_id": drive_file_id} if drive_file_id else {}),
             }
         )
         if _pb_invoice_record and _pb_invoice_record.get("id"):
