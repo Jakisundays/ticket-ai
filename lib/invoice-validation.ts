@@ -172,19 +172,13 @@ export function validarFacturaParaConfirmar(
     if ((subtotal > 0 || total > 0) && !coincideConSubtotal && !coincideConTotal) {
       itemsSummaryError = `Los ítems suman $${suma.toFixed(2)} -- no coincide ni con el subtotal ($${subtotal.toFixed(2)}) ni con el total ($${total.toFixed(2)}).`;
       messages.push("Los ítems no cierran contra el subtotal/total");
-    } else if (total > 0 && total > suma + TOLERANCIA_TOTAL) {
-      // Límite real de BAS (no de calidad de datos, por eso separado del
-      // chequeo de arriba): crear_orden_pago (Invoicy) solo puede aplicar
-      // el neto (suma, sin IVA) contra el vencimiento que se registra en
-      // BAS -- ver validar_monto_aplicable_vs_neto en
-      // Invoicy/utils/validaciones_pre_bas.py y la misma regla en
-      // ticket-ai-infra/pocketbase/pb_hooks/invoices.pb.js (la barrera
-      // real). Este caso es justo "coincideConSubtotal=true" (ítems en
-      // neto, total en bruto con IVA) -- pasa el chequeo de arriba pero hoy
-      // no se puede pagar automáticamente el monto completo.
-      itemsSummaryError = `Esta factura tiene IVA (el total, $${total.toFixed(2)}, supera la suma de los ítems, $${suma.toFixed(2)}). Por ahora el sistema solo puede aplicar automáticamente el pago sin IVA.`;
-      messages.push("La factura tiene IVA -- todavía no se puede pagar automáticamente");
     }
+    // NO se bloquea acá que "el total supere la suma de los ítems" (factura
+    // con IVA): eso frenaba casi cualquier factura real (todas tienen IVA)
+    // y no aportaba nada -- la barrera real contra el límite de BAS (solo
+    // se puede aplicar el neto) ya está en crear_orden_pago (Invoicy,
+    // validar_monto_aplicable_vs_neto) y en el hook de PocketBase, justo
+    // antes de escribir, que es donde corresponde.
   }
 
   return {
