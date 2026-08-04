@@ -57,6 +57,9 @@ export interface InvoicesRecord extends BaseSystemFields {
   cae: string;
   cae_vencimiento: string;
   forma_pago: string;
+  /** Alícuota real de IVA (ej. 10.5, 21, 0), extraída por Gemini -- puede no
+   * venir. Ver utils/bas_config.py:resolver_item_bas (Invoicy). */
+  iva_alicuota: number | null;
   drive_file_id: string;
   sheets_saved: boolean;
   status: InvoiceStatus;
@@ -122,10 +125,13 @@ export interface BasProcessingStatusRecord extends BaseSystemFields {
 }
 
 export interface BasCategoryMapRecord extends BaseSystemFields {
-  /** unique; debe cubrir "Bebidas y Bar", "Insumos", "Limpieza", "Gastos Generales" */
+  /** ya no unique sola -- unique compuesto con alicuota, ver migración
+   * 1783483945_add_alicuota_to_bas_category_map.js. Debe cubrir "Bebidas y
+   * Bar", "Insumos", "Limpieza", "Gastos Generales" */
   categoria: string;
+  /** alícuota de IVA del CodigoItem (21, 10.5, 5, 0, ...) */
+  alicuota: number;
   codigo_item: string;
-  /** true solo para "Gastos Generales" hoy */
   confirmado: boolean;
 }
 

@@ -282,6 +282,11 @@ export default async function InvoiceDetailPage({
                 <Field label="Total" tabular>
                   {formatCurrency(invoice.total, invoice.moneda)}
                 </Field>
+                <Field label="Alícuota IVA" tabular>
+                  {invoice.iva_alicuota !== null && invoice.iva_alicuota !== undefined
+                    ? `${invoice.iva_alicuota}%`
+                    : "—"}
+                </Field>
                 <Field label="CAE" tabular>
                   {invoice.cae || "—"}
                   {invoice.cae_vencimiento

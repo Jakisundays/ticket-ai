@@ -52,6 +52,7 @@ type InvoiceDraft = Pick<
   | "total"
   | "cae"
   | "cae_vencimiento"
+  | "iva_alicuota"
 >;
 
 type ItemDraft = Pick<
@@ -75,6 +76,7 @@ function invoiceDraftFrom(invoice: InvoicesRecord): InvoiceDraft {
     total: invoice.total,
     cae: invoice.cae,
     cae_vencimiento: invoice.cae_vencimiento,
+    iva_alicuota: invoice.iva_alicuota,
   };
 }
 
@@ -281,6 +283,7 @@ export default function InvoiceReviewForm({
           <TextField label="Moneda" value={invoiceDraft.moneda} onChange={(v) => setInvoiceField("moneda", v)} error={validation.fieldErrors.moneda} />
           <NumberField label="Subtotal" value={invoiceDraft.subtotal} onChange={(v) => setInvoiceField("subtotal", v)} />
           <NumberField label="Total" value={invoiceDraft.total} onChange={(v) => setInvoiceField("total", v)} />
+          <NumberField label="Alícuota IVA (%)" value={invoiceDraft.iva_alicuota} onChange={(v) => setInvoiceField("iva_alicuota", v)} />
           <TextField label="CAE" value={invoiceDraft.cae} onChange={(v) => setInvoiceField("cae", v)} mono error={validation.fieldErrors.cae} />
           <DateField label="Vencimiento CAE" value={invoiceDraft.cae_vencimiento} onChange={(v) => setInvoiceField("cae_vencimiento", v)} error={validation.fieldErrors.cae_vencimiento} />
         </div>
@@ -498,7 +501,7 @@ function NumberField({
   onChange,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   onChange: (value: number) => void;
 }) {
   return (
