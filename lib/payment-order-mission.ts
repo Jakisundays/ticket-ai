@@ -1,3 +1,5 @@
+import { getFriendlyBasError } from "./bas-error-messages";
+
 /**
  * Los 6 pasos reales que corre POST /api/payment-orders/{processId} del lado
  * de Invoicy (routes/process_invoice_google_2.py:2572-2746, repo hermano) en
@@ -28,8 +30,16 @@ export interface MissionStepView {
   key: string;
   label: string;
   state: MissionStepState;
-  /** Texto real del backend/BAS -- solo se muestra en el paso activo o el que falló. */
+  /** Texto a mostrar por defecto -- amigable cuando detail viene de un
+   * BasApiError crudo (ver getFriendlyBasError), o ya amigable tal cual
+   * cuando viene de una validación pre-BAS (Invoicy ya arma esos mensajes
+   * en español para el usuario final, no hay que "traducirlos" de nuevo). */
   detail?: string | null;
+  /** Texto técnico crudo -- solo presente cuando `detail` es la versión
+   * amigable de un error real de BAS, para un toggle "Ver detalle técnico".
+   * Ausente para mensajes de validación (ya no hay nada más técnico que
+   * mostrar debajo de esos). */
+  technical?: string | null;
 }
 
 export interface MissionOutcome {
@@ -37,8 +47,10 @@ export interface MissionOutcome {
   /** Índice en MISSION_STEPS donde ocurrió el fallo. null si success=true,
    * o si la respuesta no permite ubicar el paso (ver "conexión perdida"). */
   failedStepIndex: number | null;
-  /** Texto real del backend/BAS para ese paso -- nunca un mensaje genérico. */
+  /** Texto a mostrar (amigable si aplica, ver MissionStepView.detail). */
   detailText: string | null;
+  /** Ídem MissionStepView.technical. */
+  detailTechnical?: string | null;
 }
 
 /**
@@ -65,7 +77,14 @@ export function computeMissionSteps(
     if (outcome.success) return { ...step, state: "done" };
     const failedAt = outcome.failedStepIndex as number;
     if (i < failedAt) return { ...step, state: "done" };
-    if (i === failedAt) return { ...step, state: "error", detail: outcome.detailText };
+    if (i === failedAt) {
+      return {
+        ...step,
+        state: "error",
+        detail: outcome.detailText,
+        technical: outcome.detailTechnical,
+      };
+    }
     return { ...step, state: "skipped" };
   });
 }
@@ -126,17 +145,40 @@ export function inferMissionOutcome(status: number, data: unknown): MissionOutco
 
   if (status === 200 && typeof body.error === "string") {
     const text = body.error;
+    // Los 3 casos de acá abajo son siempre un BasApiError crudo (texto
+    // técnico armado en Invoicy con el título/detalle real de BAS) -- a
+    // diferencia de los `detail` de HTTPException más abajo (409/422/404),
+    // que ya son mensajes de validación en español pensados para el
+    // usuario final y NO deben pasar por el mapeo amigable de nuevo.
     if (text.startsWith("Orden de pago falló:")) {
-      return { success: false, failedStepIndex: 4, detailText: text };
+      const amigable = getFriendlyBasError(text);
+      return {
+        success: false,
+        failedStepIndex: 4,
+        detailText: amigable?.friendly ?? text,
+        detailTechnical: amigable ? text : null,
+      };
     }
     if (text.includes("verificación posterior")) {
-      return { success: false, failedStepIndex: 3, detailText: text };
+      const amigable = getFriendlyBasError(text);
+      return {
+        success: false,
+        failedStepIndex: 3,
+        detailText: amigable?.friendly ?? text,
+        detailTechnical: amigable ? text : null,
+      };
     }
     // Cualquier otro BasApiError que llega hasta acá viene de
     // crear_comprobante_compra (crear_orden_de_pago_desde_factura llama a
     // ese método primero y no envuelve sus excepciones -- las otras dos
     // formas ya se descartaron arriba).
-    return { success: false, failedStepIndex: 2, detailText: text };
+    const amigable = getFriendlyBasError(text);
+    return {
+      success: false,
+      failedStepIndex: 2,
+      detailText: amigable?.friendly ?? text,
+      detailTechnical: amigable ? text : null,
+    };
   }
 
   const detail = extraerDetalleTexto(body.detail);

@@ -21,14 +21,10 @@ export interface InvoiceDraftForValidation {
   numero_comprobante: string;
   cae: string;
   cae_vencimiento: string;
-  subtotal: number;
-  total: number;
 }
 
 export interface ItemDraftForValidation {
   id: string;
-  cantidad: number;
-  precio_unitario: number;
   precio_total: number;
 }
 
@@ -141,44 +137,30 @@ export function validarFacturaParaConfirmar(
     itemsSummaryError = "La factura no tiene ítems.";
     messages.push("Sin ítems");
   } else {
-    let suma = 0;
+    // Solo completitud (precio_total presente y positivo) -- antes también
+    // rechazaba acá si cantidad*precio_unitario no cerraba contra
+    // precio_total, y por separado si la suma de ítems no cerraba contra
+    // subtotal/total de la factura (tolerancias del 2% y $0.05). Se sacaron
+    // los dos cruces (2026-08-05, mismo criterio que la baja de
+    // validar_monto_aplicable_vs_neto en Invoicy, ver
+    // docs/incidente-2026-08-04-pagos-solo-neto.md): BAS nunca recibe
+    // cantidad/precio_unitario como restricción -- solo ImporteGravado ya
+    // calculado a partir de precio_total -- así que eran cruces inventados
+    // por este pipeline, sin correspondencia real en lo que BAS valida, y
+    // el ruido normal de OCR (descuentos, redondeos, impuestos a veces
+    // desglosados como ítem propio) los hacía bloquear facturas reales que
+    // BAS habría aceptado sin problema. La barrera real contra el límite de
+    // BAS (aplicar el neto correcto) queda en crear_orden_pago (Invoicy) y
+    // en el hook de PocketBase, justo antes de escribir, que es donde
+    // corresponde -- no acá, que es solo feedback en vivo del formulario.
     items.forEach((item) => {
-      suma += item.precio_total;
       if (item.precio_total <= 0) {
         itemErrors[item.id] = "Precio total inválido.";
-        return;
-      }
-      if (item.cantidad > 0 && item.precio_unitario > 0) {
-        const esperado = Math.round(item.cantidad * item.precio_unitario * 100) / 100;
-        const tolerancia = Math.max(0.02, Math.abs(esperado) * 0.02);
-        if (Math.abs(esperado - item.precio_total) > tolerancia) {
-          itemErrors[item.id] = "Cantidad/precio no coincide con el total.";
-        }
       }
     });
     if (Object.keys(itemErrors).length > 0) {
       messages.push("Hay ítems con datos inconsistentes");
     }
-
-    // Complementario al chequeo por ítem: la suma total debe cerrar contra
-    // el subtotal O el total de la factura (Gemini a veces desglosa
-    // impuestos como ítems propios y a veces no -- ambos son extracciones
-    // válidas).
-    const subtotal = draft.subtotal || 0;
-    const total = draft.total || 0;
-    const TOLERANCIA_TOTAL = 0.05;
-    const coincideConSubtotal = subtotal > 0 && Math.abs(suma - subtotal) <= TOLERANCIA_TOTAL;
-    const coincideConTotal = total > 0 && Math.abs(suma - total) <= TOLERANCIA_TOTAL;
-    if ((subtotal > 0 || total > 0) && !coincideConSubtotal && !coincideConTotal) {
-      itemsSummaryError = `Los ítems suman $${suma.toFixed(2)} -- no coincide ni con el subtotal ($${subtotal.toFixed(2)}) ni con el total ($${total.toFixed(2)}).`;
-      messages.push("Los ítems no cierran contra el subtotal/total");
-    }
-    // NO se bloquea acá que "el total supere la suma de los ítems" (factura
-    // con IVA): eso frenaba casi cualquier factura real (todas tienen IVA)
-    // y no aportaba nada -- la barrera real contra el límite de BAS (solo
-    // se puede aplicar el neto) ya está en crear_orden_pago (Invoicy,
-    // validar_monto_aplicable_vs_neto) y en el hook de PocketBase, justo
-    // antes de escribir, que es donde corresponde.
   }
 
   return {

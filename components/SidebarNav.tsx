@@ -23,8 +23,11 @@ import ThemeToggle from "@/components/ThemeToggle";
 
 const NAV_GROUPS = [
   {
-    label: "Panorama",
-    items: [{ href: "/", label: "Inicio", icon: LayoutDashboard }],
+    label: "Menú",
+    items: [
+      { href: "/", label: "Inicio", icon: LayoutDashboard },
+      { href: "/subir-factura-equipo", label: "Subir factura", icon: UploadCloud },
+    ],
   },
   {
     label: "Trabajo diario",
@@ -86,16 +89,11 @@ export default function SidebarNav({
 
       {/* mt-auto empuja este bloque al fondo del área de nav, justo antes
           del SidebarFooter (que es un elemento hermano aparte con el
-          avatar + cerrar sesión) -- fuera de los 3 grupos de arriba. */}
+          avatar + cerrar sesión) -- fuera de los 3 grupos de arriba.
+          "Subir factura" se movió al grupo "Menú" (junto a "Inicio"); acá
+          solo queda el toggle de tema. */}
       <div className="mt-auto flex flex-col gap-0.5 px-2 pb-1">
         <SidebarMenu>
-          <SidebarMenuItem>
-            <NavLink
-              href="/subir-factura-equipo"
-              icon={UploadCloud}
-              label="Subir factura"
-            />
-          </SidebarMenuItem>
           <SidebarMenuItem>
             <ThemeToggle />
           </SidebarMenuItem>

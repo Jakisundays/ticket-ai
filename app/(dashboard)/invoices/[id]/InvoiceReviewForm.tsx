@@ -135,28 +135,21 @@ export default function InvoiceReviewForm({
     });
   }
 
-  // Gemini es inconsistente sobre si desglosa impuestos (IVA, Ingresos
-  // Brutos, tasas municipales, etc.) como líneas de ítem propias o no --
-  // depende de cómo esté impresa la factura real (caso real: Litoral Gas,
-  // 15 ítems donde 2 son líneas de impuesto, sumando exacto contra `total`
-  // bruto; vs. una factura de un solo producto donde el ítem viene neto,
-  // sumando exacto contra `subtotal`). Ambos son resultados de extracción
-  // válidos -- lo único que indica un error real es que la suma de ítems no
-  // cierre contra NINGUNO de los dos. Ver lib/invoice-validation.ts para el
-  // detalle -- son las mismas 6 reglas que ya bloquean el pago real
-  // (Invoicy/utils/validaciones_pre_bas.py) y que la barrera real de
-  // confirmación (ticket-ai-infra/pocketbase/pb_hooks/invoices.pb.js).
+  // validarFacturaParaConfirmar solo chequea completitud por ítem
+  // (precio_total presente y positivo) -- ver lib/invoice-validation.ts. Ya
+  // no valida que la suma de ítems cierre contra subtotal/total ni que
+  // cantidad*precio_unitario cierre contra precio_total: Gemini es
+  // inconsistente sobre si desglosa impuestos (IVA, Ingresos Brutos, tasas
+  // municipales) como líneas de ítem propias o no, y ese cruce terminaba
+  // bloqueando facturas reales que BAS aceptaría sin problema (2026-08-05,
+  // mismo criterio que la baja de validar_monto_aplicable_vs_neto en
+  // Invoicy, ver docs/incidente-2026-08-04-pagos-solo-neto.md).
   const itemsForValidation = useMemo(
     () =>
-      items.map((item) => {
-        const draft = itemDrafts[item.id];
-        return {
-          id: item.id,
-          cantidad: draft.cantidad,
-          precio_unitario: draft.precio_unitario,
-          precio_total: draft.precio_total,
-        };
-      }),
+      items.map((item) => ({
+        id: item.id,
+        precio_total: itemDrafts[item.id].precio_total,
+      })),
     [items, itemDrafts]
   );
   const validation = useMemo(
@@ -201,10 +194,11 @@ export default function InvoiceReviewForm({
       });
 
       toast.success("Factura confirmada.");
-      // Avanza directo a la siguiente pendiente en vez de quedarse en esta
-      // (ahora bloqueada) -- mantiene al revisor en flujo, no lo devuelve a
-      // la lista entre cada factura. Si era la última, vuelve a la cola.
-      router.push(nextInvoiceId ? `/invoices/${nextInvoiceId}` : "/queue");
+      // Se queda en la factura recién confirmada (pedido explícito) en vez
+      // de avanzar a la siguiente de la cola -- nextInvoiceId/prevInvoiceId
+      // siguen existiendo para la navegación con flechas/atajos más abajo,
+      // esto solo cambia el destino después de confirmar.
+      router.push(`/invoices/${invoice.id}`);
     } catch (err) {
       setStatus("error");
       const message = err instanceof Error ? err.message : "No se pudo confirmar la factura.";

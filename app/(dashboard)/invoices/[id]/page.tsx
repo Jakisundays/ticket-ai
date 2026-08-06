@@ -6,6 +6,7 @@ import { createServerClient, ClientResponseError } from "@/lib/pocketbase-server
 import { cn } from "@/lib/utils";
 import StatusBadge from "@/components/StatusBadge";
 import ReopenButton from "./ReopenButton";
+import BasErrorDetail from "@/components/BasErrorDetail";
 import InvoiceFileViewer from "./InvoiceFileViewer";
 import InvoiceReviewForm from "./InvoiceReviewForm";
 import PaymentOrderPanel from "./PaymentOrderPanel";
@@ -340,7 +341,7 @@ export default async function InvoiceDetailPage({
                   </Field>
                   {basStatus.orden_pago_error && (
                     <Field label="Error">
-                      <span className="text-destructive">{basStatus.orden_pago_error}</span>
+                      <BasErrorDetail raw={basStatus.orden_pago_error} className="text-destructive" />
                     </Field>
                   )}
                 </div>

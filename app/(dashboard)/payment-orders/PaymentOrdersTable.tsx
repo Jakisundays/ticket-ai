@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/table";
 import StatusBadge from "@/components/StatusBadge";
 import DeleteRowMenu from "@/components/DeleteRowMenu";
+import BasErrorDetail from "@/components/BasErrorDetail";
 import type { MetodoPago, PaymentOrderStatus } from "@/lib/pocketbase-types";
 
 // Fila ya aplanada a valores serializables por el Server Component
@@ -225,9 +226,10 @@ export default function PaymentOrdersTable({ rows }: { rows: PaymentOrderRow[] }
                         <TableCell colSpan={9} className="bg-muted/40 py-3.5 pr-5 pl-[66px]">
                           <div className="flex flex-col gap-2 whitespace-normal">
                             {row.hasError && (
-                              <div className="max-w-[640px] rounded-md border border-status-warning-dot/25 bg-status-warning-bg px-2.5 py-2 font-mono text-xs leading-relaxed text-status-warning-fg">
-                                {row.errorMensaje}
-                              </div>
+                              <BasErrorDetail
+                                raw={row.errorMensaje}
+                                className="max-w-[640px] rounded-md border border-status-warning-dot/25 bg-status-warning-bg px-2.5 py-2 text-xs leading-relaxed text-status-warning-fg"
+                              />
                             )}
                             <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12.5px] text-muted-foreground">
                               <span>Pedido por {row.requestedByEmail}</span>
@@ -324,9 +326,10 @@ function OrderCard({
       {isOpen && (
         <div className="flex flex-col gap-2 border-t bg-muted/40 px-4 py-3.5">
           {row.hasError && (
-            <div className="rounded-md border border-status-warning-dot/25 bg-status-warning-bg px-2.5 py-2 font-mono text-xs leading-relaxed text-status-warning-fg">
-              {row.errorMensaje}
-            </div>
+            <BasErrorDetail
+              raw={row.errorMensaje}
+              className="rounded-md border border-status-warning-dot/25 bg-status-warning-bg px-2.5 py-2 text-xs leading-relaxed text-status-warning-fg"
+            />
           )}
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12.5px] text-muted-foreground">
             <span>Pedido por {row.requestedByEmail}</span>
