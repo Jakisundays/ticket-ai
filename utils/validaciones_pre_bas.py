@@ -110,23 +110,22 @@ def validar_cae(cae: Optional[str], cae_vencimiento: Optional[str]) -> Optional[
 
 
 def validar_items(items: list) -> Optional[str]:
+    """Solo completitud (hay ítems, cada uno tiene precio_total) -- lo único
+    que items_bas necesita para armar ImporteGravado por línea (ver
+    process_invoice_google_2.py). Antes también rechazaba acá si
+    cantidad * precio_unitario no cerraba contra precio_total (tolerancia
+    2%) -- se sacó (2026-08-05, mismo criterio que la baja de
+    validar_monto_aplicable_vs_neto, docs/incidente-2026-08-04-pagos-solo-
+    neto.md): BAS nunca recibe cantidad/precio_unitario como restricción,
+    solo ImporteGravado ya calculado a partir de precio_total -- ese cruce
+    era un invento de Invoicy sin correspondencia real en lo que BAS valida,
+    y el ruido normal de OCR (descuentos, redondeos) lo hacía bloquear
+    facturas reales que BAS habría aceptado sin problema."""
     if not items:
         return "No se detectaron ítems válidos en la factura para registrar. Revisá el documento antes de continuar."
     for item in items:
         if item.get("precio_total") is None:
             return "Algunos ítems de la factura tienen el precio incompleto. Completalos antes de registrar la factura."
-        cantidad = item.get("cantidad")
-        precio_unitario = item.get("precio_unitario")
-        precio_total = item.get("precio_total")
-        if cantidad is not None and precio_unitario is not None and precio_total is not None:
-            esperado = round(float(cantidad) * float(precio_unitario), 2)
-            real = round(float(precio_total), 2)
-            tolerancia = max(0.02, abs(esperado) * 0.02)
-            if abs(esperado - real) > tolerancia:
-                return (
-                    "Algunos ítems de la factura tienen la cantidad o el precio "
-                    "inconsistentes entre sí. Revisalos antes de continuar."
-                )
     return None
 
 
@@ -157,19 +156,6 @@ def validar_alicuota_iva(alicuota: Optional[float]) -> Optional[str]:
         return (
             f"La alícuota de IVA de esta factura ({alicuota}%) no parece válida. "
             "Verificala antes de continuar."
-        )
-    return None
-
-
-def validar_monto_vs_total(monto: Optional[float], total_factura: Optional[float]) -> Optional[str]:
-    if monto is None:
-        return None
-    if monto <= 0:
-        return "El monto a pagar no es válido. Verificalo antes de generar la orden de pago."
-    if total_factura is not None and monto > float(total_factura) + 0.01:
-        return (
-            f"El monto a pagar (${monto}) supera el total de la factura (${total_factura}). "
-            "Verificá el monto antes de continuar."
         )
     return None
 
