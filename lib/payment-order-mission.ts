@@ -207,7 +207,15 @@ export function inferMissionOutcome(status: number, data: unknown): MissionOutco
   // 502 del proxy (sin red), 500 inesperado, o cualquier forma no
   // reconocida: no sabemos en qué paso real se cortó, así que no acusamos
   // a ninguno -- el panel muestra un estado de "conexión perdida" aparte.
+  // Igual guardamos el body crudo como detailTechnical -- así el usuario
+  // puede expandir y ver qué llegó realmente, en vez de perder la forma no
+  // reconocida detrás de un string adivinado.
   const fallbackText =
     detail ?? (typeof body.error === "string" ? body.error : "No se pudo contactar al backend.");
-  return { success: false, failedStepIndex: null, detailText: fallbackText };
+  return {
+    success: false,
+    failedStepIndex: null,
+    detailText: fallbackText,
+    detailTechnical: JSON.stringify(body, null, 2),
+  };
 }

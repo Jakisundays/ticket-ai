@@ -22,7 +22,8 @@ import {
 } from "@/components/ui/table";
 import StatusBadge from "@/components/StatusBadge";
 import DeleteRowMenu from "@/components/DeleteRowMenu";
-import BasErrorDetail from "@/components/BasErrorDetail";
+import FriendlyErrorDetail from "@/components/FriendlyErrorDetail";
+import { getFriendlyBasError } from "@/lib/bas-error-messages";
 import type { MetodoPago, PaymentOrderStatus } from "@/lib/pocketbase-types";
 
 // Fila ya aplanada a valores serializables por el Server Component
@@ -226,8 +227,8 @@ export default function PaymentOrdersTable({ rows }: { rows: PaymentOrderRow[] }
                         <TableCell colSpan={9} className="bg-muted/40 py-3.5 pr-5 pl-[66px]">
                           <div className="flex flex-col gap-2 whitespace-normal">
                             {row.hasError && (
-                              <BasErrorDetail
-                                raw={row.errorMensaje}
+                              <FriendlyErrorDetail
+                                error={getFriendlyBasError(row.errorMensaje)}
                                 className="max-w-[640px] rounded-md border border-status-warning-dot/25 bg-status-warning-bg px-2.5 py-2 text-xs leading-relaxed text-status-warning-fg"
                               />
                             )}
@@ -326,8 +327,8 @@ function OrderCard({
       {isOpen && (
         <div className="flex flex-col gap-2 border-t bg-muted/40 px-4 py-3.5">
           {row.hasError && (
-            <BasErrorDetail
-              raw={row.errorMensaje}
+            <FriendlyErrorDetail
+              error={getFriendlyBasError(row.errorMensaje)}
               className="rounded-md border border-status-warning-dot/25 bg-status-warning-bg px-2.5 py-2 text-xs leading-relaxed text-status-warning-fg"
             />
           )}

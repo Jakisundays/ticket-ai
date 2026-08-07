@@ -18,6 +18,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import FriendlyErrorDetail from "@/components/FriendlyErrorDetail";
+import { getFriendlyExtractionError } from "@/lib/extraction-error-messages";
 import BatchItemsRealtime from "./BatchItemsRealtime";
 import RetryFailedButton from "./RetryFailedButton";
 
@@ -145,12 +147,13 @@ export default async function LoteDetallePage({
                         </Link>
                       )}
                       {item.status === "error" && (
-                        <span
-                          className="line-clamp-2 text-status-destructive-fg"
-                          title={item.error_message}
-                        >
-                          {item.error_message || "Error sin detalle."}
-                        </span>
+                        <FriendlyErrorDetail
+                          error={getFriendlyExtractionError(item.error_message)}
+                          className="text-status-destructive-fg [&_p]:line-clamp-2"
+                        />
+                      )}
+                      {item.status === "error" && !item.error_message && (
+                        <span className="text-status-destructive-fg">Error sin detalle.</span>
                       )}
                       {item.status === "skipped_duplicate" && (
                         <span className="text-muted-foreground">
@@ -205,10 +208,14 @@ export default async function LoteDetallePage({
                     Ver factura →
                   </Link>
                 )}
-                {item.status === "error" && (
-                  <span className="text-[12.5px] text-status-destructive-fg">
-                    {item.error_message || "Error sin detalle."}
-                  </span>
+                {item.status === "error" && item.error_message && (
+                  <FriendlyErrorDetail
+                    error={getFriendlyExtractionError(item.error_message)}
+                    className="text-[12.5px] text-status-destructive-fg"
+                  />
+                )}
+                {item.status === "error" && !item.error_message && (
+                  <span className="text-[12.5px] text-status-destructive-fg">Error sin detalle.</span>
                 )}
               </li>
             ))}

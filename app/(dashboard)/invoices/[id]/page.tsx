@@ -6,7 +6,9 @@ import { createServerClient, ClientResponseError } from "@/lib/pocketbase-server
 import { cn } from "@/lib/utils";
 import StatusBadge from "@/components/StatusBadge";
 import ReopenButton from "./ReopenButton";
-import BasErrorDetail from "@/components/BasErrorDetail";
+import FriendlyErrorDetail from "@/components/FriendlyErrorDetail";
+import { getFriendlyBasError } from "@/lib/bas-error-messages";
+import { getFriendlyExtractionError } from "@/lib/extraction-error-messages";
 import InvoiceFileViewer from "./InvoiceFileViewer";
 import InvoiceReviewForm from "./InvoiceReviewForm";
 import PaymentOrderPanel from "./PaymentOrderPanel";
@@ -145,9 +147,10 @@ export default async function InvoiceDetailPage({
               </p>
             </div>
             {invoice.error_message && (
-              <p className="max-w-md rounded-md bg-status-destructive-bg px-3 py-2.5 text-left font-mono text-[11.5px] leading-relaxed text-status-destructive-fg">
-                {invoice.error_message}
-              </p>
+              <FriendlyErrorDetail
+                error={getFriendlyExtractionError(invoice.error_message)}
+                className="max-w-md rounded-md bg-status-destructive-bg px-3 py-2.5 text-left text-[11.5px] leading-relaxed text-status-destructive-fg"
+              />
             )}
             <div className="mt-1 flex items-center gap-2.5">
               <RetryExtractionButton processId={invoice.process_id} />
@@ -341,7 +344,10 @@ export default async function InvoiceDetailPage({
                   </Field>
                   {basStatus.orden_pago_error && (
                     <Field label="Error">
-                      <BasErrorDetail raw={basStatus.orden_pago_error} className="text-destructive" />
+                      <FriendlyErrorDetail
+                        error={getFriendlyBasError(basStatus.orden_pago_error)}
+                        className="text-destructive"
+                      />
                     </Field>
                   )}
                 </div>
