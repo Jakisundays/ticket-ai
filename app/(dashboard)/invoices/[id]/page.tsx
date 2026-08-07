@@ -256,8 +256,17 @@ export default async function InvoiceDetailPage({
         <StatusBadge status="confirmed" />
       </PageHeader>
 
-      <div className="flex-1 overflow-y-auto px-4 py-4 md:px-7 md:py-7">
-        <div className="animate-fade-up mx-auto flex max-w-[1040px] flex-col gap-6">
+      <div className="animate-fade-up flex min-h-0 flex-1 flex-col lg:flex-row">
+        <div className="h-[42vh] shrink-0 border-b p-3 lg:h-auto lg:w-2/5 lg:min-w-[280px] lg:max-w-[560px] lg:border-r lg:border-b-0 lg:p-5">
+          <div className="sticky top-16 flex h-full flex-col gap-3.5 rounded-xl bg-sidebar p-4 shadow-(--shadow-2)">
+            <span className="overline px-0.5 text-[11px] text-sidebar-foreground">
+              Comprobante original
+            </span>
+            <InvoiceFileViewer processId={invoice.process_id} />
+          </div>
+        </div>
+        <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 md:px-7 md:py-7">
+        <div className="mx-auto flex max-w-[1040px] flex-col gap-6">
         <div className="flex flex-wrap items-start gap-6">
           {/* Columna izquierda: datos de solo lectura */}
           <div className="flex min-w-0 flex-1 basis-[420px] flex-col gap-5">
@@ -386,6 +395,7 @@ export default async function InvoiceDetailPage({
           <h2 className="mb-3.5 text-[13px] font-semibold text-foreground">Ítems</h2>
           <ItemsTable items={items} moneda={invoice.moneda} />
         </section>
+        </div>
         </div>
       </div>
     </div>
