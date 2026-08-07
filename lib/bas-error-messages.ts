@@ -4,6 +4,36 @@ export interface BasErrorDisplay {
 }
 
 /**
+ * Invoicy arma varios de estos strings pegando una frase humana + el repr
+ * de Python de la excepción de BAS al final -- ej. "...Detalle: La
+ * aplicación falló (409): {'title': '...', 'status': 409}". Ese `{...}` es
+ * un dict de Python con comillas simples (no JSON válido), y mostrado tal
+ * cual en el detalle técnico se lee como un blob de código pegado al final
+ * de una oración, no como texto. Esta función separa la prosa del dict
+ * embebido y lo reformatea como una sección legible ("Detalle de BAS:
+ * Mensaje / Código"), sin perder ningún dato -- si el string no tiene ese
+ * patrón exacto al final, lo devuelve intacto.
+ */
+export function formatTechnicalDetail(raw: string): string {
+  const texto = (raw || "").trim();
+  if (!texto) return texto;
+
+  const tailMatch = texto.match(/\((\d{3})\):\s*(\{[\s\S]*\})\s*$/);
+  if (!tailMatch) return texto;
+
+  const [fullTail, status, dictBlob] = tailMatch;
+  const titleMatch = dictBlob.match(/'title':\s*'([^']*)'/);
+  if (!titleMatch) return texto;
+
+  let prosa = texto.slice(0, texto.length - fullTail.length).trim();
+  prosa = prosa.replace(/[:\s]+$/, "");
+  if (prosa && !/[.!?]$/.test(prosa)) prosa += ".";
+
+  const detalle = `Detalle de BAS:\n  Mensaje: ${titleMatch[1]}\n  Código: ${status}`;
+  return prosa ? `${prosa}\n\n${detalle}` : detalle;
+}
+
+/**
  * Mapea el texto crudo de un error de BAS (bas_error persistido en
  * payment_orders/bas_processing_status, o el detailText que arma
  * inferMissionOutcome) a un mensaje amigable + el texto técnico original
@@ -39,7 +69,7 @@ export function getFriendlyBasError(raw: string | null | undefined): BasErrorDis
     return {
       friendly:
         "BAS rechazó el comprobante por una inconsistencia en los importes de IVA. Ya estamos en contacto con soporte de BAS para resolverlo.",
-      technical: texto,
+      technical: formatTechnicalDetail(texto),
     };
   }
   // Antes esto era un único includes("saldo del vencimiento no puede ser
@@ -57,13 +87,13 @@ export function getFriendlyBasError(raw: string | null | undefined): BasErrorDis
     return {
       friendly:
         "BAS no pudo aplicar el pago contra el comprobante -- el saldo registrado no coincide con el monto que se intentó pagar.",
-      technical: texto,
+      technical: formatTechnicalDetail(texto),
     };
   }
   if (texto.includes("Ya existe otro comprobante") && texto.includes("SP_VALIDA_TRANSAC")) {
     return {
       friendly: "Este comprobante ya fue registrado antes en BAS (número duplicado).",
-      technical: texto,
+      technical: formatTechnicalDetail(texto),
     };
   }
   if (
@@ -72,7 +102,7 @@ export function getFriendlyBasError(raw: string | null | undefined): BasErrorDis
   ) {
     return {
       friendly: "Falta configurar el método de pago para este comprobante.",
-      technical: texto,
+      technical: formatTechnicalDetail(texto),
     };
   }
   if (
@@ -81,12 +111,12 @@ export function getFriendlyBasError(raw: string | null | undefined): BasErrorDis
   ) {
     return {
       friendly: "El número de comprobante no coincide con la configuración de BAS.",
-      technical: texto,
+      technical: formatTechnicalDetail(texto),
     };
   }
   // Token vencido/401 y timeout de red van a caer acá hasta que aparezca un
   // caso real en producción con el string exacto -- no vale la pena
   // adivinar el texto todavía (401 además se reintenta solo dentro de
   // BasClient._request, así que rara vez llega hasta esta capa).
-  return { friendly: "Ocurrió un error al procesar en BAS.", technical: texto };
+  return { friendly: "Ocurrió un error al procesar en BAS.", technical: formatTechnicalDetail(texto) };
 }
