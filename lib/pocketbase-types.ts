@@ -27,6 +27,19 @@ export interface BaseSystemFields {
 
 export type InvoiceStatus = "pending" | "processing" | "completed" | "error";
 export type OrdenPagoStatus = "pending" | "success" | "failed";
+/** Nuevo alcance (P0-A..P0-F, 2026-08): eje de estado del registro REAL del
+ * comprobante en BAS -- distinto de `status` (mide la extraccion) y de
+ * `review_status` (mide la revision humana). "" en filas anteriores a este
+ * campo, tratar como "todavia sin resolver". Ver
+ * ticket-ai-infra/pocketbase/pb_migrations/1784500000_add_bas_traceability_and_state.js
+ * para la semantica exacta de cada valor. */
+export type BasRegistrationStatus =
+  | ""
+  | "awaiting_provider_match"
+  | "awaiting_service_selection"
+  | "ready_to_register"
+  | "registered"
+  | "register_failed";
 export type ProcessingJobStatus = "queued" | "processing" | "done" | "error";
 /** "" en filas legacy anteriores a este campo -- tratar como needs_review en todos lados. */
 export type ReviewStatus = "" | "needs_review" | "confirmed";
@@ -85,6 +98,10 @@ export interface InvoicesRecord extends BaseSystemFields {
    * deleted_at). Motor del dedup: scripts/batch_import.py y
    * routes/batch_import.py en Invoicy. */
   content_hash: string;
+  /** Nuevo alcance -- ver BasRegistrationStatus. */
+  bas_registration_status: BasRegistrationStatus;
+  /** relation -> bas_providers; "" mientras no se resolvió (awaiting_provider_match). */
+  bas_provider: RecordIdString | "";
 }
 
 export interface InvoiceItemsRecord extends BaseSystemFields {
@@ -118,10 +135,62 @@ export interface BasProcessingStatusRecord extends BaseSystemFields {
   comprobante_prefijo: string;
   comprobante_numero: number;
   comprobante_registrado: boolean;
+  /** Legado del alcance de Orden de Pago automática (fuera de alcance desde
+   * 2026-08-10) -- mide la SIMULACIÓN dry_run del intento automático, no un
+   * pago real. No confundir con `bas_registration_status` en InvoicesRecord
+   * (ese sí refleja el registro real del comprobante, P0-F). Se deja sin
+   * tocar por compatibilidad con filas históricas. */
   orden_pago_status: OrdenPagoStatus;
   orden_pago_error: string;
   retry_count: number;
   last_attempt_at: IsoDateString;
+  /** IdTransaccion que devuelve BAS en el 201 real de POST /api/ComprobantesCompra
+   * -- null si nunca hubo un registro real exitoso. */
+  bas_id_transaccion: number | null;
+  /** Timestamp del registro REAL exitoso -- "" si nunca hubo uno (distinto
+   * de last_attempt_at, que puede ser de un intento fallido). */
+  comprobante_registrado_at: IsoDateString | "";
+  /** Total que efectivamente se envió y BAS aceptó con el 201 -- BAS no
+   * expone este dato en ningún endpoint de consulta (confirmado real,
+   * validación P0-F 2026-08-12), así que esto es "lo que mandamos", no una
+   * reconfirmación independiente de BAS. null si nunca hubo un registro
+   * real exitoso, o si el comprobante ya existía de un intento previo (no
+   * hay forma de saber con qué Total quedó registrado esa vez). */
+  comprobante_total_registrado: number | null;
+  /** Error real del REGISTRO del comprobante (P0-F) -- verbatim, no un
+   * mensaje genérico. Campo separado de `orden_pago_error` a propósito (ver
+   * comentario de ese campo). */
+  bas_last_error: string;
+}
+
+/** Catálogo REAL de Servicios/Bienes de BAS, sincronizado desde BAS (nunca
+ * hardcodeado ni editable a mano) -- ver Invoicy/utils/bas_items_sync.py
+ * (P0-D) y Invoicy/utils/bas_item_resolver.py (P0-E, el resolver validado
+ * que SIEMPRE decide el CodigoItem final). Única fuente válida de
+ * "CodigoItem" en todo el sistema -- cualquier selector de Servicio/Item en
+ * el dashboard debe poblarse EXCLUSIVAMENTE desde acá, filtrando
+ * activo=true && elegible_compras=true (P0-G). */
+export interface BasItemsRecord extends BaseSystemFields {
+  /** key natural -- el CodigoItem real de BAS */
+  codigo: string;
+  descripcion: string;
+  descripcion_larga: string;
+  tipo: "servicio" | "bien";
+  codigo_impuesto: string;
+  tasa_iva_compras: number | null;
+  codigo_posicion: string;
+  /** true solo si la posición contable de este ítem tiene concepto de
+   * Compras (CODCPT='COM') -- confirmado real, ~193/256 ítems lo cumplen.
+   * Fail-safe: false si no se pudo determinar (ver _elegible_compras en
+   * bas_items_sync.py). */
+  elegible_compras: boolean;
+  /** false = el sync lo marcó como ya no presente en el catálogo vivo de
+   * BAS (soft-delete, nunca se borra la fila). */
+  activo: boolean;
+  /** true solo cuando este CodigoItem tuvo un 201 real verificado contra
+   * BAS -- ver comentario de la migración que crea esta colección. */
+  confirmado: boolean;
+  sincronizado_en: IsoDateString | "";
 }
 
 export interface BasCategoryMapRecord extends BaseSystemFields {
@@ -253,14 +322,15 @@ export interface ServiceAccountsRecord extends BaseSystemFields {
 export interface InvoiceWithItemsExpand extends InvoicesRecord {
   expand?: {
     invoice_items_via_invoice?: InvoiceItemsRecord[];
-    // bas_processing_status.invoice y payment_orders.invoice son relations
-    // `unique` (1:1) -- a diferencia de invoice_items_via_invoice, PocketBase
-    // expande esto como un objeto único, NO un array (verificado contra la
-    // respuesta real de la API). Un `[0]` sobre estos campos siempre da
-    // undefined.
+    // bas_processing_status.invoice es una relation `unique` (1:1) -- a
+    // diferencia de invoice_items_via_invoice, PocketBase expande esto como
+    // un objeto único, NO un array (verificado contra la respuesta real de
+    // la API). Un `[0]` sobre este campo siempre da undefined.
     bas_processing_status_via_invoice?: BasProcessingStatusRecord;
-    payment_orders_via_invoice?: PaymentOrdersRecord;
     confirmed_by?: UsersRecord;
+    /** `invoices.bas_provider` es un relation directa (no `_via_`, no
+     * back-relation) -- se expande con el nombre del campo tal cual. */
+    bas_provider?: BasProvidersRecord;
   };
 }
 
@@ -289,6 +359,7 @@ export const Collections = {
   Invoices: "invoices",
   InvoiceItems: "invoice_items",
   BasProviders: "bas_providers",
+  BasItems: "bas_items",
   BasProcessingStatus: "bas_processing_status",
   BasCategoryMap: "bas_category_map",
   BasPaymentMethods: "bas_payment_methods",

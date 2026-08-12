@@ -7,11 +7,10 @@ import { cn } from "@/lib/utils";
 import StatusBadge from "@/components/StatusBadge";
 import ReopenButton from "./ReopenButton";
 import FriendlyErrorDetail from "@/components/FriendlyErrorDetail";
-import { getFriendlyBasError } from "@/lib/bas-error-messages";
 import { getFriendlyExtractionError } from "@/lib/extraction-error-messages";
 import InvoiceFileViewer from "./InvoiceFileViewer";
 import InvoiceReviewForm from "./InvoiceReviewForm";
-import PaymentOrderPanel from "./PaymentOrderPanel";
+import ComprobanteRegistrationPanel from "./ComprobanteRegistrationPanel";
 import ExtractionProgress from "./ExtractionProgress";
 import RetryExtractionButton from "./RetryExtractionButton";
 import {
@@ -25,7 +24,7 @@ import {
 import {
   Collections,
   type BasCategoryMapRecord,
-  type BasPaymentMethodsRecord,
+  type BasItemsRecord,
   type InvoiceItemsRecord,
   type InvoiceWithItemsExpand,
 } from "@/lib/pocketbase-types";
@@ -48,7 +47,7 @@ export default async function InvoiceDetailPage({
       .collection<InvoiceWithItemsExpand>(Collections.Invoices)
       .getOne(id, {
         expand:
-          "invoice_items_via_invoice,bas_processing_status_via_invoice,confirmed_by,payment_orders_via_invoice",
+          "invoice_items_via_invoice,bas_processing_status_via_invoice,confirmed_by,bas_provider",
       });
   } catch (error) {
     if (error instanceof ClientResponseError && error.status === 404) {
@@ -168,12 +167,19 @@ export default async function InvoiceDetailPage({
   }
 
   if (!isConfirmed) {
-    const [categoriesResult, queueResult] = await Promise.all([
+    const [categoriesResult, queueResult, basItemsResult] = await Promise.all([
       pb.collection<BasCategoryMapRecord>(Collections.BasCategoryMap).getFullList({ sort: "categoria" }),
       pb.collection<{ id: string }>(Collections.Invoices).getFullList({
         filter: 'status = "completed" && review_status != "confirmed"',
         sort: "+created",
         fields: "id",
+      }),
+      // Única fuente válida de CodigoItem (P0-E/P0-G) -- filtrado server-side
+      // a lo que realmente se puede usar en una línea de ComprobanteCompra,
+      // nunca una lista hardcodeada.
+      pb.collection<BasItemsRecord>(Collections.BasItems).getFullList({
+        filter: "activo = true && elegible_compras = true",
+        sort: "descripcion",
       }),
     ]);
     const queueIds = queueResult.map((row) => row.id);
@@ -225,6 +231,7 @@ export default async function InvoiceDetailPage({
               invoice={invoice}
               items={items}
               categories={categoriesResult}
+              basItems={basItemsResult}
               prevInvoiceId={prevInvoiceId}
               nextInvoiceId={nextInvoiceId}
             />
@@ -236,9 +243,7 @@ export default async function InvoiceDetailPage({
 
   const driveUrl = driveFileUrl(invoice.drive_file_id);
   const confirmedByEmail = invoice.expand?.confirmed_by?.email;
-  const paymentMethods = await pb
-    .collection<BasPaymentMethodsRecord>(Collections.BasPaymentMethods)
-    .getFullList({ sort: "metodo_pago" });
+  const basProvider = invoice.expand?.bas_provider;
 
   return (
     <div className="flex h-full flex-col">
@@ -335,40 +340,34 @@ export default async function InvoiceDetailPage({
             </section>
 
             <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
-              <h2 className="mb-3.5 text-[13px] font-semibold text-foreground">Estado BAS</h2>
-              {basStatus ? (
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <Field label="Proveedor resuelto">
-                    {basStatus.proveedor_resuelto ? "Sí" : "No"}
-                    {basStatus.proveedor_codigo ? ` (${basStatus.proveedor_codigo})` : ""}
-                  </Field>
-                  <Field label="Comprobante registrado">
-                    {basStatus.comprobante_registrado ? "Sí" : "No"}
-                    {basStatus.comprobante_prefijo
-                      ? ` (${basStatus.comprobante_prefijo}-${basStatus.comprobante_numero})`
-                      : ""}
-                  </Field>
-                  <Field label="Orden de pago (intento automático)">
-                    <StatusBadge status={basStatus.orden_pago_status} />
-                  </Field>
-                  {basStatus.orden_pago_error && (
-                    <Field label="Error">
-                      <FriendlyErrorDetail
-                        error={getFriendlyBasError(basStatus.orden_pago_error)}
-                        className="text-destructive"
-                      />
-                    </Field>
-                  )}
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
+              <div className="mb-3.5 flex items-center justify-between">
+                <h2 className="text-[13px] font-semibold text-foreground">Estado BAS</h2>
+                <StatusBadge status={invoice.bas_registration_status || undefined} />
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field label="Proveedor">
+                  {basProvider
+                    ? `${basProvider.razon_social} (${basProvider.bas_codigo})`
+                    : basStatus?.proveedor_codigo
+                      ? basStatus.proveedor_codigo
+                      : "No resuelto todavía"}
+                </Field>
+                <Field label="Comprobante registrado">
+                  {basStatus?.comprobante_registrado ? "Sí" : "No"}
+                  {basStatus?.comprobante_prefijo
+                    ? ` (${basStatus.comprobante_prefijo}-${basStatus.comprobante_numero})`
+                    : ""}
+                </Field>
+              </div>
+              {!basStatus && (
+                <p className="mt-3 text-sm text-muted-foreground">
                   Todavía no hay estado de procesamiento BAS para esta factura.
                 </p>
               )}
             </section>
           </div>
 
-          {/* Columna derecha: estado + orden de pago */}
+          {/* Columna derecha: estado + registro en BAS */}
           <div className="flex w-full min-w-[300px] max-w-[400px] flex-1 basis-[320px] flex-col gap-4">
             <section className="flex flex-col gap-3.5 rounded-xl bg-card p-6 shadow-(--shadow-1)">
               <div className="flex items-center justify-between">
@@ -378,12 +377,11 @@ export default async function InvoiceDetailPage({
               <ReopenButton invoiceId={invoice.id} />
             </section>
 
-            <PaymentOrderPanel
+            <ComprobanteRegistrationPanel
               processId={invoice.process_id}
-              invoiceTotal={invoice.total}
+              basRegistrationStatus={invoice.bas_registration_status || ""}
+              basProcessingStatus={basStatus ?? null}
               moneda={invoice.moneda}
-              paymentMethods={paymentMethods}
-              existingOrder={invoice.expand?.payment_orders_via_invoice ?? null}
             />
           </div>
         </div>

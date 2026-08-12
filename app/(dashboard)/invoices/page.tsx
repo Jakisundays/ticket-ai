@@ -53,7 +53,6 @@ export default async function InvoicesPage() {
         filter:
           'review_status = "confirmed" && deleted_at = "" && (payment_orders_via_invoice.deleted_at != "" || payment_orders_via_invoice.id = "")',
         sort: "-created",
-        expand: "bas_processing_status_via_invoice",
       });
     items = result.items;
   } catch (error) {
@@ -62,31 +61,30 @@ export default async function InvoicesPage() {
   }
 
   const rows: InvoiceRow[] =
-    items?.map((invoice) => {
-      // Relation `unique` (1:1) -- PocketBase expande esto como un objeto
-      // unico, no un array (a diferencia de invoice_items).
-      const basStatus = invoice.expand?.bas_processing_status_via_invoice;
-
-      return {
-        id: invoice.id,
-        processId: invoice.process_id,
-        numero: invoice.numero_comprobante || invoice.process_id,
-        emisorNombre: invoice.emisor_nombre,
-        fecha: formatDate(invoice.fecha_emision),
-        monto: formatCurrency(invoice.total, invoice.moneda),
-        status: invoice.status,
-        reviewStatus: invoice.review_status || "needs_review",
-        sheetsSaved: invoice.sheets_saved,
-        driveUrl: driveFileUrl(invoice.drive_file_id),
-        basStatus: basStatus ? basStatus.orden_pago_status : null,
-        // Antes: false para status="error" ("decision de producto
-        // pendiente"). Ya no aplica -- invoices/[id]/page.tsx ahora tiene
-        // una vista dedicada para status="error" (motivo + reintentar) y
-        // para status="processing" (progreso en vivo), así que toda fila
-        // tiene a dónde ir.
-        clickable: true,
-      };
-    }) ?? [];
+    items?.map((invoice) => ({
+      id: invoice.id,
+      processId: invoice.process_id,
+      numero: invoice.numero_comprobante || invoice.process_id,
+      emisorNombre: invoice.emisor_nombre,
+      fecha: formatDate(invoice.fecha_emision),
+      monto: formatCurrency(invoice.total, invoice.moneda),
+      status: invoice.status,
+      reviewStatus: invoice.review_status || "needs_review",
+      sheetsSaved: invoice.sheets_saved,
+      driveUrl: driveFileUrl(invoice.drive_file_id),
+      // Nuevo alcance (P0-G) -- estado del registro REAL del comprobante en
+      // BAS, en invoices.bas_registration_status directo. Reemplaza al
+      // viejo bas_processing_status.orden_pago_status (medía la SIMULACIÓN
+      // dry_run del intento automático de Orden de Pago, ya fuera de
+      // alcance).
+      basStatus: invoice.bas_registration_status || null,
+      // Antes: false para status="error" ("decision de producto
+      // pendiente"). Ya no aplica -- invoices/[id]/page.tsx ahora tiene
+      // una vista dedicada para status="error" (motivo + reintentar) y
+      // para status="processing" (progreso en vivo), así que toda fila
+      // tiene a dónde ir.
+      clickable: true,
+    })) ?? [];
 
   return (
     <div className="flex h-full flex-col">

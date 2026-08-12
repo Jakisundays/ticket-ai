@@ -3,17 +3,20 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { getPocketBase } from "@/lib/pocketbase-browser";
 import {
   Collections,
   type BasCategoryMapRecord,
+  type BasItemsRecord,
   type InvoiceItemsRecord,
-  type InvoicesRecord,
+  type InvoiceWithItemsExpand,
 } from "@/lib/pocketbase-types";
 import { formatRelativeDateTime } from "@/lib/format";
 import { validarFacturaParaConfirmar, fechaComoInputDate } from "@/lib/invoice-validation";
 import { cn } from "@/lib/utils";
+import StatusBadge from "@/components/StatusBadge";
+import RecheckProviderButton from "./RecheckProviderButton";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,7 +40,7 @@ import {
 const TYPING_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 
 type InvoiceDraft = Pick<
-  InvoicesRecord,
+  InvoiceWithItemsExpand,
   | "numero_comprobante"
   | "tipo_comprobante"
   | "subtipo_comprobante"
@@ -57,10 +60,10 @@ type InvoiceDraft = Pick<
 
 type ItemDraft = Pick<
   InvoiceItemsRecord,
-  "descripcion" | "cantidad" | "precio_unitario" | "precio_total" | "categoria"
+  "descripcion" | "cantidad" | "precio_unitario" | "precio_total" | "categoria" | "bas_codigo_item"
 >;
 
-function invoiceDraftFrom(invoice: InvoicesRecord): InvoiceDraft {
+function invoiceDraftFrom(invoice: InvoiceWithItemsExpand): InvoiceDraft {
   return {
     numero_comprobante: invoice.numero_comprobante,
     tipo_comprobante: invoice.tipo_comprobante,
@@ -87,6 +90,7 @@ function itemDraftFrom(item: InvoiceItemsRecord): ItemDraft {
     precio_unitario: item.precio_unitario,
     precio_total: item.precio_total,
     categoria: item.categoria,
+    bas_codigo_item: item.bas_codigo_item,
   };
 }
 
@@ -98,12 +102,14 @@ export default function InvoiceReviewForm({
   invoice,
   items,
   categories,
+  basItems,
   prevInvoiceId,
   nextInvoiceId,
 }: {
-  invoice: InvoicesRecord;
+  invoice: InvoiceWithItemsExpand;
   items: InvoiceItemsRecord[];
   categories: BasCategoryMapRecord[];
+  basItems: BasItemsRecord[];
   prevInvoiceId: string | null;
   nextInvoiceId: string | null;
 }) {
@@ -156,6 +162,27 @@ export default function InvoiceReviewForm({
     () => validarFacturaParaConfirmar(invoiceDraft, itemsForValidation),
     [invoiceDraft, itemsForValidation]
   );
+
+  // P0-G: bloquear Confirmar si falta proveedor o algún CodigoItem válido.
+  // A propósito NO vive esto en lib/invoice-validation.ts (ese módulo es
+  // puramente sobre datos de la factura -- CUIT/fecha/CAE/etc, ver su
+  // comentario de cabecera) -- proveedor/CodigoItem son ejes de BAS
+  // (P0-B/P0-E), no de completitud de datos. `basItemCodes` es el ÚNICO
+  // catálogo válido (P0-E): el <Select> de abajo solo ofrece estos
+  // códigos, así que un bas_codigo_item que no esté acá es, por
+  // definición, inválido o desactualizado (ej. quedó de antes de que el
+  // ítem se desactivara en BAS).
+  const basItemCodes = useMemo(() => new Set(basItems.map((i) => i.codigo)), [basItems]);
+  const proveedorResuelto =
+    invoice.bas_registration_status === "awaiting_service_selection" ||
+    invoice.bas_registration_status === "ready_to_register" ||
+    invoice.bas_registration_status === "registered";
+  const itemsSinCodigoValido = items.filter((item) => {
+    const codigo = itemDrafts[item.id]?.bas_codigo_item;
+    return !codigo || !basItemCodes.has(codigo);
+  });
+  const puedeConfirmar = validation.isValid && proveedorResuelto && itemsSinCodigoValido.length === 0;
+
   async function handleConfirm() {
     setStatus("saving");
     setError(null);
@@ -221,7 +248,7 @@ export default function InvoiceReviewForm({
       const isConfirmShortcut = (event.metaKey || event.ctrlKey) && isEnterKey;
       if (isConfirmShortcut) {
         event.preventDefault();
-        if (status !== "saving" && validation.isValid) handleConfirm();
+        if (status !== "saving" && puedeConfirmar) handleConfirm();
         return;
       }
 
@@ -244,10 +271,41 @@ export default function InvoiceReviewForm({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, nextInvoiceId, prevInvoiceId, validation.isValid]);
+  }, [status, nextInvoiceId, prevInvoiceId, puedeConfirmar]);
+
+  const basProvider = invoice.expand?.bas_provider;
 
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto px-7 py-5">
+      {/* P0-G: proveedor en BAS -- ver reglas 1/2/3 del alcance (mostrar si
+          se encontró, mostrar awaiting_provider_match, botón de recheck). */}
+      <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <h2 className="text-[13px] font-semibold text-foreground">Proveedor en BAS</h2>
+            <StatusBadge status={invoice.bas_registration_status || undefined} />
+          </div>
+          {!proveedorResuelto && <RecheckProviderButton processId={invoice.process_id} />}
+        </div>
+        {proveedorResuelto && basProvider ? (
+          <p className="mt-2.5 flex items-center gap-1.5 text-[13px] text-foreground">
+            <CheckCircle2 className="size-3.5 shrink-0 text-status-success-fg" />
+            {basProvider.razon_social}{" "}
+            <span className="font-mono text-muted-foreground">({basProvider.bas_codigo})</span>
+          </p>
+        ) : invoice.bas_registration_status === "awaiting_provider_match" ? (
+          <p className="mt-2.5 flex items-start gap-1.5 text-[12.5px] text-status-warning-fg">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            El proveedor con CUIT {invoice.emisor_cuit} todavía no existe en BAS. Dalo de alta
+            manualmente en BAS y presioná &quot;Volver a buscar en BAS&quot;.
+          </p>
+        ) : (
+          <p className="mt-2.5 text-[12.5px] text-muted-foreground">
+            Todavía no se resolvió el proveedor para esta factura.
+          </p>
+        )}
+      </section>
+
       <section className="rounded-xl bg-card p-6 shadow-(--shadow-1)">
         <h2 className="mb-4 text-[13px] font-semibold text-foreground">Datos de la factura</h2>
         {!validation.isValid && (
@@ -293,7 +351,7 @@ export default function InvoiceReviewForm({
               <TableHead className="text-right">Precio unit.</TableHead>
               <TableHead className="text-right">Total</TableHead>
               <TableHead>Categoría</TableHead>
-              <TableHead>Código BAS</TableHead>
+              <TableHead>Servicio/Ítem BAS</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -357,8 +415,37 @@ export default function InvoiceReviewForm({
                       </SelectContent>
                     </Select>
                   </TableCell>
-                  <TableCell className="p-1.5 align-middle text-muted-foreground">
-                    {item.bas_codigo_item || "—"}
+                  <TableCell className="p-1.5 align-middle">
+                    {/* Única fuente válida de CodigoItem (P0-E/P0-G) --
+                        poblado EXCLUSIVAMENTE desde bas_items
+                        (activo+elegible_compras, filtrado server-side en
+                        page.tsx), nunca una lista hardcodeada. Cualquier
+                        valor elegido acá ya viene validado por
+                        construcción -- el hook de PocketBase
+                        (invoice_items.pb.js) además lo re-valida server-side
+                        como segunda línea de defensa. */}
+                    <Select
+                      value={basItemCodes.has(draft.bas_codigo_item) ? draft.bas_codigo_item : ""}
+                      onValueChange={(v) => setItemField(item.id, "bas_codigo_item", v)}
+                    >
+                      <SelectTrigger
+                        className={cn(
+                          "h-8 w-full min-w-[220px]",
+                          !basItemCodes.has(draft.bas_codigo_item) &&
+                            "border-status-warning-fg/60 text-status-warning-fg"
+                        )}
+                      >
+                        <SelectValue placeholder="Elegir ítem…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {basItems.map((basItem) => (
+                          <SelectItem key={basItem.id} value={basItem.codigo}>
+                            {basItem.descripcion}{" "}
+                            <span className="font-mono text-muted-foreground">({basItem.codigo})</span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </TableCell>
                 </TableRow>
               );
@@ -375,7 +462,8 @@ export default function InvoiceReviewForm({
         {items.length > 0 && (
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-muted-foreground">
-              La categoría define el código BAS automáticamente al guardar.
+              El Servicio/Ítem BAS es el que efectivamente se registra en BAS -- la categoría es
+              solo informativa.
             </p>
             {validation.itemsSummaryError && (
               <p className="flex items-center gap-1.5 rounded-sm bg-status-destructive-bg px-2.5 py-1 text-xs font-medium text-status-destructive-fg">
@@ -384,6 +472,14 @@ export default function InvoiceReviewForm({
               </p>
             )}
           </div>
+        )}
+        {itemsSinCodigoValido.length > 0 && (
+          <p className="mt-2 flex items-start gap-1.5 rounded-sm bg-status-warning-bg px-2.5 py-2 text-xs font-medium text-status-warning-fg">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            {itemsSinCodigoValido.length === 1
+              ? "Falta elegir un Servicio/Ítem BAS válido en 1 línea."
+              : `Falta elegir un Servicio/Ítem BAS válido en ${itemsSinCodigoValido.length} líneas.`}
+          </p>
         )}
       </section>
 
@@ -405,8 +501,16 @@ export default function InvoiceReviewForm({
           <Button
             type="button"
             onClick={handleConfirm}
-            disabled={status === "saving" || !validation.isValid}
-            title={!validation.isValid ? "Completá los datos obligatorios marcados arriba antes de confirmar." : undefined}
+            disabled={status === "saving" || !puedeConfirmar}
+            title={
+              !validation.isValid
+                ? "Completá los datos obligatorios marcados arriba antes de confirmar."
+                : !proveedorResuelto
+                  ? "El proveedor todavía no existe en BAS -- dalo de alta y volvé a buscar antes de confirmar."
+                  : itemsSinCodigoValido.length > 0
+                    ? "Elegí un Servicio/Ítem BAS válido en todas las líneas antes de confirmar."
+                    : undefined
+            }
             className="h-9 gap-2 px-4"
           >
             {status === "saving" && <Loader2 className="size-3.5 animate-spin" />}
