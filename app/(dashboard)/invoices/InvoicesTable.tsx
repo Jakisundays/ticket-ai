@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Search, Filter, FileText, ChevronRight } from "lucide-react";
 import StatusBadge from "@/components/StatusBadge";
 import EmptyState from "@/components/EmptyState";
+import DeleteRowMenu from "@/components/DeleteRowMenu";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -29,6 +30,7 @@ import { cn } from "@/lib/utils";
  * pasar props no serializables de Server a Client Components). */
 export type InvoiceRow = {
   id: string;
+  processId: string;
   numero: string;
   emisorNombre: string;
   fecha: string;
@@ -132,7 +134,7 @@ export default function InvoicesTable({ rows }: { rows: InvoiceRow[] }) {
             ))}
           </ul>
 
-          <div className="hidden overflow-hidden rounded-xl bg-card shadow-(--shadow-1) md:block">
+          <div className="hidden overflow-x-auto rounded-xl bg-card shadow-(--shadow-1) md:block">
             <Table className="min-w-[920px]">
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
@@ -144,7 +146,8 @@ export default function InvoicesTable({ rows }: { rows: InvoiceRow[] }) {
                   <TableHead>Revisión</TableHead>
                   <TableHead>Sheets</TableHead>
                   <TableHead>Drive</TableHead>
-                  <TableHead className="pr-5">Estado BAS</TableHead>
+                  <TableHead>Estado BAS</TableHead>
+                  <TableHead className="w-9 pr-3" />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -208,12 +211,19 @@ export default function InvoicesTable({ rows }: { rows: InvoiceRow[] }) {
                         <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
-                    <TableCell className="pr-5">
+                    <TableCell>
                       {row.basStatus ? (
                         <StatusBadge status={row.basStatus} />
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
+                    </TableCell>
+                    <TableCell className="pr-3">
+                      <DeleteRowMenu
+                        processId={row.processId}
+                        endpoint="invoice"
+                        itemLabel="esta factura"
+                      />
                     </TableCell>
                   </TableRow>
                 ))}
@@ -230,7 +240,7 @@ function RowCard({ row }: { row: InvoiceRow }) {
   const content = (
     <div
       className={cn(
-        "flex items-center gap-3 rounded-xl bg-card px-4 py-3.5 shadow-(--shadow-1) transition-colors",
+        "flex items-center gap-3 rounded-xl bg-card px-4 py-3.5 pr-11 shadow-(--shadow-1) transition-colors",
         row.clickable
           ? "active:bg-accent"
           : "cursor-default text-muted-foreground"
@@ -263,11 +273,23 @@ function RowCard({ row }: { row: InvoiceRow }) {
     </div>
   );
 
-  if (!row.clickable) return content;
-
   return (
-    <Link href={`/invoices/${row.id}`} className="block">
-      {content}
-    </Link>
+    <div className="relative">
+      {row.clickable ? (
+        <Link href={`/invoices/${row.id}`} className="block">
+          {content}
+        </Link>
+      ) : (
+        content
+      )}
+      {/* Hermano del Link, no anidado adentro -- ver mismo criterio en
+          QueueList.tsx. */}
+      <DeleteRowMenu
+        processId={row.processId}
+        endpoint="invoice"
+        itemLabel="esta factura"
+        className="absolute top-1/2 right-2 -translate-y-1/2"
+      />
+    </div>
   );
 }

@@ -8,7 +8,7 @@ import {
   Tags,
   Wallet,
   UploadCloud,
-  FlaskConical,
+  PackageOpen,
 } from "lucide-react";
 import {
   SidebarContent,
@@ -23,8 +23,11 @@ import ThemeToggle from "@/components/ThemeToggle";
 
 const NAV_GROUPS = [
   {
-    label: "Panorama",
-    items: [{ href: "/", label: "Inicio", icon: LayoutDashboard }],
+    label: "Menú",
+    items: [
+      { href: "/", label: "Inicio", icon: LayoutDashboard },
+      { href: "/subir-factura-equipo", label: "Subir factura", icon: UploadCloud },
+    ],
   },
   {
     label: "Trabajo diario",
@@ -38,6 +41,7 @@ const NAV_GROUPS = [
       },
       { href: "/invoices", label: "Facturas", icon: FileText },
       { href: "/payment-orders", label: "Órdenes de pago", icon: CreditCard },
+      { href: "/lotes", label: "Lotes", icon: PackageOpen },
     ],
   },
   {
@@ -46,10 +50,6 @@ const NAV_GROUPS = [
       { href: "/category-map", label: "Categorías BAS", icon: Tags },
       { href: "/payment-methods", label: "Métodos de pago", icon: Wallet },
     ],
-  },
-  {
-    label: "Herramientas",
-    items: [{ href: "/demo", label: "Demo: orden de pago", icon: FlaskConical }],
   },
 ];
 
@@ -89,16 +89,11 @@ export default function SidebarNav({
 
       {/* mt-auto empuja este bloque al fondo del área de nav, justo antes
           del SidebarFooter (que es un elemento hermano aparte con el
-          avatar + cerrar sesión) -- fuera de los 3 grupos de arriba. */}
+          avatar + cerrar sesión) -- fuera de los 3 grupos de arriba.
+          "Subir factura" se movió al grupo "Menú" (junto a "Inicio"); acá
+          solo queda el toggle de tema. */}
       <div className="mt-auto flex flex-col gap-0.5 px-2 pb-1">
         <SidebarMenu>
-          <SidebarMenuItem>
-            <NavLink
-              href="/subir-factura"
-              icon={UploadCloud}
-              label="Subir factura"
-            />
-          </SidebarMenuItem>
           <SidebarMenuItem>
             <ThemeToggle />
           </SidebarMenuItem>

@@ -14,6 +14,17 @@ const STATUS_META: Record<string, { label: string; bucket: StatusBucket }> = {
   success: { label: "Exitosa", bucket: "success" },
   error: { label: "Error", bucket: "destructive" },
   failed: { label: "Fallida", bucket: "destructive" },
+  running: { label: "Corriendo", bucket: "info" },
+  completed_with_errors: { label: "Completado con errores", bucket: "warning" },
+  uploading: { label: "Subiendo", bucket: "info" },
+  skipped_duplicate: { label: "Duplicado omitido", bucket: "neutral" },
+  // bas_registration_status (P0-G) -- estado del registro REAL del
+  // comprobante en BAS, ver lib/pocketbase-types.ts:BasRegistrationStatus.
+  awaiting_provider_match: { label: "Falta proveedor en BAS", bucket: "warning" },
+  awaiting_service_selection: { label: "Falta elegir ítem", bucket: "warning" },
+  ready_to_register: { label: "Listo para registrar", bucket: "info" },
+  registered: { label: "Registrado en BAS", bucket: "success" },
+  register_failed: { label: "Falló el registro", bucket: "destructive" },
 };
 
 const BUCKET_CLASSES: Record<StatusBucket, string> = {

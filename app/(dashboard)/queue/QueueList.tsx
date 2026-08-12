@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/input-group";
 import InitialsAvatar from "@/components/InitialsAvatar";
 import StatusBadge from "@/components/StatusBadge";
+import DeleteRowMenu from "@/components/DeleteRowMenu";
 import { cn } from "@/lib/utils";
 
 /**
@@ -19,6 +20,7 @@ import { cn } from "@/lib/utils";
  */
 export type QueueRow = {
   id: string;
+  processId: string;
   href: string;
   numero: string;
   tipo: string;
@@ -81,10 +83,10 @@ export default function QueueList({ rows }: { rows: QueueRow[] }) {
       ) : (
         <ul className="flex flex-col gap-3">
           {filtered.map((row) => (
-            <li key={row.id}>
+            <li key={row.id} className="relative">
               <Link
                 href={row.href}
-                className="flex items-center gap-4.5 rounded-xl bg-card px-6 py-4.5 shadow-(--shadow-1) transition-[box-shadow,transform] duration-(--dur-fast) ease-(--ease-out) hover:-translate-y-0.5 hover:shadow-(--shadow-2) focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35 active:scale-[0.99]"
+                className="flex items-center gap-4.5 rounded-xl bg-card px-6 py-4.5 pr-14 shadow-(--shadow-1) transition-[box-shadow,transform] duration-(--dur-fast) ease-(--ease-out) hover:-translate-y-0.5 hover:shadow-(--shadow-2) focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35 active:scale-[0.99]"
               >
                 <InitialsAvatar initials={row.iniciales} />
                 <div className="flex min-w-0 flex-1 flex-col gap-0.75">
@@ -129,6 +131,15 @@ export default function QueueList({ rows }: { rows: QueueRow[] }) {
                 </div>
                 <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
               </Link>
+              {/* Hermano del Link, no anidado adentro -- así el click en el
+                  menú no navega. Posicionado absoluto para no correr el
+                  contenido del Link (que ya tiene pr-14 para dejarle lugar). */}
+              <DeleteRowMenu
+                processId={row.processId}
+                endpoint="invoice"
+                itemLabel="esta factura de la cola"
+                className="absolute top-1/2 right-3 -translate-y-1/2"
+              />
             </li>
           ))}
         </ul>

@@ -80,16 +80,30 @@ export default function PaymentOrderMission({
               <div className="flex-1 pt-0.5">
                 <p className={cn("text-[12.5px] leading-tight", LABEL_CLASS[step.state])}>{step.label}</p>
                 {showDetail && (
-                  <p
+                  <div
                     className={cn(
-                      "animate-in fade-in mt-1.5 rounded-md px-2.5 py-2 font-mono text-[11.5px] leading-relaxed duration-(--dur-medium)",
+                      "animate-in fade-in mt-1.5 rounded-md px-2.5 py-2 text-[11.5px] leading-relaxed duration-(--dur-medium)",
                       step.state === "error"
                         ? "bg-status-destructive-bg text-status-destructive-fg"
                         : "bg-status-neutral-bg text-muted-foreground"
                     )}
                   >
-                    {step.detail ?? "Esto puede tardar unos segundos más…"}
-                  </p>
+                    <p>{step.detail ?? "Esto puede tardar unos segundos más…"}</p>
+                    {/* Solo presente cuando `detail` es la versión amigable de
+                        un BasApiError crudo -- ver getFriendlyBasError. Los
+                        mensajes de validación pre-BAS no tienen "más técnico"
+                        que mostrar, así que no traen `technical`. */}
+                    {step.technical && (
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-[11px] font-medium underline decoration-dotted underline-offset-2 select-none">
+                          Ver detalle técnico
+                        </summary>
+                        <pre className="mt-1 max-w-full overflow-x-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+                          {step.technical}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
                 )}
               </div>
             </div>

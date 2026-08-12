@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { Inbox, FileCheck, TrendingUp, AlertCircle, ChevronRight } from "lucide-react";
+import { Inbox, FileCheck, TrendingUp, AlertCircle, ChevronRight, UploadCloud } from "lucide-react";
 import { createServerClient } from "@/lib/pocketbase-server";
 import {
   Collections,
@@ -316,22 +316,30 @@ export default async function InicioPage() {
 
       <div className="flex-1 overflow-y-auto p-4 md:p-8">
         <div className="animate-fade-up mx-auto flex max-w-[1240px] flex-col gap-7">
-          <div>
-            <p className="font-heading text-[0.7rem] font-semibold tracking-[.08em] text-muted-foreground uppercase">
-              Resumen operativo · {overlineMes} {year}
-            </p>
-            <h2 className="mt-1.5 font-heading text-[1.65rem] font-bold text-primary">
-              {saludoPorHora(horaAr)}
-              {displayName ? `, ${displayName}` : ""}
-            </h2>
-            <p className="mt-1.5 text-[0.95rem] leading-relaxed text-muted-foreground">
-              Hay{" "}
-              <Link href="/queue" className="font-semibold text-foreground hover:underline">
-                {pendientesCount} factura{pendientesCount === 1 ? "" : "s"} esperando revisión
-              </Link>{" "}
-              y {fallidasCount} orden{fallidasCount === 1 ? "" : "es"} de pago que necesitan
-              atención.
-            </p>
+          <div className="flex flex-col items-start justify-between gap-4 min-[761px]:flex-row min-[761px]:items-end">
+            <div>
+              <p className="font-heading text-[0.7rem] font-semibold tracking-[.08em] text-muted-foreground uppercase">
+                Resumen operativo · {overlineMes} {year}
+              </p>
+              <h2 className="mt-1.5 font-heading text-[1.65rem] font-bold text-primary">
+                {saludoPorHora(horaAr)}
+                {displayName ? `, ${displayName}` : ""}
+              </h2>
+              <p className="mt-1.5 text-[0.95rem] leading-relaxed text-muted-foreground">
+                Hay{" "}
+                <Link href="/queue" className="font-semibold text-foreground hover:underline">
+                  {pendientesCount} factura{pendientesCount === 1 ? "" : "s"} esperando revisión
+                </Link>{" "}
+                y {fallidasCount} orden{fallidasCount === 1 ? "" : "es"} de pago que necesitan
+                atención.
+              </p>
+            </div>
+            <Button asChild size="default" className="shrink-0">
+              <Link href="/subir-factura-equipo">
+                <UploadCloud className="size-4" />
+                Subir factura
+              </Link>
+            </Button>
           </div>
 
           <div className="grid grid-cols-1 gap-4 min-[481px]:grid-cols-2 min-[761px]:grid-cols-4">

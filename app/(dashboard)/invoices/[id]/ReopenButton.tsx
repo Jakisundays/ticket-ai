@@ -20,9 +20,10 @@ import {
 } from "@/components/ui/alert-dialog";
 
 /**
- * Reabrir puede desbloquear una factura que ya tiene una orden de pago
- * intentada -- un click accidental no debería reabrir en silencio. Es el
- * único modal de toda esta feature, justamente por eso.
+ * Manda la factura de vuelta a needs_review (la cola de revisión) --
+ * puede desbloquear una factura que ya tiene una orden de pago intentada,
+ * así que un click accidental no debería hacerlo en silencio. Es el único
+ * modal de toda esta feature, justamente por eso.
  */
 export default function ReopenButton({ invoiceId }: { invoiceId: string }) {
   const router = useRouter();
@@ -52,21 +53,21 @@ export default function ReopenButton({ invoiceId }: { invoiceId: string }) {
       <AlertDialogTrigger asChild>
         <Button variant="outline" className="h-9 w-full justify-center gap-2">
           <RotateCcw className="size-3.5" />
-          Reabrir factura
+          Enviar a cola de revisión
         </Button>
       </AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>¿Reabrir esta factura?</AlertDialogTitle>
+          <AlertDialogTitle>¿Enviar esta factura a la cola de revisión?</AlertDialogTitle>
           <AlertDialogDescription>
-            Vas a poder editarla de nuevo. Si ya se creó una orden de pago, revisala antes de
-            reabrir.
+            Vas a poder editarla de nuevo desde la cola de revisión. Si ya se creó una orden de
+            pago, revisala antes de continuar.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancelar</AlertDialogCancel>
           <AlertDialogAction onClick={handleReopen} disabled={loading}>
-            {loading ? "Reabriendo…" : "Reabrir"}
+            {loading ? "Enviando…" : "Enviar a cola"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
