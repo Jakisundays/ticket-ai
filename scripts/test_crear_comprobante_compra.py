@@ -45,6 +45,7 @@ from utils.bas_config import (  # noqa: E402
     BAS_PREFIJO_TALONARIO_MA,
     BAS_SUCURSAL,
     BAS_TIPO_ENTREGA_SIN_STOCK,
+    fecha_hoy_bas,
 )
 
 logging.basicConfig(
@@ -137,7 +138,7 @@ def main() -> None:
     )
 
     prefijo_externo, numero_externo = _numero_externo_de_prueba()
-    fecha_hoy = datetime.date.today().isoformat()
+    fecha_hoy = fecha_hoy_bas().isoformat()  # huso argentino, ver utils/bas_config.py
 
     log.info("=" * 78)
     log.info("PASO 2 — Armar payload de ComprobanteCompra (Total=1)")
@@ -146,8 +147,17 @@ def main() -> None:
         "Comprobante": "MA",
         "Prefijo": BAS_PREFIJO_TALONARIO_MA,
         "Fecha": fecha_hoy,
+        # Sin IVA a propósito -- smoke test trivial de Total=1 neto. Para
+        # probar el caso CON IVA real, ver el patrón completo (ImporteIva
+        # por línea + TotalIva de cabecera, Total = TotalGravado + TotalIva)
+        # en routes/process_invoice_google_2.py (crear_orden_pago /
+        # InvoiceOrchestrator.procesar_factura_en_bas) -- "TotalIva": 0 y
+        # "ImporteIva": 0 quedan explícitos acá para no dejar
+        # "TasaIva": 21 sin el ImporteIva que lo respalde (el invariante que
+        # valida BAS es ImporteGravado + ImporteIva == ImporteTotal).
         "Total": 1,
         "TotalGravado": 1,
+        "TotalIva": 0,
         "MonedaComprobante": "L",  # probando explícito -- 409 previo: "no se pudo establecer la moneda correspondiente a la cuenta 0"
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
         "Empresa": BAS_EMPRESA,
@@ -170,8 +180,9 @@ def main() -> None:
                 "CantidadPrimeraUnidad": 1,
                 "PrecioUnitario": 1,
                 "ImporteGravado": 1,
+                "ImporteIva": 0,
                 "ImporteTotal": 1,
-                "TasaIva": 21,
+                "TasaIva": 0,
                 "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
                 "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
             }

@@ -73,6 +73,9 @@ BAS_PROVIDERS_COLLECTION = "bas_providers"
 BAS_PAYMENT_METHODS_COLLECTION = "bas_payment_methods"
 PAYMENT_ORDERS_COLLECTION = "payment_orders"
 BAS_CATEGORY_MAP_COLLECTION = "bas_category_map"
+BAS_ITEMS_COLLECTION = "bas_items"
+IMPORT_BATCHES_COLLECTION = "import_batches"
+IMPORT_BATCH_ITEMS_COLLECTION = "import_batch_items"
 
 
 class PocketBaseApiError(Exception):
@@ -300,6 +303,24 @@ class PocketBaseClient:
             return self._update(collection, existente["id"], payload)
         return self._create(collection, payload)
 
+    def _soft_delete(
+        self, collection: str, record_id: str, deleted_by: Optional[str], reason: Optional[str]
+    ) -> dict:
+        """
+        Nunca un borrado físico -- ver migración
+        1783483896_add_soft_delete_fields.js (BAS nunca se entera de un
+        borrado en PocketBase; perder el registro entero perdería toda la
+        trazabilidad sin revertir nada del lado de BAS). Solo marca
+        deleted_at/deleted_by/delete_reason; el caller es responsable de
+        filtrar deleted_at="" en cualquier listado.
+        """
+        payload = {
+            "deleted_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "deleted_by": deleted_by,
+            "delete_reason": reason or "",
+        }
+        return self._update(collection, record_id, payload)
+
     # ------------------------------------------------------------------ #
     # Métodos tipados (públicos) -- todos defensivos: devuelven None/False
     # en vez de propagar excepciones.
@@ -353,19 +374,92 @@ class PocketBaseClient:
 
     def obtener_categoria_map(self) -> dict:
         """
-        {categoria: codigo_item} desde "bas_category_map", solo filas con
-        confirmado=true (las sin confirmar son borradores del dashboard,
-        todavía no verificadas contra el catálogo real de BAS -- no deben
-        llegar al LLM ni usarse para armar un ComprobanteCompra real).
+        {categoria: {alicuota: codigo_item}} desde "bas_category_map", solo
+        filas con confirmado=true (las sin confirmar son borradores del
+        dashboard, todavía no verificadas contra el catálogo real de BAS --
+        no deben llegar al LLM ni usarse para armar un ComprobanteCompra
+        real). Una categoria puede tener varias filas, una por cada alicuota
+        de IVA con CodigoItem real en el catálogo de BAS (ver migración
+        1783483945_add_alicuota_to_bas_category_map.js) -- antes había una
+        sola fila por categoria, siempre a 21%, lo cual rompía cualquier
+        factura con otra alícuota real (ver bas_config.py:resolver_item_bas).
         Devuelve {} (no None) en caso de error -- el caller (bas_config.py)
         decide el fallback.
         """
         try:
             records = self._list_all(BAS_CATEGORY_MAP_COLLECTION, filter_str="confirmado = true")
-            return {r["categoria"]: r["codigo_item"] for r in records if r.get("categoria") and r.get("codigo_item")}
         except Exception as e:
             app_logger.warning(f"PocketBase: error en obtener_categoria_map: {e}")
             return {}
+        mapa: dict = {}
+        for r in records:
+            categoria = r.get("categoria")
+            codigo_item = r.get("codigo_item")
+            alicuota = r.get("alicuota")
+            if not categoria or not codigo_item or alicuota is None:
+                continue
+            # Conversión por FILA, no en el try de arriba (que solo cubre la
+            # llamada de red): una sola fila con un valor de alicuota no
+            # numérico (dato corrupto de una edición manual) no debe tirar
+            # TODA la colección al fallback hardcodeado -- eso rompería
+            # silenciosamente la resolución de CodigoItem para TODAS las
+            # categorías, no solo la fila con el dato malo.
+            try:
+                alicuota = round(float(alicuota), 2)
+            except (TypeError, ValueError):
+                app_logger.warning(
+                    f"PocketBase: fila de bas_category_map con alicuota no numérica "
+                    f"({categoria!r}: {alicuota!r}), se ignora esa fila."
+                )
+                continue
+            mapa.setdefault(categoria, {})[alicuota] = codigo_item
+        return mapa
+
+    # ------------------------------------------------------------------ #
+    # bas_items -- catálogo real de Servicios/Bienes de BAS (nuevo alcance
+    # 2026-08-10). Solo lo escribe el sync (utils/bas_items_sync.py, via
+    # service_accounts) -- nunca un humano desde el dashboard.
+    # ------------------------------------------------------------------ #
+    def upsert_bas_item(self, codigo: str, **campos) -> Optional[dict]:
+        """Upsert de un ítem del catálogo BAS en BAS_ITEMS_COLLECTION,
+        key = codigo. `campos` puede incluir cualquiera de: descripcion,
+        descripcion_larga, tipo, codigo_impuesto, tasa_iva_compras,
+        codigo_posicion, elegible_compras, activo, confirmado,
+        sincronizado_en."""
+        try:
+            if not codigo:
+                app_logger.warning("PocketBase: upsert_bas_item sin codigo, se omite")
+                return None
+            return self._upsert(BAS_ITEMS_COLLECTION, "codigo", codigo, campos)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en upsert_bas_item({codigo}): {e}")
+            return None
+
+    def list_bas_items(self, solo_elegibles: bool = True) -> list:
+        """Catálogo completo cacheado en PocketBase. `solo_elegibles=True`
+        (default) filtra a activo=true AND elegible_compras=true -- el
+        subset que realmente se puede usar en una línea de ComprobanteCompra
+        (confirmado con SQL real: 193 de 256 ítems del maestro cumplen esta
+        condición vía CONCEPTOSPOSCNT.CODCPT='COM'). `False` trae todo
+        (incluidos inactivos/no elegibles) para pantallas de diagnóstico.
+        Devuelve [] en caso de error -- mismo criterio que obtener_categoria_map."""
+        try:
+            filtro = 'activo = true && elegible_compras = true' if solo_elegibles else ""
+            return self._list_all(BAS_ITEMS_COLLECTION, filter_str=filtro, page_size=500)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en list_bas_items: {e}")
+            return []
+
+    def get_bas_item(self, codigo: str) -> Optional[dict]:
+        """Un ítem puntual del catálogo cacheado, por código. None si no
+        existe o si falló la consulta."""
+        try:
+            if not codigo:
+                return None
+            return self._find_one(BAS_ITEMS_COLLECTION, _pb_filter_eq("codigo", codigo))
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_bas_item({codigo}): {e}")
+            return None
 
     def obtener_file_token(self) -> Optional[str]:
         """
@@ -405,23 +499,37 @@ class PocketBaseClient:
                 "Codigo": record.get("bas_codigo"),
                 "RazonSocial": record.get("razon_social"),
                 "_nuevo": record.get("nuevo"),
+                # id del record de PocketBase (no de BAS) -- lo necesita el
+                # caller para setear relations que apunten a este proveedor
+                # cacheado (ej. invoices.bas_provider, nuevo alcance
+                # 2026-08-10). Agregado sin quitar nada -- cualquier código
+                # viejo que solo lea Codigo/RazonSocial/_nuevo sigue andando
+                # igual.
+                "_pb_id": record.get("id"),
             }
         except Exception as e:
             app_logger.warning(f"PocketBase: error en get_provider_cache({cuit}): {e}")
             return None
 
-    def set_provider_cache(self, cuit: str, proveedor: dict) -> bool:
+    def set_provider_cache(self, cuit: str, proveedor: dict) -> Optional[dict]:
         """
         Guarda/actualiza el proveedor resuelto para un CUIT en la colección
         "bas_providers" (campos flat: bas_codigo, razon_social, nuevo,
         last_verified_at). `proveedor` es el dict que devuelve BasClient (con
-        claves BAS reales: Codigo, RazonSocial, _nuevo). True si tuvo éxito.
+        claves BAS reales: Codigo, RazonSocial, _nuevo).
+
+        Devuelve el record de PocketBase ya escrito (con su "id") o None si
+        falló -- ANTES devolvía bool; se cambió el contrato (2026-08-10,
+        nuevo alcance) porque el único caller (InvoiceOrchestrator.
+        _buscar_proveedor_bas) necesita el id para setear invoices.
+        bas_provider (relation). Sigue siendo "truthy" en éxito y falsy en
+        fallo, así que un `if resultado:` viejo seguiría funcionando igual.
         """
         try:
             cuit_normalizado = "".join(c for c in (cuit or "") if c.isdigit())
             if not cuit_normalizado or not proveedor:
-                return False
-            self._upsert(
+                return None
+            return self._upsert(
                 BAS_PROVIDERS_COLLECTION,
                 "cuit",
                 cuit_normalizado,
@@ -432,10 +540,9 @@ class PocketBaseClient:
                     "last_verified_at": datetime.datetime.utcnow().isoformat() + "Z",
                 },
             )
-            return True
         except Exception as e:
             app_logger.warning(f"PocketBase: error en set_provider_cache({cuit}): {e}")
-            return False
+            return None
 
     def upsert_bas_processing_status(
         self, process_id: str, *, invoice: Optional[str] = None, **campos
@@ -641,6 +748,22 @@ class PocketBaseClient:
                 PAYMENT_ORDERS_COLLECTION, _pb_filter_eq("process_id", process_id)
             )
             if existente:
+                # Si el registro existente estaba soft-eliminado y esta
+                # llamada no es en sí un soft-delete (no trae `deleted_at`
+                # en `campos`), es un nuevo intento real reutilizando la
+                # misma fila -- limpiar los campos de borrado explícitamente.
+                # Si no se limpian, una Orden de Pago real y vigente puede
+                # quedar marcada `deleted_at` heredado de un borrado previo,
+                # y el guardrail de eliminar_invoice (que solo bloquea el
+                # borrado de la factura si encuentra una payment_order
+                # activa, es decir sin deleted_at) deja de detectarla.
+                if existente.get("deleted_at") and "deleted_at" not in campos:
+                    campos = {
+                        **campos,
+                        "deleted_at": None,
+                        "deleted_by": None,
+                        "delete_reason": None,
+                    }
                 return self._update(PAYMENT_ORDERS_COLLECTION, existente["id"], campos)
             if not invoice:
                 app_logger.warning(
@@ -655,6 +778,226 @@ class PocketBaseClient:
         except Exception as e:
             app_logger.warning(f"PocketBase: error en upsert_payment_order({process_id}): {e}")
             return None
+
+    def soft_delete_invoice(
+        self, process_id: str, *, deleted_by: Optional[str], reason: Optional[str] = None
+    ) -> Optional[dict]:
+        """
+        Soft-delete de una invoice (usado tanto para "Cola de revisión" como
+        "Facturas" -- ambas secciones del dashboard leen la misma colección,
+        solo con filtros de status/review_status distintos). Idempotente: si
+        el record ya tenía deleted_at seteado, lo devuelve tal cual sin
+        volver a escribir (evita pisar deleted_by/delete_reason originales
+        en una carrera de doble click). Las decisiones de negocio (bloquear
+        si hay una payment_order exitosa activa, etc.) viven en el endpoint
+        que llama a este método, no acá -- este método solo persiste.
+        `deleted_by` debe ser el id de PocketBase del user autenticado,
+        resuelto server-side desde la sesión, nunca del body del caller.
+        """
+        try:
+            if not process_id:
+                return None
+            record = self.get_invoice_by_process_id(process_id)
+            if record is None:
+                return None
+            if record.get("deleted_at"):
+                return record
+            return self._soft_delete(INVOICES_COLLECTION, record["id"], deleted_by, reason)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en soft_delete_invoice({process_id}): {e}")
+            return None
+
+    def soft_delete_payment_order(
+        self, process_id: str, *, deleted_by: Optional[str], reason: Optional[str] = None
+    ) -> Optional[dict]:
+        """Igual que soft_delete_invoice pero sobre PAYMENT_ORDERS_COLLECTION
+        -- ver ese docstring para el criterio de idempotencia y de dónde
+        vive `deleted_by`."""
+        try:
+            if not process_id:
+                return None
+            record = self.get_payment_order(process_id)
+            if record is None:
+                return None
+            if record.get("deleted_at"):
+                return record
+            return self._soft_delete(PAYMENT_ORDERS_COLLECTION, record["id"], deleted_by, reason)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en soft_delete_payment_order({process_id}): {e}")
+            return None
+
+    # ------------------------------------------------------------------ #
+    # Importación masiva de facturas (ver
+    # docs/plan-importacion-masiva-facturas.md)
+    # ------------------------------------------------------------------ #
+    def create_import_batch(
+        self,
+        *,
+        label: Optional[str],
+        total_files: int,
+        started_at: str,
+        created_by: Optional[str] = None,
+        monto_override: Optional[float] = None,
+    ) -> Optional[dict]:
+        try:
+            payload = {
+                "label": label or "",
+                "status": "running",
+                "total_files": total_files,
+                "started_at": started_at,
+            }
+            if created_by:
+                payload["created_by"] = created_by
+            if monto_override is not None:
+                payload["monto_override"] = monto_override
+            return self._create(IMPORT_BATCHES_COLLECTION, payload)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en create_import_batch: {e}")
+            return None
+
+    def get_import_batch(self, batch_id: str) -> Optional[dict]:
+        try:
+            if not batch_id:
+                return None
+            resp = self._request(
+                "GET", f"/api/collections/{IMPORT_BATCHES_COLLECTION}/records/{batch_id}"
+            )
+            if resp.status_code == 404:
+                return None
+            return _json_o_error(
+                resp, f"/api/collections/{IMPORT_BATCHES_COLLECTION}/records/{batch_id}", ok=(200,)
+            )
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_import_batch({batch_id}): {e}")
+            return None
+
+    def update_import_batch(self, batch_id: str, **campos) -> Optional[dict]:
+        try:
+            if not batch_id:
+                return None
+            return self._update(IMPORT_BATCHES_COLLECTION, batch_id, campos)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en update_import_batch({batch_id}): {e}")
+            return None
+
+    def create_batch_item(
+        self,
+        *,
+        batch: str,
+        original_path: str,
+        file_name: str,
+        content_hash: str,
+        status: str = "pending",
+        **campos,
+    ) -> Optional[dict]:
+        try:
+            payload = {
+                "batch": batch,
+                "original_path": original_path,
+                "file_name": file_name,
+                "content_hash": content_hash,
+                "status": status,
+                **campos,
+            }
+            return self._create(IMPORT_BATCH_ITEMS_COLLECTION, payload)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en create_batch_item({original_path}): {e}")
+            return None
+
+    def get_batch_item(self, item_id: str) -> Optional[dict]:
+        try:
+            if not item_id:
+                return None
+            resp = self._request(
+                "GET", f"/api/collections/{IMPORT_BATCH_ITEMS_COLLECTION}/records/{item_id}"
+            )
+            if resp.status_code == 404:
+                return None
+            return _json_o_error(
+                resp,
+                f"/api/collections/{IMPORT_BATCH_ITEMS_COLLECTION}/records/{item_id}",
+                ok=(200,),
+            )
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_batch_item({item_id}): {e}")
+            return None
+
+    def update_batch_item(self, item_id: str, **campos) -> Optional[dict]:
+        try:
+            if not item_id:
+                return None
+            return self._update(IMPORT_BATCH_ITEMS_COLLECTION, item_id, campos)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en update_batch_item({item_id}): {e}")
+            return None
+
+    def list_batch_items(self, batch_id: str) -> list:
+        """Todos los items de un batch, sin paginar de verdad -- a la escala
+        real (decenas de archivos por corrida, mismo orden de magnitud que el
+        MAX_ARCHIVOS_ZIP=20 ya existente), page_size generoso alcanza."""
+        try:
+            if not batch_id:
+                return []
+            return self._list_all(
+                IMPORT_BATCH_ITEMS_COLLECTION,
+                _pb_filter_eq("batch", batch_id),
+                page_size=500,
+            )
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en list_batch_items({batch_id}): {e}")
+            return []
+
+    def find_invoice_by_content_hash(self, content_hash: str) -> Optional[dict]:
+        """Dedup histórico/cross-batch: busca CUALQUIER invoice (de cualquier
+        fuente -- subida suelta o batch anterior) con este hash de contenido,
+        no soft-deleteada. Si existe, no hay que volver a registrar nada en
+        BAS -- ver docs/plan-importacion-masiva-facturas.md, sección 3."""
+        try:
+            if not content_hash:
+                return None
+            filtro = f'{_pb_filter_eq("content_hash", content_hash)} && deleted_at = ""'
+            return self._find_one(INVOICES_COLLECTION, filtro)
+        except Exception as e:
+            app_logger.warning(
+                f"PocketBase: error en find_invoice_by_content_hash({content_hash}): {e}"
+            )
+            return None
+
+    def find_stale_batch_items(self, batch_id: str, *, older_than_minutes: int = 15) -> list:
+        """Items de un batch que quedaron colgados en 'uploading'/'processing'
+        -- típicamente porque el backend se reinició a mitad de camino (ver
+        el gap de robustez documentado en el plan, sección 6: el cierre
+        "self-closing" del batch nunca dispara si el proceso muere antes de
+        terminar). Filtra por tiempo en Python, no en el filtro de PocketBase
+        -- a esta escala (decenas de items) es más simple y no depende de
+        adivinar el formato exacto de comparación de fechas que acepta la
+        API, que no está verificado en ningún otro lugar de este código."""
+        try:
+            if not batch_id:
+                return []
+            candidatos = self._list_all(
+                IMPORT_BATCH_ITEMS_COLLECTION,
+                f'{_pb_filter_eq("batch", batch_id)} && (status = "uploading" || status = "processing")',
+                page_size=500,
+            )
+            corte = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+                minutes=older_than_minutes
+            )
+            resultado = []
+            for item in candidatos:
+                actualizado = item.get("updated")
+                if not actualizado:
+                    continue
+                try:
+                    ts = datetime.datetime.fromisoformat(actualizado.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if ts < corte:
+                    resultado.append(item)
+            return resultado
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en find_stale_batch_items({batch_id}): {e}")
+            return []
 
 
 # ---------------------------------------------------------------------- #
