@@ -204,3 +204,51 @@ La OP huérfana `00001-00035017` (comprobante `FAC A 0007-00009810`, proveedor S
 **Alcance:** el mismo patrón (campo extraído mandado sin condición, vulnerable a que un reintento peor pise uno mejor) aplicaba a TODOS los campos de `_campos_extraidos`, no solo a `iva_alicuota` -- se corrigieron todos a la vez, no solo el que motivó la investigación.
 
 **Pendiente, no implementado:** este fix protege reprocesamientos del MISMO `process_id`. No cubre el caso, ya visto con MEDINA, de que alguien suba el mismo documento físico como una factura NUEVA (`process_id` distinto) -- ahí no hay "valor previo" que proteger del lado de esta factura nueva, es un problema de deduplicación de documentos, no de este bug puntual.
+
+---
+
+## 11. Investigación 2026-08-04: por qué `AplicacionesComprobantes` rechaza con "saldo del vencimiento no puede ser negativo" -- confirmado que no es un problema de payload
+
+Después del fix de la sección 10, siguieron apareciendo OPs huérfanas nuevas sobre comprobantes **viejos** (registrados antes de cualquier fix de hoy, en neto): OP `00001-00035017` (SHOW IMPORT, comprobante `0007-00009810`) y OP `00001-00035018` (MEDINA, comprobante `00003-00000021`). Investigación con evidencia real, sin tocar código:
+
+**Reconstrucción del registro original de MEDINA** (`00003-00000021`, interno `MA 00001-21896`): se registró el **2026-07-31 21:15:41 UTC**, con `Total = TotalGravado = $94.745,70` (neto puro, sin `TotalIva`/`ImporteIva` -- esos campos no existían en el código hasta el fix de hoy, commit `b2f30ae`). Reconstrucción con tres fuentes independientes que coinciden: (1) el código real de ese commit anterior (`git show b2f30ae~1`), con un comentario que confirma un 201 real ese mismo día; (2) los datos persistidos de esa factura en PocketBase (`subtotal=94745.70`, un único ítem); (3) el campo `Fecha` que devuelve HOY `GET /api/ConsultaComprobantesExternos` para ese comprobante (`"2026-07-31"`), que coincide exacto con `datetime.date.today()` de ese commit. No es el request crudo capturado (no se loguea en ningún lado, confirmado), pero las tres fuentes convergen.
+
+**Prueba real, ya existente, de que el mecanismo es el importe, no el payload:** `payment_orders` id `kva8ge902oty1cc` (2026-08-03, invoice `3c4ixi1pj98h2kc`, una de las 9 subidas del mismo documento MEDINA) tiene `status="success"`, `monto=1` -- **una aplicación real de $1 contra este mismo comprobante devolvió 200**, con el mismo código, mismo endpoint, misma estructura que los intentos de $104.694 que fallan. La única variable que cambia es el importe.
+
+**Schema real de BAS** (`GET /swagger/v1/swagger.json`, `Entidadesv2.Varias.AplicacionComprobante` y su array `ComprobantesAplicados` → `Entidadesv2.Varias.ComprobanteAplicado`): `additionalProperties: false` en ambos -- no existe ningún campo para pasar por alto la validación de saldo. Los únicos dos campos opcionales que no se envían (`Fecha` de cabecera, `FechaVencimiento` por línea) son solo informativos, no afectan el cálculo de saldo.
+
+**Conclusión:** la validación "saldo del vencimiento no puede ser negativo" (`SP_GENEROASI`/`SP_VALIDA_APLICACIONES`/`SP_ICR_APLICACIONES`) compara el `Importe` aplicado contra el saldo que BAS ya tiene guardado para ese vencimiento (`importe_registrado_original - aplicaciones_previas`), un valor que **no viaja en el request de `AplicacionesComprobantes`** y que la API no expone para lectura (`GET /api/ConsultaComprobantes(Externos)` no incluye `Total`/`Vencimientos`, confirmado real más de una vez). **Ningún cambio de JSON, de endpoint o de forma de referenciar el comprobante puede resolver esto** -- el límite vive en el lado de BAS, en un dato que ya fue escrito con el importe equivocado antes de que existiera el fix de IVA. La única corrección posible pasa por el importe registrado del comprobante en sí (fuera del alcance de esta sección -- ver sección 12 sobre anulación).
+
+---
+
+## 12. Investigación 2026-08-04: ¿se puede anular un comprobante de compra para volver a registrarlo? -- No, confirmado real
+
+Pregunta directa: si no se puede corregir el saldo de un vencimiento ya registrado en neto, ¿se puede anular el comprobante viejo y registrarlo de nuevo con el importe bruto correcto? Investigado con evidencia real, con una prueba controlada (proveedor de prueba `SUPERCOOP`, Total=1, numeración externa de prueba, sin tocar ningún comprobante real de MEDINA/SHOW IMPORT).
+
+**No existe ningún endpoint de eliminación.** `GET /swagger/v1/swagger.json`: `/api/ComprobantesCompra` solo tiene método `POST`. Ningún comprobante transaccional (`ComprobantesCompra`, `AplicacionesComprobantes`, `OrdenesPago`) tiene `DELETE` -- sí lo tienen tablas maestras (`Proveedores`, `Clientes`, `Cuentas`, etc.), confirmado barriendo los ~80 paths del swagger completo.
+
+**`POST /api/AnulacionesComprobantes` existe, pero rechaza este tipo de comprobante categóricamente -- no depende de si tiene OPs o aplicaciones asociadas.** Prueba real: se registró un comprobante de prueba nuevo (Total=1, SUPERCOOP, sin ninguna OP creada todavía -- el caso más simple posible) y se intentó anular inmediatamente:
+
+```json
+POST /api/AnulacionesComprobantes
+{"Comprobante": "MA", "Prefijo": "00001", "Numero": 21905, "Indicador": "E", "Empresa": 1, "Sucursal": 1, ...}
+```
+```json
+409
+{"title": "El comprobante Factura de Compra A no es un comprobante anulable en el sistema.(SP_VALIDA_ELIM_ANUL)", "status": 409}
+```
+
+El rechazo es por **tipo de comprobante** (`SP_VALIDA_ELIM_ANUL`), no por estado -- este comprobante de prueba no tenía ninguna OP, ninguna aplicación, nada más que el registro recién creado, y aun así BAS lo rechazó. No hace falta probar el caso "con OP asociada": si el tipo entero está excluido de la validación de anulación, el estado no cambia el resultado. Verificado con `GET /api/ConsultaComprobantes` después del intento: `"Anulado": false` -- sin cambios, consistente con el 409.
+
+**La numeración externa queda bloqueada mientras el comprobante exista (sin anular).** Se intentó re-registrar la misma `PrefijoComprobanteExterno`/`NumeroComprobanteExterno` del comprobante de prueba recién creado:
+
+```json
+409
+{"title": "Ya existe otro comprobante tipo Factura de Compra A            con ese número externo(SP_VALIDA_TRANSAC)(SP_ICR_COMPROB_COMPRA)", "status": 409}
+```
+
+Esto confirma que la restricción de numeración externa única es del lado del servidor de BAS, no solo un chequeo de nuestro código (`consultar_comprobante_externo`).
+
+**`/api/AnulacionReservasCredito` no aplica** -- es un endpoint de `Cliente` (venta), campos `Cliente`/`CondicionVta`, sin relación con comprobantes de compra ni proveedores.
+
+**Conclusión:** no hay ninguna forma soportada por la API de BAS de eliminar, anular o "reiniciar" un comprobante de compra ya registrado, sin importar su estado. La numeración externa de un comprobante existente queda permanentemente ocupada. La única vía posible para corregir el importe de un comprobante ya registrado en neto es fuera de esta API -- no investigado más a fondo, no era el alcance pedido.

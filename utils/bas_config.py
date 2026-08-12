@@ -132,7 +132,17 @@ def categorias_disponibles() -> list:
 
 
 def resolver_item_bas(categoria: str, alicuota: Optional[float] = None) -> tuple:
-    """(codigo_item, alicuota_real_del_codigo) para una categoría + la
+    """NO USAR DIRECTO para armar un payload real hacia BAS (P0-E,
+    2026-08-12): esto da un CANDIDATO de CodigoItem, sin validar contra el
+    catálogo real sincronizado ("bas_items", ver utils/bas_items_sync.py) --
+    puede devolver un código que ya no existe o dejó de estar habilitado
+    para compras. Para el CodigoItem final y validado, usar
+    utils.bas_item_resolver.resolver_codigo_item (que llama a esta función
+    internamente como generador de candidatos y agrega el gate contra
+    bas_items). Esta función y `codigo_item_de_categoria` quedan como
+    piezas internas de resolución de candidatos, no como fuente final.
+
+    (codigo_item, alicuota_real_del_codigo) para una categoría + la
     alícuota real de IVA de la factura (ver invoices.iva_alicuota,
     extraída por Gemini pero antes descartada).
 

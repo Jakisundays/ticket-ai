@@ -46,8 +46,8 @@ from tools_standard import build_tools
 from utils.bas import BasClient, BasApiError
 from utils.pocketbase_client import PocketBaseClient
 from utils.rate_limit import limiter
+from utils.bas_item_resolver import resolver_codigo_item
 from utils.bas_config import (
-    codigo_item_de_categoria,
     fecha_hoy_bas,
     BAS_EMPRESA,
     BAS_SUCURSAL,
@@ -66,6 +66,7 @@ from utils.bas_config import (
 )
 from utils.validaciones_pre_bas import (
     validar_factura_antes_de_pago_real,
+    normalizar_numero_comprobante,
 )
 import google.auth.transport.requests as google_auth_requests
 
@@ -160,7 +161,8 @@ def _extraer_prefijo_numero_comprobante_externo(comprobante: dict):
     existente. Usada tanto para persistir en PocketBase como por el endpoint
     de reintento de orden de pago.
     """
-    numero_completo = ((comprobante or {}).get("numero") or "").replace(" ", "")
+    numero_completo = normalizar_numero_comprobante((comprobante or {}).get("numero")) or ""
+    numero_completo = numero_completo.replace(" ", "")
     prefijo_externo, _, numero_externo_str = numero_completo.partition("-")
     numero_externo = int(numero_externo_str) if numero_externo_str.isdigit() else 0
     return prefijo_externo, numero_externo
@@ -250,14 +252,16 @@ def _extraer_alicuota_iva(impuestos: list) -> Optional[float]:
     dato se calculaba pero solo se usaba para formatear_impuestos (texto de
     Sheets/email), nunca se persistía ni llegaba al payload de BAS. Se usa
     para calcular ImporteIva/TotalIva por línea/cabecera (ver items_bas en
-    procesar_factura_en_bas y crear_orden_pago) -- NO para elegir el
-    CodigoItem: confirmado real que BAS no cruza ImporteIva/TasaIva contra
-    la tasa configurada del catálogo para el CodigoItem elegido, así que
-    codigo_item_de_categoria sigue llamándose siempre sin alícuota (cae al
-    código de 21% de esa categoría, comportamiento histórico). Ver
-    utils/bas_config.py:resolver_item_bas si en algún momento se decide
-    conectar la selección de CodigoItem a la alícuota real -- hoy esa rama
-    existe pero ningún caller real la ejercita.
+    procesar_factura_en_bas y crear_orden_pago). Desde P0-E (2026-08-12)
+    TAMBIÉN se usa para elegir el CodigoItem: confirmado real que BAS no
+    cruza ImporteIva/TasaIva contra la tasa configurada del catálogo para
+    el CodigoItem elegido (no hay riesgo de 409 por esto), así que conectar
+    la alícuota real a la resolución (ver utils.bas_item_resolver.resolver_codigo_item
+    -> utils.bas_config.resolver_item_bas) solo mejora la imputación
+    contable (ej. "Ec. Alim 10.5%" en vez de siempre "Ec. Alim 21%" para una
+    factura al 10.5%) -- si no hay una variante confirmada para la alícuota
+    exacta, cae al 21% de esa categoría (comportamiento histórico), pero
+    ese candidato SIEMPRE se valida contra bas_items antes de usarse.
 
     Solo devuelve un valor si hay EXACTAMENTE un impuesto tipo "IVA" con
     alícuota -- si Gemini no detectó ninguno, o detectó más de uno (factura
@@ -531,7 +535,7 @@ class InvoiceOrchestrator:
                             # previo), omitir tampoco pierde nada: PocketBase usa su
                             # default de todos modos.
                             _campos_extraidos = {
-                                "numero_comprobante": _cmp.get("numero"),
+                                "numero_comprobante": normalizar_numero_comprobante(_cmp.get("numero")),
                                 "fecha_emision": _cmp.get("fecha_emision"),
                                 "tipo_comprobante": _cmp.get("tipo"),
                                 "subtipo_comprobante": _cmp.get("subtipo"),
@@ -567,9 +571,19 @@ class InvoiceOrchestrator:
                                             "precio_unitario": d.get("precio_unitario"),
                                             "precio_total": d.get("precio_total"),
                                             "categoria": d.get("categoria"),
-                                            "bas_codigo_item": codigo_item_de_categoria(
-                                                d.get("categoria", "")
-                                            ),
+                                            # Sugerencia informativa para el dashboard --
+                                            # NUNCA la fuente del CodigoItem real que se
+                                            # manda a BAS (eso lo decide
+                                            # procesar_factura_en_bas, más abajo, con el
+                                            # mismo resolver). Si no se puede resolver un
+                                            # ítem válido, queda vacío en vez de guardar
+                                            # un valor inventado (P0-E, regla 5).
+                                            "bas_codigo_item": resolver_codigo_item(
+                                                categoria=d.get("categoria", ""),
+                                                alicuota=_alicuota_iva,
+                                                pb_client=self._pb_client,
+                                            ).get("codigo_item")
+                                            or "",
                                         }
                                         for idx, d in enumerate(_detalles, 1)
                                     ],
@@ -649,11 +663,23 @@ class InvoiceOrchestrator:
                         # no podía incluirlo. Mismo aislamiento try/except de siempre.
                         try:
                             if _pb_invoice_record and _pb_invoice_record.get("id"):
+                                # Recalculado acá (no reusado del try anterior)
+                                # a propósito: ese try tiene su propio
+                                # except que puede haber cortado antes de
+                                # asignarlo -- no depender de leakage de
+                                # variable entre bloques try separados.
+                                _proveedor_info_invoice = resultado_bas.get("proveedor") or {}
                                 self._pb_client.upsert_invoice(
                                     {
                                         "process_id": process_id,
                                         "drive_file_id": drive_file_id,
                                         "status": "completed",
+                                        # Nuevo alcance 2026-08-10 -- ver
+                                        # docstring de bas_registration_status
+                                        # en la migración
+                                        # 1784500000_add_bas_traceability_and_state.js.
+                                        "bas_registration_status": resultado_bas.get("bas_registration_status") or "",
+                                        "bas_provider": _proveedor_info_invoice.get("pb_id") or "",
                                     }
                                 )
                         except Exception as e:
@@ -1502,12 +1528,34 @@ class InvoiceOrchestrator:
 
     # === Integración con BAS (ERP) ===
 
-    def _obtener_o_verificar_proveedor_bas(self, cuit: str, razon_social: str):
+    def _buscar_proveedor_bas(self, cuit: str, razon_social: str = ""):
         """
-        Envuelve BasClient.verificar_o_dar_de_alta_proveedor() con una cache en
-        memoria del orquestador (self._proveedores_bas_cache), key = CUIT
-        normalizado. Devuelve None si el CUIT viene vacío (no se puede resolver
-        proveedor sin CUIT) para que el caller decida cómo abortar.
+        Busca un proveedor en BAS por CUIT. SOLO LECTURA -- nunca crea ni
+        modifica el maestro de proveedores de BAS. Alcance confirmado
+        2026-08-10: BAS es la única fuente de verdad para proveedores; si
+        el CUIT no existe, el flujo debe quedar bloqueado
+        (bas_registration_status="awaiting_provider_match") hasta que un
+        humano lo cree a mano en BAS -- nunca se da de alta desde acá.
+
+        Reemplaza a `_obtener_o_verificar_proveedor_bas`, que buscaba-o-creaba
+        y además "reparaba" la cuenta corriente de proveedores existentes
+        (ver utils/bas.py: verificar_o_dar_de_alta_proveedor y
+        asegurar_cuenta_corriente_proveedor, ambas DEPRECATED, no borradas,
+        sin ningún caller en producción a partir de este cambio).
+
+        `razon_social` ya no se usa para dar de alta (no hay alta) -- se
+        conserva solo para loguearla en el caso "no encontrado", así quien
+        lea el log sabe qué nombre debería tener el proveedor a crear en
+        BAS.
+
+        Devuelve un dict con forma BAS ("Codigo", "RazonSocial", ...) más
+        dos claves internas (prefijo "_", mismo criterio que ya usaba el
+        código viejo con "_nuevo"): "_nuevo" (siempre False -- ya no hay
+        alta automática, se mantiene la clave por compatibilidad de forma
+        con callers existentes) y "_pb_id" (el id del record de PocketBase
+        "bas_providers" que cachea este proveedor -- lo necesita el caller
+        para setear invoices.bas_provider, una relation). None si el CUIT
+        viene vacío o si no existe en BAS.
         """
         cuit_normalizado = "".join(c for c in (cuit or "") if c.isdigit())
         if not cuit_normalizado:
@@ -1524,43 +1572,26 @@ class InvoiceOrchestrator:
             proveedor_cacheado = None
             app_logger.warning(f"PocketBase: error consultando get_provider_cache({cuit_normalizado}): {e}")
         if proveedor_cacheado is not None:
-            # OJO: "bas_providers" solo guarda Codigo/RazonSocial/nuevo (campos
-            # flat) -- NUNCA confirma si el proveedor tiene CuentasCorrientes.
-            # Un hit acá se saltaba por completo la verificación de cuenta
-            # contable, así que cualquier proveedor cacheado ANTES de este fix
-            # (o cuyo alta fue anterior al fix de "cuenta 0") quedaba roto para
-            # siempre en este path, aunque verificar_o_dar_de_alta_proveedor ya
-            # supiera repararlo -- nunca se llegaba a invocarlo. Reparar acá
-            # también, con un GET barato por Código (no la búsqueda cara por
-            # CUIT) -- ver BasClient.asegurar_cuenta_corriente_proveedor.
-            try:
-                reparado = self._bas_client.asegurar_cuenta_corriente_proveedor(
-                    codigo=proveedor_cacheado.get("Codigo"),
-                    imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
-                )
-                proveedor_cacheado = reparado or proveedor_cacheado
-            except Exception as e:
-                app_logger.warning(
-                    f"BAS: error verificando/reparando CuentasCorrientes de "
-                    f"'{proveedor_cacheado.get('Codigo')}' (cache hit, CUIT {cuit_normalizado}): {e}"
-                )
             self._proveedores_bas_cache[cuit_normalizado] = proveedor_cacheado
             return proveedor_cacheado
 
-        proveedor = self._bas_client.verificar_o_dar_de_alta_proveedor(
-            cuit=cuit_normalizado,
-            razon_social=razon_social,
-            empresa_alta=BAS_EMPRESA,
-            trat_impositivo=BAS_TRAT_IMPOSITIVO_RI,
-            trat_impositivo_prov=BAS_TRAT_IMPOSITIVO_PROV_RI,
-            imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
-        )
+        proveedor = self._bas_client.buscar_proveedor_por_cuit(cuit_normalizado)
+        if proveedor is None:
+            app_logger.warning(
+                f"BAS: proveedor CUIT {cuit_normalizado} (razón social extraída: "
+                f"{razon_social!r}) no existe en el maestro de BAS. No se crea "
+                "automáticamente -- requiere alta manual en BAS."
+            )
+        else:
+            proveedor = dict(proveedor)
+            proveedor["_nuevo"] = False
+            try:
+                registro_pb = self._pb_client.set_provider_cache(cuit_normalizado, proveedor)
+                proveedor["_pb_id"] = (registro_pb or {}).get("id")
+            except Exception as e:
+                app_logger.warning(f"PocketBase: error en set_provider_cache({cuit_normalizado}): {e}")
+                proveedor["_pb_id"] = None
         self._proveedores_bas_cache[cuit_normalizado] = proveedor
-        try:
-            if proveedor is not None:
-                self._pb_client.set_provider_cache(cuit_normalizado, proveedor)
-        except Exception as e:
-            app_logger.warning(f"PocketBase: error en set_provider_cache({cuit_normalizado}): {e}")
         return proveedor
 
     def procesar_factura_en_bas(
@@ -1592,7 +1623,18 @@ class InvoiceOrchestrator:
         Proveedor/CUIT/número de comprobante externo NUNCA se tocan -- son
         la identidad real del documento, no el impacto contable.
         """
-        resultado = {"proveedor": None, "comprobante": None, "orden_pago": None, "error": None}
+        resultado = {
+            "proveedor": None,
+            "comprobante": None,
+            "orden_pago": None,
+            "error": None,
+            # Nuevo alcance 2026-08-10 -- estado de registro que los callers
+            # persisten en invoices.bas_registration_status (campo agregado
+            # en la migración 1784500000_add_bas_traceability_and_state.js).
+            # None acá = no se llegó ni a intentar resolver el proveedor
+            # (ej. sin CUIT, ver más abajo).
+            "bas_registration_status": None,
+        }
         try:
             emisor_receptor = factura_data.get("emisor_receptor", {})
             emisor = emisor_receptor.get("emisor", {})
@@ -1622,12 +1664,36 @@ class InvoiceOrchestrator:
                 app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
                 return resultado
 
-            proveedor = self._obtener_o_verificar_proveedor_bas(cuit_emisor, emisor.get("nombre", ""))
+            proveedor = self._buscar_proveedor_bas(cuit_emisor, emisor.get("nombre", ""))
             if proveedor is None:
-                resultado["error"] = f"No se pudo resolver/crear proveedor para CUIT {cuit_emisor}."
-                app_logger.error(f"[{process_id}] BAS: {resultado['error']}")
+                # No se crea automáticamente (alcance confirmado 2026-08-10)
+                # -- este NO es el mismo caso que antes ("no se pudo
+                # resolver/crear"): acá está garantizado que no existe en
+                # BAS, hay que darlo de alta a mano y reintentar (ver
+                # endpoint recheck-provider, P0-C).
+                resultado["error"] = (
+                    f"Proveedor con CUIT {cuit_emisor} no existe en BAS. Invoicy no "
+                    "crea proveedores automáticamente -- debe darse de alta "
+                    "manualmente en BAS y luego reintentar."
+                )
+                resultado["bas_registration_status"] = "awaiting_provider_match"
+                app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
                 return resultado
-            resultado["proveedor"] = {"codigo": proveedor.get("Codigo"), "nuevo": proveedor.get("_nuevo")}
+            resultado["proveedor"] = {
+                "codigo": proveedor.get("Codigo"),
+                "nuevo": proveedor.get("_nuevo"),
+                "pb_id": proveedor.get("_pb_id"),
+            }
+            # El Servicio/CodigoItem real (catálogo BAS, ver
+            # utils/bas_items_sync.py) se resuelve y VALIDA acá (P0-E,
+            # 2026-08-12, ver utils/bas_item_resolver.resolver_codigo_item).
+            # Estado por default hasta confirmar que se pudo resolver un
+            # ítem válido para TODAS las líneas: "esperando que se
+            # elija/confirme el servicio", no "listo para registrar" --
+            # si la resolución falla más abajo, la factura queda en este
+            # estado (regla 4 del alcance: nunca construir un payload con
+            # un CodigoItem inventado o faltante).
+            resultado["bas_registration_status"] = "awaiting_service_selection"
 
             if monto_override is not None:
                 # Un único ítem sintético -- mismo patrón ya probado real
@@ -1636,9 +1702,18 @@ class InvoiceOrchestrator:
                 # (si hay) para seguir ejercitando la resolución real de
                 # CodigoItem, no una hardcodeada.
                 categoria_real = detalles[0].get("categoria", "") if detalles else ""
+                resolucion = resolver_codigo_item(
+                    categoria=categoria_real,
+                    alicuota=alicuota_iva,
+                    pb_client=self._pb_client,
+                )
+                if not resolucion["valido"]:
+                    resultado["error"] = resolucion["motivo_bloqueo"]
+                    app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
+                    return resultado
                 items_bas = [
                     {
-                        "CodigoItem": codigo_item_de_categoria(categoria_real),
+                        "CodigoItem": resolucion["codigo_item"],
                         "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
                         "NumeroUnidadMedida": "1",
                         "CantidadPrimeraUnidad": 1,
@@ -1658,8 +1733,38 @@ class InvoiceOrchestrator:
                     }
                 ]
             else:
+                if not detalles:
+                    resultado["error"] = "La factura no tiene ítems detallados -- no hay nada que resolver."
+                    app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
+                    return resultado
+
+                # Primera pasada: resolver y VALIDAR el CodigoItem de cada
+                # línea contra bas_items ANTES de construir ningún payload.
+                # Si cualquier línea no resuelve a un ítem válido, se
+                # bloquea la factura ENTERA -- no se arma un
+                # comprobante_compra_payload parcial ni se llama a BAS (ver
+                # regla 4 del alcance: nunca un CodigoItem inventado o
+                # faltante llega al payload).
+                resoluciones = [
+                    resolver_codigo_item(
+                        categoria=item.get("categoria", ""),
+                        alicuota=alicuota_iva,
+                        pb_client=self._pb_client,
+                    )
+                    for item in detalles
+                ]
+                invalidas = [r for r in resoluciones if not r["valido"]]
+                if invalidas:
+                    resultado["error"] = (
+                        f"No se pudo resolver un CodigoItem válido para {len(invalidas)} "
+                        f"de {len(detalles)} ítem(s) de la factura: "
+                        + " | ".join(r["motivo_bloqueo"] for r in invalidas)
+                    )
+                    app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
+                    return resultado
+
                 items_bas = []
-                for item in detalles:
+                for item, resolucion in zip(detalles, resoluciones):
                     importe_gravado = round(float(item.get("precio_total", 0) or 0), 2)
                     # ImporteIva/TasaIva con la alícuota REAL de la factura
                     # (iva_alicuota, extraída por Gemini -- ver
@@ -1667,32 +1772,29 @@ class InvoiceOrchestrator:
                     # alícuota única, 0 (neto puro, comportamiento histórico
                     # -- no se inventa una tasa).
                     #
-                    # CodigoItem NO necesita coincidir con esa alícuota: se
-                    # confirmó real (2026-08-04) que BAS no cruza
-                    # ImporteIva/TasaIva contra la tasa configurada en el
-                    # catálogo para el CodigoItem elegido -- solo valida
-                    # consistencia interna (ImporteGravado + ImporteIva ==
-                    # ImporteTotal). Un ítem con CodigoItem="Gs Gs 21%" pero
-                    # TasaIva=10.5/ImporteIva real dio 201 real sin problema.
-                    # Por eso NO hace falta resolver_item_bas acá -- alcanza
-                    # con el código de categoría de siempre.
-                    #
-                    # Durante mucho tiempo se creyó que "ImporteTotal ==
-                    # ImporteGravado, sin ImporteIva" era la única forma de
-                    # evitar el 409 "no son consistentes" (SP_GENEROASI) --
-                    # confirmado real (2026-08-04) que la causa real de ese
-                    # error era otra (mandar un ImporteTotal inflado SIN el
-                    # ImporteIva que lo respalda, dejando
-                    # ImporteGravado+ImporteIva != ImporteTotal). Con
-                    # ImporteIva correctamente poblado, BAS acepta el bruto
-                    # real sin problema (201 real + aplicación real exitosa
-                    # por el bruto completo, ver docs/...).
+                    # ImporteTotal de LÍNEA = ImporteGravado (el neto), NUNCA
+                    # gravado+iva. Confirmado leyendo el código fuente real
+                    # de PLATINUM_TEST.dbo.SP_VALIDA_TOTALES (instalación con
+                    # TRANSAC.IVA='I' en el 100% de los comprobantes): la
+                    # regla de línea exige `m.importe ≈ m.impgravado`
+                    # (tolerancia $1) -- el IVA de la línea va aparte, en
+                    # ImporteIva, y NO se suma acá. El intento anterior de
+                    # mandar ImporteTotal=gravado+iva "porque BAS lo aceptó
+                    # en pruebas de $1" fue un punto ciego: con importes de
+                    # prueba de $1, cualquier delta de fórmula queda oculto
+                    # bajo esa misma tolerancia de $1 del SP -- confirmado
+                    # con 3 fallos reales en producción (04/05-ago-2026, ej.
+                    # OESTEREICHER HUGO 00010-00001854, delta=$178.500) y
+                    # reproducido offline contra la regla exacta del SP en
+                    # scripts/test_offline_importe_total_linea.py. TotalGravado/
+                    # TotalIva/Total de CABECERA no cambian -- esos ya se
+                    # calculan bien (suma de las líneas, más abajo).
                     tasa_iva = alicuota_iva if alicuota_iva is not None else 0
                     importe_iva = round(importe_gravado * tasa_iva / 100, 2)
-                    importe_total = round(importe_gravado + importe_iva, 2)
+                    importe_total = importe_gravado
                     items_bas.append(
                         {
-                            "CodigoItem": codigo_item_de_categoria(item.get("categoria", "")),
+                            "CodigoItem": resolucion["codigo_item"],
                             "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
                             "NumeroUnidadMedida": "1",
                             "CantidadPrimeraUnidad": item.get("cantidad", 1),
@@ -1705,6 +1807,14 @@ class InvoiceOrchestrator:
                             "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
                         }
                     )
+
+            # Todas las líneas resolvieron a un CodigoItem válido (o, en la
+            # rama monto_override, el único ítem sintético) -- la factura ya
+            # está lista para el registro real (P0-F). "ready_to_register"
+            # es el valor reservado exactamente para esto desde P0-A (ver
+            # migración 1784500000_add_bas_traceability_and_state.js), nunca
+            # usado hasta ahora.
+            resultado["bas_registration_status"] = "ready_to_register"
 
             # BAS valida que TotalGravado == suma de ImporteGravado de los
             # ítems (409 "no coincide con la suma de los totales gravados de
@@ -1725,9 +1835,10 @@ class InvoiceOrchestrator:
             total_bruto = round(total_gravado + total_iva, 2)
 
             # Número de comprobante externo: "PPPPP-NNNNNNNN" -> prefijo/numero.
-            numero_completo = (comprobante.get("numero") or "").replace(" ", "")
-            prefijo_externo, _, numero_externo_str = numero_completo.partition("-")
-            numero_externo = int(numero_externo_str) if numero_externo_str.isdigit() else 0
+            # (misma lógica que _extraer_prefijo_numero_comprobante_externo,
+            # reusada acá en vez de duplicada para no perder el fix de
+            # normalizar_numero_comprobante si diverge más adelante).
+            prefijo_externo, numero_externo = _extraer_prefijo_numero_comprobante_externo(comprobante)
 
             comprobante_compra_payload = {
                 "Comprobante": "MA",
@@ -2297,7 +2408,7 @@ async def _procesar_imagen_o_pdf_impl(
         # Mismo criterio que ya se usaba para drive_file_id, ahora
         # generalizado a todos los campos extraídos.
         _campos_extraidos = {
-            "numero_comprobante": _cmp.get("numero"),
+            "numero_comprobante": normalizar_numero_comprobante(_cmp.get("numero")),
             "fecha_emision": _cmp.get("fecha_emision"),
             "tipo_comprobante": _cmp.get("tipo"),
             "subtipo_comprobante": _cmp.get("subtipo"),
@@ -2314,12 +2425,23 @@ async def _procesar_imagen_o_pdf_impl(
             "iva_alicuota": _alicuota_iva,
             "drive_file_id": drive_file_id,
         }
+        _proveedor_info_invoice = resultado_bas.get("proveedor") or {}
         _pb_invoice_record = orchestrator._pb_client.upsert_invoice(
             {
                 "process_id": process_id,
                 **{k: v for k, v in _campos_extraidos.items() if v is not None},
                 "sheets_saved": bool(saved_sheet),
                 "status": "completed",
+                # Nuevo alcance 2026-08-10 -- ver docstring de
+                # bas_registration_status en la migración
+                # 1784500000_add_bas_traceability_and_state.js. Se escribe
+                # siempre (no se omite si vacío como el resto de
+                # _campos_extraidos): a diferencia de esos campos, este SÍ
+                # debe reflejar el resultado de ESTE intento, no preservar
+                # uno viejo -- si el proveedor dejó de resolverse en un
+                # reprocesamiento, el estado tiene que reflejarlo.
+                "bas_registration_status": resultado_bas.get("bas_registration_status") or "",
+                "bas_provider": _proveedor_info_invoice.get("pb_id") or "",
             }
         )
         if _pb_invoice_record and _pb_invoice_record.get("id"):
@@ -2334,9 +2456,15 @@ async def _procesar_imagen_o_pdf_impl(
                         "precio_unitario": d.get("precio_unitario"),
                         "precio_total": d.get("precio_total"),
                         "categoria": d.get("categoria"),
-                        "bas_codigo_item": codigo_item_de_categoria(
-                            d.get("categoria", "")
-                        ),
+                        # Sugerencia informativa para el dashboard -- ver
+                        # comentario equivalente en worker() (mismo criterio,
+                        # mismo resolver, P0-E).
+                        "bas_codigo_item": resolver_codigo_item(
+                            categoria=d.get("categoria", ""),
+                            alicuota=_alicuota_iva,
+                            pb_client=orchestrator._pb_client,
+                        ).get("codigo_item")
+                        or "",
                     }
                     for idx, d in enumerate(_detalles, 1)
                 ],
@@ -3455,10 +3583,19 @@ async def crear_orden_pago(
     # procesamiento automático (dry_run), ANTES de cualquier corrección
     # humana hecha en la revisión. Si un revisor corrigió el CUIT del
     # emisor, reusar el proveedor_codigo viejo pagaría/aplicaría el
-    # comprobante contra el proveedor equivocado. `_obtener_o_verificar_proveedor_bas`
-    # es idempotente (cachea por CUIT, busca o da de alta) -- volver a
+    # comprobante contra el proveedor equivocado. `_buscar_proveedor_bas` es
+    # idempotente (cachea por CUIT, SOLO LECTURA -- ver P0-B) -- volver a
     # llamarlo acá es seguro. Ver docs/plan-validaciones-pre-bas.md, V5.2.
-    proveedor_actual = orchestrator._obtener_o_verificar_proveedor_bas(
+    #
+    # BUG REAL corregido acá (P0-E, 2026-08-12): este call site todavía
+    # llamaba a `_obtener_o_verificar_proveedor_bas`, el nombre viejo que
+    # P0-B renombró/reemplazó por `_buscar_proveedor_bas` -- desde P0-B este
+    # endpoint (el ÚNICO que todavía puede escribir de verdad en BAS)
+    # crasheaba con AttributeError en cualquier invocación real. El
+    # comportamiento de abajo (422 si no hay proveedor) ya era exactamente
+    # el correcto para "no existe en BAS" -- no hacía falta ningún otro
+    # cambio, solo apuntar al método que realmente existe.
+    proveedor_actual = orchestrator._buscar_proveedor_bas(
         invoice.get("emisor_cuit"), invoice.get("emisor_nombre", "")
     )
     proveedor_codigo = proveedor_actual.get("Codigo") if proveedor_actual else None
@@ -3587,30 +3724,62 @@ async def crear_orden_pago(
         alicuota_iva = float(invoice.get("iva_alicuota")) if invoice.get("iva_alicuota") is not None else None
     except (TypeError, ValueError):
         alicuota_iva = None
+    # `bas_codigo_item` guardado SÍ es la fuente de verdad acá cuando un
+    # humano lo eligió a mano en el selector del dashboard (P0-G) -- se pasa
+    # como `override_codigo_item`, que el resolver vuelve a validar
+    # (activo=true+elegible_compras=true) antes de aceptarlo; si es
+    # inválido, bloquea sin caer silenciosamente a la resolución por
+    # categoría (regla 1 de resolver_codigo_item -- un humano que eligió mal
+    # un ítem tiene que enterarse, no que el sistema le pise la elección con
+    # un guess). Si el campo viene vacío (nunca se resolvió un candidato
+    # automático válido en la ingesta y el humano tampoco lo corrigió), el
+    # resolver cae solo al camino categoria+alicuota de siempre. HALLAZGO
+    # CRÍTICO corregido acá (revisión final de P0-G, 2026-08-12): hasta
+    # ahora este call site nunca pasaba el override, así que una corrección
+    # manual de ítem en el dashboard no tenía ningún efecto real sobre lo
+    # que se mandaba a BAS. Validado y bloqueante (P0-E): este endpoint es
+    # el ÚNICO que escribe de verdad en BAS (dry_run=False) -- un CodigoItem
+    # sin validar acá es el escenario de mayor riesgo real de todo el
+    # alcance, así que se resuelve y valida TODA la factura (422 si
+    # cualquier línea falla) ANTES de construir cualquier payload.
+    if not items:
+        raise HTTPException(
+            status_code=422,
+            detail="La factura no tiene ítems -- no hay nada que registrar/pagar.",
+        )
+    resoluciones = [
+        resolver_codigo_item(
+            categoria=it.get("categoria", ""),
+            alicuota=alicuota_iva,
+            override_codigo_item=(it.get("bas_codigo_item") or None),
+            pb_client=orchestrator._pb_client,
+        )
+        for it in items
+    ]
+    invalidas = [r for r in resoluciones if not r["valido"]]
+    if invalidas:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": "No se pudo resolver un CodigoItem válido para uno o más ítems de la factura.",
+                "motivos": [r["motivo_bloqueo"] for r in invalidas],
+            },
+        )
+
     items_bas = []
-    for it in items:
+    for it, resolucion in zip(items, resoluciones):
         _importe_gravado = round(float(it.get("precio_total", 0) or 0), 2)
         # ImporteIva/TasaIva con la alícuota REAL -- ver comentario largo
-        # equivalente en InvoiceOrchestrator.procesar_factura_en_bas (mismo
-        # criterio, mismo caso real MEDINA FLOR LUCIO DANIEL que confirmó
-        # esto, 2026-08-04): BAS no cruza ImporteIva contra la tasa
-        # configurada en el catálogo del CodigoItem, solo valida
-        # ImporteGravado + ImporteIva == ImporteTotal a nivel de línea. Sin
-        # alícuota conocida, 0 (neto puro, no se inventa una tasa).
+        # equivalente en InvoiceOrchestrator.procesar_factura_en_bas.
+        # ImporteTotal de LÍNEA = ImporteGravado (neto), no gravado+iva --
+        # ver ese comentario para la regla exacta de SP_VALIDA_TOTALES y la
+        # evidencia real (OESTEREICHER HUGO, 04/05-ago-2026).
         _tasa_iva = alicuota_iva if alicuota_iva is not None else 0
         _importe_iva = round(_importe_gravado * _tasa_iva / 100, 2)
-        _importe_total = round(_importe_gravado + _importe_iva, 2)
-        # Recalcular SIEMPRE desde `categoria` actual, no confiar en
-        # `bas_codigo_item` guardado: ese campo se calculó una sola vez al
-        # persistir la factura originalmente. Si un revisor corrigió la
-        # categoría del ítem durante la revisión humana, `bas_codigo_item`
-        # queda desincronizado y el gasto se imputaría contablemente mal
-        # pese a que ya se corrigió en el dashboard. Ver
-        # docs/plan-validaciones-pre-bas.md, V5.2b.
-        codigo_item_actual = codigo_item_de_categoria(it.get("categoria", ""))
+        _importe_total = _importe_gravado
         items_bas.append(
             {
-                "CodigoItem": codigo_item_actual,
+                "CodigoItem": resolucion["codigo_item"],
                 "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
                 "NumeroUnidadMedida": "1",
                 "CantidadPrimeraUnidad": it.get("cantidad", 1),
@@ -3818,6 +3987,401 @@ async def crear_orden_pago(
         "orden_pago": resultado["orden_pago"],
         "error": resultado["error"],
         "payment_order": actualizado,
+    }
+
+
+@router.post(
+    "/invoices/{process_id}/register-comprobante",
+    summary="Registrar el ComprobanteCompra real en BAS (sin Orden de Pago) -- nuevo alcance",
+    tags=["Procesamiento de facturas"],
+)
+async def registrar_comprobante(
+    process_id: str,
+    x_invoicy_secret: Optional[str] = Header(default=None, alias="X-Invoicy-Secret"),
+):
+    """
+    P0-F (2026-08-12) -- segundo y, con el nuevo alcance, ÚLTIMO lugar del
+    sistema donde `dry_run` pasa a False. Registra el ComprobanteCompra real
+    en BAS y AHÍ TERMINA: sin Orden de Pago, sin método de pago, sin banco
+    -- la cooperativa/contable crea la Orden de Pago directamente desde BAS
+    (decisión de alcance confirmada 2026-08-10 por el cliente, ver
+    docs/invoicy-bas-nuevo-alcance-plan-tecnico-FINAL.md). `crear_orden_pago`
+    (arriba) queda como código legado del alcance viejo -- no se borra, pero
+    ya no es el camino que usa el flujo nuevo.
+
+    Mismo patrón de gates que `crear_orden_pago` (el otro endpoint con
+    dry_run=False), MENOS todo lo específico de pago/OP (metodo_pago,
+    banco, tarjeta, array de pagos):
+      1. `review_status == "confirmed"` (revalidado server-side, no se
+         confía en el caller).
+      2. Idempotencia PRIMERO: si `invoices.bas_registration_status` ya es
+         "registered", no reintenta. A diferencia de
+         `bas_processing_status.comprobante_registrado` (que puede venir
+         tainted por un intento dry_run=True de la ingesta automática, ver
+         docstring de `crear_orden_pago`), `bas_registration_status` con
+         valor "registered" SOLO lo escribe este mismo endpoint tras un
+         éxito real (campo nuevo desde P0-A, nunca tocado por el flujo
+         automático) -- es una señal confiable de verdad.
+      3. Proveedor re-derivado FRESCO desde la factura actual, solo lectura
+         (`_buscar_proveedor_bas`, P0-B) -- nunca se crea automáticamente.
+      4. `validar_factura_antes_de_pago_real`: a pesar del nombre (heredado
+         del endpoint de OP), sus 7 chequeos son de datos del COMPROBANTE
+         -- CUIT, moneda, fecha de emisión, número de comprobante, CAE,
+         ítems completos, alícuota de IVA -- ninguno es específico de pago.
+         Se reusa tal cual, sin ninguna validación de monto/método.
+      5. CodigoItem resuelto y VALIDADO por línea, fresco, vía
+         `resolver_codigo_item` (P0-E) -- si el humano eligió un ítem a mano
+         en el dashboard (`invoice_items.bas_codigo_item`), ese valor se
+         pasa como `override_codigo_item` y manda (revalidado
+         activo+elegible_compras; si ya no es válido, bloquea sin fallback a
+         categoría); si no, se resuelve por categoría+alícuota como
+         siempre. Nunca se construye un payload con un CodigoItem inventado
+         o sin validar. Esto también es lo que permite llamar a este
+         endpoint estando todavía en `bas_registration_status=
+         "awaiting_service_selection"`: no hay ningún gate sobre el estado
+         previo salvo el atajo de idempotencia de "registered" (punto 2) --
+         la resolución de acá arriba es la única fuente de verdad de si la
+         factura está realmente lista, sin depender de que
+         `procesar_factura_en_bas` (el único lugar que escribe
+         "ready_to_register", una sola vez, en la ingesta automática) haya
+         corrido después de una corrección humana.
+      6. Registro idempotente y verificado contra BAS
+         (`BasClient.registrar_comprobante_compra_idempotente`, extraído en
+         esta misma fase de `crear_orden_de_pago_desde_factura` -- mismas
+         garantías: nunca un POST duplicado si el comprobante ya existe por
+         número externo, y siempre verificado con un GET independiente
+         antes de confirmar éxito, no se confía ciegamente en el 201).
+
+    `MetodoPago="C"` (cuenta corriente) se mantiene en el payload SOLO
+    porque BAS lo exige estructuralmente para poder registrar el
+    comprobante contra la cuenta corriente del proveedor -- confirmado
+    explícitamente ANTES de arrancar P0-D que esto no arrastra ningún flujo
+    de pago (ver resumen de esa fase). No hay `pagos`, no hay
+    `crear_orden_de_pago`, no hay `aplicar_comprobantes` en este endpoint.
+    """
+    _verificar_secreto_invoicy(x_invoicy_secret)
+
+    invoice = orchestrator._pb_client.get_invoice_by_process_id(process_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail=f"No se encontró la factura para process_id={process_id}.")
+    if invoice.get("review_status") != "confirmed":
+        raise HTTPException(status_code=409, detail="La factura todavía no fue confirmada.")
+
+    if invoice.get("bas_registration_status") == "registered":
+        return {
+            "success": True,
+            "process_id": process_id,
+            "already_resolved": True,
+            "message": "El comprobante ya fue registrado en BAS anteriormente; no se reintenta.",
+            "bas_processing_status": orchestrator._pb_client.get_bas_processing_status(process_id),
+        }
+
+    proveedor_actual = orchestrator._buscar_proveedor_bas(
+        invoice.get("emisor_cuit"), invoice.get("emisor_nombre", "")
+    )
+    proveedor_codigo = proveedor_actual.get("Codigo") if proveedor_actual else None
+    if not proveedor_codigo:
+        orchestrator._pb_client.upsert_invoice(
+            {"process_id": process_id, "bas_registration_status": "awaiting_provider_match"}
+        )
+        raise HTTPException(
+            status_code=422,
+            detail="No se pudo resolver el proveedor en BAS (falta o es inválido el CUIT del emisor, "
+            "o el proveedor no existe en BAS -- debe darse de alta manualmente y luego reintentar).",
+        )
+
+    items = orchestrator._pb_client.get_invoice_items(invoice["id"])
+    errores_validacion = validar_factura_antes_de_pago_real(invoice, items)
+    if errores_validacion:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": "La factura tiene datos que deben corregirse antes de registrar el comprobante.",
+                "validaciones": errores_validacion,
+            },
+        )
+
+    try:
+        alicuota_iva = float(invoice.get("iva_alicuota")) if invoice.get("iva_alicuota") is not None else None
+    except (TypeError, ValueError):
+        alicuota_iva = None
+
+    # CodigoItem: resolver y VALIDAR TODA la factura contra bas_items ANTES
+    # de construir cualquier payload (P0-E) -- mismo criterio que
+    # crear_orden_pago, misma función. `bas_codigo_item` guardado por línea
+    # se pasa como `override_codigo_item`: si un humano corrigió el ítem a
+    # mano en el selector del dashboard (P0-G), esa elección manda (el
+    # resolver la revalida activo+elegible antes de aceptarla, y bloquea sin
+    # fallback si ya no es válida); si viene vacío, se resuelve por
+    # categoría+alícuota como siempre. HALLAZGO CRÍTICO corregido acá
+    # (revisión final de P0-G, 2026-08-12): ver comentario equivalente en
+    # crear_orden_pago para el detalle completo -- este call site tenía el
+    # mismo problema, la selección manual de ítem no llegaba a afectar el
+    # registro real en BAS.
+    resoluciones = [
+        resolver_codigo_item(
+            categoria=it.get("categoria", ""),
+            alicuota=alicuota_iva,
+            override_codigo_item=(it.get("bas_codigo_item") or None),
+            pb_client=orchestrator._pb_client,
+        )
+        for it in items
+    ]
+    invalidas = [r for r in resoluciones if not r["valido"]]
+    if invalidas:
+        orchestrator._pb_client.upsert_invoice(
+            {"process_id": process_id, "bas_registration_status": "awaiting_service_selection"}
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensaje": "No se pudo resolver un CodigoItem válido para uno o más ítems de la factura.",
+                "motivos": [r["motivo_bloqueo"] for r in invalidas],
+            },
+        )
+
+    items_bas = []
+    for it, resolucion in zip(items, resoluciones):
+        _importe_gravado = round(float(it.get("precio_total", 0) or 0), 2)
+        _tasa_iva = alicuota_iva if alicuota_iva is not None else 0
+        _importe_iva = round(_importe_gravado * _tasa_iva / 100, 2)
+        items_bas.append(
+            {
+                "CodigoItem": resolucion["codigo_item"],
+                "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
+                "NumeroUnidadMedida": "1",
+                "CantidadPrimeraUnidad": it.get("cantidad", 1),
+                "PrecioUnitario": it.get("precio_unitario", 0),
+                "ImporteGravado": _importe_gravado,
+                "ImporteIva": _importe_iva,
+                "ImporteTotal": _importe_gravado,
+                "TasaIva": _tasa_iva,
+                "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
+                "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
+            }
+        )
+
+    # Mismo fix que InvoiceOrchestrator.procesar_factura_en_bas/crear_orden_pago:
+    # TotalGravado tiene que ser la suma de ImporteGravado de las líneas.
+    total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
+    total_iva = round(sum(float(it["ImporteIva"] or 0) for it in items_bas), 2)
+    total_bruto = round(total_gravado + total_iva, 2)
+
+    prefijo_externo, numero_externo = _extraer_prefijo_numero_comprobante_externo(
+        {"numero": invoice.get("numero_comprobante")}
+    )
+
+    comprobante_compra_payload = {
+        "Comprobante": "MA",
+        "Prefijo": BAS_PREFIJO_TALONARIO_MA,
+        "Fecha": fecha_hoy_bas().isoformat(),
+        "Total": total_bruto,
+        "TotalGravado": total_gravado,
+        "TotalIva": total_iva,
+        "EmitidoPor": BAS_EMITIDO_POR_CAE,
+        "Empresa": BAS_EMPRESA,
+        "Sucursal": BAS_SUCURSAL,
+        "Deposito": BAS_DEPOSITO,
+        "Caja": BAS_CAJA,
+        # Requerido estructuralmente por BAS para registrar contra la cuenta
+        # corriente del proveedor -- NO implica ningún flujo de pago (ver
+        # docstring del endpoint).
+        "MetodoPago": BAS_METODO_PAGO_CTA_CTE,
+        "Proveedor": proveedor_codigo,
+        "PrefijoComprobanteExterno": prefijo_externo,
+        "NumeroComprobanteExterno": numero_externo,
+        "FechaComprobanteExterno": invoice.get("fecha_emision"),
+        "NumeroCAIoCAE": invoice.get("cae"),
+        "VencimientoCAIoCAE": invoice.get("cae_vencimiento"),
+        "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": total_bruto}],
+        "Items": items_bas,
+    }
+
+    ahora = datetime.datetime.utcnow().isoformat() + "Z"
+    resultado = {"comprobante": None, "error": None}
+    registro = None
+    try:
+        with _lock_comprobante(proveedor_codigo, prefijo_externo, numero_externo):
+            registro = orchestrator._bas_client.registrar_comprobante_compra_idempotente(
+                empresa=BAS_EMPRESA,
+                sucursal=BAS_SUCURSAL,
+                comprobante="MA",
+                prefijo_externo=prefijo_externo,
+                numero_externo=numero_externo,
+                fecha_externo=invoice.get("fecha_emision"),
+                comprobante_compra_payload=comprobante_compra_payload,
+                registrar_si_no_existe=True,
+                dry_run=False,
+            )
+        resultado["comprobante"] = registro["comprobante"]
+    except BasApiError as e:
+        resultado["error"] = f"BasApiError {e.status_code} en {e.path}: {e.detail}"
+        app_logger.error(f"[{process_id}] registrar-comprobante: fallo BAS: {resultado['error']}")
+    except Exception as e:
+        resultado["error"] = str(e)
+        app_logger.error(f"[{process_id}] registrar-comprobante: error inesperado: {e}")
+
+    cmp = resultado["comprobante"] or {}
+    id_transaccion = registro.get("id_transaccion") if registro else None
+    # comprobante_total_registrado: NO se puede leer de la respuesta de BAS
+    # -- confirmado real (validación de P0-F, 2026-08-12) y contra el
+    # swagger real de BAS: el schema de respuesta de ambas consultas
+    # (RespuestaConsultaComprobante, la misma que usan
+    # ConsultaComprobantes/ConsultaComprobantesExternos) es
+    # `additionalProperties: false` y NO incluye Total/TotalGravado/TotalIva
+    # en ninguna forma -- ni el 201 del POST ni ningún GET posterior lo
+    # exponen. No hay ningún endpoint de BAS que permita reconfirmar
+    # independientemente qué Total quedó registrado. Se persiste el Total
+    # que efectivamente ENVIAMOS y que BAS aceptó con un 201 -- pero SOLO
+    # cuando este intento fue el que realmente registró el comprobante
+    # (`ya_existia=False`): si ya existía de un intento anterior, no
+    # tenemos forma de saber con qué Total quedó esa vez, así que se deja
+    # sin tocar en vez de asumir que coincide con el de ahora.
+    total_confirmado = None
+    if registro is not None and not registro.get("ya_existia"):
+        total_confirmado = comprobante_compra_payload.get("Total")
+    campos_status = dict(
+        invoice=invoice["id"],
+        proveedor_resuelto=True,
+        proveedor_codigo=proveedor_codigo,
+        comprobante_prefijo=cmp.get("Prefijo") or prefijo_externo,
+        comprobante_numero=cmp.get("Numero"),
+        comprobante_registrado=resultado["error"] is None,
+        bas_id_transaccion=id_transaccion,
+        comprobante_registrado_at=(ahora if resultado["error"] is None else None),
+        comprobante_total_registrado=total_confirmado,
+        bas_last_error=resultado["error"],
+        last_attempt_at=ahora,
+    )
+    if orchestrator._pb_client.get_bas_processing_status(process_id) is None:
+        # Caso raro (normalmente ya lo creó la ingesta automática):
+        # orden_pago_status es 'required' en el schema de
+        # bas_processing_status -- sin esto, el create fallaría la
+        # validación de PocketBase y se perdería en silencio toda esta
+        # auditoría (registro real exitoso/fallido en BAS sin dejar
+        # rastro). "pending" porque no hubo ningún intento de OP -- ese eje
+        # es legado, fuera de este alcance (ver migración
+        # 1784500000_add_bas_traceability_and_state.js). Si el registro YA
+        # existía, NO se toca este campo -- son 34+ filas históricas legado
+        # que no hay que pisar.
+        campos_status["orden_pago_status"] = "pending"
+    status_processing = orchestrator._pb_client.upsert_bas_processing_status(process_id, **campos_status)
+    orchestrator._pb_client.upsert_invoice(
+        {
+            "process_id": process_id,
+            "bas_registration_status": "register_failed" if resultado["error"] else "registered",
+        }
+    )
+
+    return {
+        "success": resultado["error"] is None,
+        "process_id": process_id,
+        "comprobante": resultado["comprobante"],
+        "error": resultado["error"],
+        "bas_processing_status": status_processing,
+    }
+
+
+@router.post(
+    "/invoices/{process_id}/recheck-provider",
+    summary="Volver a buscar el proveedor en BAS tras darlo de alta manualmente -- P0-C",
+    tags=["Procesamiento de facturas"],
+)
+async def recheck_provider(
+    process_id: str,
+    x_invoicy_secret: Optional[str] = Header(default=None, alias="X-Invoicy-Secret"),
+):
+    """
+    P0-C (2026-08-12). Cuando una factura queda en
+    bas_registration_status="awaiting_provider_match" (P0-B: el proveedor no
+    existía en BAS y Invoicy nunca lo crea automáticamente), el flujo humano
+    es: 1) alguien da de alta el proveedor A MANO en BAS, 2) presiona
+    "Volver a buscar" en el dashboard -- eso llama a este endpoint.
+
+    Paso crítico, por qué este endpoint no es simplemente "volver a llamar
+    a _buscar_proveedor_bas": InvoiceOrchestrator es un singleton de vida
+    larga (una sola instancia para todo el proceso) y
+    `self._proveedores_bas_cache` cachea EN MEMORIA -- incluida la
+    respuesta negativa (None) cuando el proveedor no existía (P0-B). Sin
+    invalidar esa entrada acá, este endpoint devolvería SIEMPRE el mismo
+    None viejo sin importar cuántas veces se llame, hasta que el proceso
+    reinicie -- exactamente el caso que más le importa al negocio: alguien
+    da de alta el proveedor y el sistema sigue sin verlo. El cache de
+    PocketBase (`bas_providers`, get_provider_cache/set_provider_cache) NO
+    hace falta invalidarlo: solo persiste resultados POSITIVOS (P0-B), así
+    que nunca hay nada negativo ahí para limpiar.
+
+    Solo lectura contra BAS -- mismo criterio P0-B, `_buscar_proveedor_bas`
+    nunca crea ni modifica nada. Si encuentra el proveedor, guarda
+    `bas_provider` (relation) en la factura. El nuevo
+    `bas_registration_status` es "awaiting_service_selection", EXCEPTO si
+    la factura ya estaba en "ready_to_register" (provider Y CodigoItems ya
+    resueltos en un dry-run posterior) -- ahí no se downgradea: perder ese
+    estado sería perder trabajo ya hecho, aunque nada de eso se toque
+    directamente. Si todavía no existe, no se escribe nada -- la factura
+    permanece en "awaiting_provider_match" tal cual estaba.
+
+    Nunca toca `invoice_items` -- cualquier CodigoItem ya resuelto o
+    seleccionado en las líneas de la factura queda intacto (regla 8 del
+    alcance: re-buscar el proveedor no puede pisar el trabajo de selección
+    de ítems ya hecho).
+    """
+    _verificar_secreto_invoicy(x_invoicy_secret)
+
+    invoice = orchestrator._pb_client.get_invoice_by_process_id(process_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail=f"No se encontró la factura para process_id={process_id}.")
+
+    if invoice.get("bas_registration_status") == "registered":
+        return {
+            "success": True,
+            "process_id": process_id,
+            "encontrado": True,
+            "already_resolved": True,
+            "message": "Esta factura ya fue registrada en BAS; no hace falta volver a buscar el proveedor.",
+        }
+
+    cuit_emisor = invoice.get("emisor_cuit", "")
+    cuit_normalizado = "".join(c for c in (cuit_emisor or "") if c.isdigit())
+
+    # Invalidar el cache negativo EN MEMORIA antes de consultar -- ver
+    # docstring de arriba, es el paso que hace que este endpoint sirva para
+    # algo. No se pisa nada más (ni bas_providers en PocketBase, ni ningún
+    # otro campo): solo se fuerza a que la próxima lectura vuelva a
+    # consultar BAS en vez de confiar en lo que había en memoria.
+    if cuit_normalizado:
+        orchestrator._proveedores_bas_cache.pop(cuit_normalizado, None)
+
+    proveedor = orchestrator._buscar_proveedor_bas(cuit_emisor, invoice.get("emisor_nombre", ""))
+
+    if proveedor is None:
+        return {
+            "success": True,
+            "process_id": process_id,
+            "encontrado": False,
+            "bas_registration_status": "awaiting_provider_match",
+            "message": f"El proveedor con CUIT {cuit_emisor} todavía no existe en BAS.",
+        }
+
+    campos_actualizar = {
+        "process_id": process_id,
+        "bas_provider": proveedor.get("_pb_id") or "",
+    }
+    # No downgradear un "ready_to_register" ya alcanzado (ver docstring) --
+    # en cualquier otro estado (incluido "awaiting_provider_match", el caso
+    # normal), sí corresponde pasar a "awaiting_service_selection".
+    if invoice.get("bas_registration_status") != "ready_to_register":
+        campos_actualizar["bas_registration_status"] = "awaiting_service_selection"
+
+    invoice_actualizada = orchestrator._pb_client.upsert_invoice(campos_actualizar)
+
+    return {
+        "success": True,
+        "process_id": process_id,
+        "encontrado": True,
+        "bas_registration_status": campos_actualizar.get("bas_registration_status", invoice.get("bas_registration_status")),
+        "proveedor": {"codigo": proveedor.get("Codigo"), "pb_id": proveedor.get("_pb_id")},
+        "invoice": invoice_actualizada,
     }
 
 

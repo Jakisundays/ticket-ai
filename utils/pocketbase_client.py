@@ -73,6 +73,7 @@ BAS_PROVIDERS_COLLECTION = "bas_providers"
 BAS_PAYMENT_METHODS_COLLECTION = "bas_payment_methods"
 PAYMENT_ORDERS_COLLECTION = "payment_orders"
 BAS_CATEGORY_MAP_COLLECTION = "bas_category_map"
+BAS_ITEMS_COLLECTION = "bas_items"
 IMPORT_BATCHES_COLLECTION = "import_batches"
 IMPORT_BATCH_ITEMS_COLLECTION = "import_batch_items"
 
@@ -414,6 +415,52 @@ class PocketBaseClient:
             mapa.setdefault(categoria, {})[alicuota] = codigo_item
         return mapa
 
+    # ------------------------------------------------------------------ #
+    # bas_items -- catálogo real de Servicios/Bienes de BAS (nuevo alcance
+    # 2026-08-10). Solo lo escribe el sync (utils/bas_items_sync.py, via
+    # service_accounts) -- nunca un humano desde el dashboard.
+    # ------------------------------------------------------------------ #
+    def upsert_bas_item(self, codigo: str, **campos) -> Optional[dict]:
+        """Upsert de un ítem del catálogo BAS en BAS_ITEMS_COLLECTION,
+        key = codigo. `campos` puede incluir cualquiera de: descripcion,
+        descripcion_larga, tipo, codigo_impuesto, tasa_iva_compras,
+        codigo_posicion, elegible_compras, activo, confirmado,
+        sincronizado_en."""
+        try:
+            if not codigo:
+                app_logger.warning("PocketBase: upsert_bas_item sin codigo, se omite")
+                return None
+            return self._upsert(BAS_ITEMS_COLLECTION, "codigo", codigo, campos)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en upsert_bas_item({codigo}): {e}")
+            return None
+
+    def list_bas_items(self, solo_elegibles: bool = True) -> list:
+        """Catálogo completo cacheado en PocketBase. `solo_elegibles=True`
+        (default) filtra a activo=true AND elegible_compras=true -- el
+        subset que realmente se puede usar en una línea de ComprobanteCompra
+        (confirmado con SQL real: 193 de 256 ítems del maestro cumplen esta
+        condición vía CONCEPTOSPOSCNT.CODCPT='COM'). `False` trae todo
+        (incluidos inactivos/no elegibles) para pantallas de diagnóstico.
+        Devuelve [] en caso de error -- mismo criterio que obtener_categoria_map."""
+        try:
+            filtro = 'activo = true && elegible_compras = true' if solo_elegibles else ""
+            return self._list_all(BAS_ITEMS_COLLECTION, filter_str=filtro, page_size=500)
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en list_bas_items: {e}")
+            return []
+
+    def get_bas_item(self, codigo: str) -> Optional[dict]:
+        """Un ítem puntual del catálogo cacheado, por código. None si no
+        existe o si falló la consulta."""
+        try:
+            if not codigo:
+                return None
+            return self._find_one(BAS_ITEMS_COLLECTION, _pb_filter_eq("codigo", codigo))
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en get_bas_item({codigo}): {e}")
+            return None
+
     def obtener_file_token(self) -> Optional[str]:
         """
         POST /api/files/token -- token de corta duración (credenciales del
@@ -452,23 +499,37 @@ class PocketBaseClient:
                 "Codigo": record.get("bas_codigo"),
                 "RazonSocial": record.get("razon_social"),
                 "_nuevo": record.get("nuevo"),
+                # id del record de PocketBase (no de BAS) -- lo necesita el
+                # caller para setear relations que apunten a este proveedor
+                # cacheado (ej. invoices.bas_provider, nuevo alcance
+                # 2026-08-10). Agregado sin quitar nada -- cualquier código
+                # viejo que solo lea Codigo/RazonSocial/_nuevo sigue andando
+                # igual.
+                "_pb_id": record.get("id"),
             }
         except Exception as e:
             app_logger.warning(f"PocketBase: error en get_provider_cache({cuit}): {e}")
             return None
 
-    def set_provider_cache(self, cuit: str, proveedor: dict) -> bool:
+    def set_provider_cache(self, cuit: str, proveedor: dict) -> Optional[dict]:
         """
         Guarda/actualiza el proveedor resuelto para un CUIT en la colección
         "bas_providers" (campos flat: bas_codigo, razon_social, nuevo,
         last_verified_at). `proveedor` es el dict que devuelve BasClient (con
-        claves BAS reales: Codigo, RazonSocial, _nuevo). True si tuvo éxito.
+        claves BAS reales: Codigo, RazonSocial, _nuevo).
+
+        Devuelve el record de PocketBase ya escrito (con su "id") o None si
+        falló -- ANTES devolvía bool; se cambió el contrato (2026-08-10,
+        nuevo alcance) porque el único caller (InvoiceOrchestrator.
+        _buscar_proveedor_bas) necesita el id para setear invoices.
+        bas_provider (relation). Sigue siendo "truthy" en éxito y falsy en
+        fallo, así que un `if resultado:` viejo seguiría funcionando igual.
         """
         try:
             cuit_normalizado = "".join(c for c in (cuit or "") if c.isdigit())
             if not cuit_normalizado or not proveedor:
-                return False
-            self._upsert(
+                return None
+            return self._upsert(
                 BAS_PROVIDERS_COLLECTION,
                 "cuit",
                 cuit_normalizado,
@@ -479,10 +540,9 @@ class PocketBaseClient:
                     "last_verified_at": datetime.datetime.utcnow().isoformat() + "Z",
                 },
             )
-            return True
         except Exception as e:
             app_logger.warning(f"PocketBase: error en set_provider_cache({cuit}): {e}")
-            return False
+            return None
 
     def upsert_bas_processing_status(
         self, process_id: str, *, invoice: Optional[str] = None, **campos

@@ -87,11 +87,36 @@ def validar_fecha_emision(fecha_emision: Optional[str]) -> Optional[str]:
     return None
 
 
+_LETRAS_COMPROBANTE_AFIP = {"A", "B", "C", "E", "M", "T"}
+
+
+def normalizar_numero_comprobante(numero_comprobante: Optional[str]) -> Optional[str]:
+    """Gemini a veces extrae el número con la letra de tipo de comprobante
+    AFIP pegada adelante como un tercer segmento separado por guión (ej.
+    "A-0064-00671710" en vez de "0064-00671710" -- confirmado real,
+    2026-08-07, el prompt de extracción nunca le pide incluirla ni
+    excluirla). La letra ya se guarda aparte en tipo_comprobante/
+    subtipo_comprobante (texto descriptivo derivado, no la letra cruda), así
+    que no se pierde información al descartarla acá -- se recupera el
+    formato "prefijo-numero" que BAS espera sin bloquear la factura.
+
+    Cualquier otro caso (2 partes ya bien formadas, más de 3 partes, una
+    letra no reconocida, vacío/None) se devuelve INTACTO -- no se inventan
+    más patrones sin haberlos visto reales; que sigan cayendo en el rechazo
+    de validar_numero_comprobante como hasta ahora."""
+    if not numero_comprobante:
+        return numero_comprobante
+    partes = numero_comprobante.replace(" ", "").split("-")
+    if len(partes) == 3 and len(partes[0]) == 1 and partes[0].upper() in _LETRAS_COMPROBANTE_AFIP:
+        return f"{partes[1]}-{partes[2]}"
+    return numero_comprobante
+
+
 def validar_numero_comprobante(numero_comprobante: Optional[str]) -> Optional[str]:
     """Mismo parseo que _extraer_prefijo_numero_comprobante_externo -- acá
     solo para RECHAZAR el caso en que ese parseo caería en el fallback
     numero_externo=0 (que rompe la deduplicación real contra BAS)."""
-    numero_completo = (numero_comprobante or "").replace(" ", "")
+    numero_completo = (normalizar_numero_comprobante(numero_comprobante) or "").replace(" ", "")
     prefijo, separador, numero_str = numero_completo.partition("-")
     if not separador or not prefijo or not numero_str.isdigit():
         return (
