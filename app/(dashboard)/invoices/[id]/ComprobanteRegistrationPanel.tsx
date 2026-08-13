@@ -34,6 +34,18 @@ import type { BasProcessingStatusRecord, BasRegistrationStatus } from "@/lib/poc
  * ítem en fresco en cada llamada, así que dejarlo disparar también desde
  * "awaiting_service_selection" es seguro -- si de verdad falta algo, el
  * endpoint responde 422 con el motivo y el estado se actualiza solo.
+ *
+ * "Ver respuesta técnica" (2026-08-13): antes del reemplazo de
+ * PaymentOrderPanel se podía ver el JSON crudo de cada paso de la Orden de
+ * Pago -- acá no hay pasos que mostrar (ver arriba), pero sí se perdió la
+ * visibilidad de "qué respondió BAS" en general. Se guarda el body
+ * COMPLETO de la respuesta de register-comprobante (éxito, error o
+ * already_resolved) en `lastResponse` y se muestra colapsado, mismo patrón
+ * ya usado en PaymentOrderMission ("Ver detalle técnico"). Solo existe
+ * para llamadas hechas EN VIVO durante esta sesión del navegador -- el
+ * body crudo de BAS nunca se persiste en PocketBase (bas_processing_status
+ * solo guarda campos estructurados), así que un registro ya hecho en una
+ * sesión anterior no tiene un JSON técnico que mostrar al recargar.
  */
 export default function ComprobanteRegistrationPanel({
   processId,
@@ -51,6 +63,10 @@ export default function ComprobanteRegistrationPanel({
   const [lastError, setLastError] = useState<string | null>(
     basRegistrationStatus === "register_failed" ? basProcessingStatus?.bas_last_error || null : null
   );
+  // Body completo de la última respuesta EN VIVO de register-comprobante --
+  // ver docstring de arriba. null hasta que se haga una llamada real en
+  // esta sesión (nunca se hidrata desde props: ese dato no se persiste).
+  const [lastResponse, setLastResponse] = useState<Record<string, unknown> | null>(null);
 
   async function handleRegister() {
     setLoading(true);
@@ -61,6 +77,7 @@ export default function ComprobanteRegistrationPanel({
         { method: "POST" }
       );
       const data = await res.json().catch(() => ({}));
+      setLastResponse(data);
       if (!res.ok || !data.success) {
         const detail = data.error || data.detail?.mensaje || data.detail || "No se pudo registrar el comprobante.";
         setLastError(typeof detail === "string" ? detail : JSON.stringify(detail));
@@ -86,7 +103,11 @@ export default function ComprobanteRegistrationPanel({
     <section className="flex flex-col gap-3.5 rounded-xl bg-card p-6 shadow-(--shadow-1)">
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-[13px] font-semibold text-foreground">Registro en BAS</h2>
-        <StatusBadge status={basRegistrationStatus || undefined} />
+        {/* Mientras loading=true, el badge pasa a "Procesando" -- basRegistrationStatus
+            queda desactualizado hasta que router.refresh() vuelva a traer el
+            estado real, así que mostrar el viejo acá confundiría más de lo
+            que ayuda. Es lo primero que se ve del panel, de un vistazo. */}
+        <StatusBadge status={loading ? "processing" : basRegistrationStatus || undefined} />
       </div>
 
       {basRegistrationStatus === "registered" && (
@@ -164,6 +185,17 @@ export default function ComprobanteRegistrationPanel({
           <Clock className="size-3 shrink-0" />
           Último intento: {formatDate(basProcessingStatus.last_attempt_at)}
         </p>
+      )}
+
+      {lastResponse && (
+        <details className="border-t pt-2.5">
+          <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground underline decoration-dotted underline-offset-2 select-none">
+            Ver respuesta técnica
+          </summary>
+          <pre className="mt-2 max-h-80 max-w-full overflow-auto rounded-md bg-status-neutral-bg p-2.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
+            {JSON.stringify(lastResponse, null, 2)}
+          </pre>
+        </details>
       )}
     </section>
   );
