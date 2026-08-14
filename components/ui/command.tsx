@@ -59,7 +59,16 @@ function CommandDialog({
         )}
         showCloseButton={showCloseButton}
       >
-        {children}
+        {/* Bug real encontrado 2026-08-14: CommandDialog renderizaba
+            CommandInput/CommandList directo adentro de DialogContent, SIN
+            envolverlos en <Command> (CommandPrimitive, la raíz de cmdk que
+            provee el store vía contexto). Sin esa raíz, cualquier
+            componente de cmdk usado adentro (CommandInput, CommandList,
+            etc.) lee un contexto undefined y tira "Cannot read properties
+            of undefined (reading 'subscribe')" al abrir la paleta con
+            ⌘K/Ctrl+K -- confirmado real en build de producción, no solo en
+            dev. */}
+        <Command>{children}</Command>
       </DialogContent>
     </Dialog>
   )
