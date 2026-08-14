@@ -2,14 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  LayoutDashboard,
-  Inbox,
-  FileText,
-  CreditCard,
-  Tags,
-  Wallet,
-} from "lucide-react";
+import { LayoutDashboard, Inbox, FileText } from "lucide-react";
 import {
   CommandDialog,
   CommandEmpty,
@@ -19,13 +12,13 @@ import {
   CommandList,
 } from "@/components/ui/command";
 
+// "Órdenes de pago" y "Categorías BAS"/"Métodos de pago" ocultos acá
+// también (2026-08-13) -- mismo criterio que SidebarNav.tsx, ver ese
+// comentario. Las rutas siguen existiendo, solo se sacó el acceso rápido.
 const DESTINATIONS = [
   { href: "/", label: "Inicio", icon: LayoutDashboard },
   { href: "/queue", label: "Cola de revisión", icon: Inbox },
   { href: "/invoices", label: "Facturas", icon: FileText },
-  { href: "/payment-orders", label: "Órdenes de pago", icon: CreditCard },
-  { href: "/category-map", label: "Categorías BAS", icon: Tags },
-  { href: "/payment-methods", label: "Métodos de pago", icon: Wallet },
 ];
 
 // Decisión de producto (auditoría de responsive, jul 2026): la paleta de

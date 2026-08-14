@@ -1,15 +1,6 @@
 "use client";
 
-import {
-  LayoutDashboard,
-  Inbox,
-  FileText,
-  CreditCard,
-  Tags,
-  Wallet,
-  UploadCloud,
-  PackageOpen,
-} from "lucide-react";
+import { LayoutDashboard, Inbox, FileText, UploadCloud } from "lucide-react";
 import {
   SidebarContent,
   SidebarGroup,
@@ -40,17 +31,14 @@ const NAV_GROUPS = [
         countKey: "queue" as const,
       },
       { href: "/invoices", label: "Facturas", icon: FileText },
-      { href: "/payment-orders", label: "Órdenes de pago", icon: CreditCard },
-      { href: "/lotes", label: "Lotes", icon: PackageOpen },
+      // "Órdenes de pago" y "Lotes" ocultos del nav a pedido explícito
+      // (2026-08-13) -- las rutas /payment-orders y /lotes siguen existiendo
+      // tal cual, solo se sacó el link. Ver también CommandPalette.tsx.
     ],
   },
-  {
-    label: "Configuración",
-    items: [
-      { href: "/category-map", label: "Categorías BAS", icon: Tags },
-      { href: "/payment-methods", label: "Métodos de pago", icon: Wallet },
-    ],
-  },
+  // Grupo "Configuración" (Categorías BAS, Métodos de pago) oculto del nav
+  // a pedido explícito (2026-08-13) -- mismo criterio que arriba, las
+  // rutas /category-map y /payment-methods siguen existiendo tal cual.
 ];
 
 export default function SidebarNav({
@@ -89,7 +77,7 @@ export default function SidebarNav({
 
       {/* mt-auto empuja este bloque al fondo del área de nav, justo antes
           del SidebarFooter (que es un elemento hermano aparte con el
-          avatar + cerrar sesión) -- fuera de los 3 grupos de arriba.
+          avatar + cerrar sesión) -- fuera de los grupos de arriba.
           "Subir factura" se movió al grupo "Menú" (junto a "Inicio"); acá
           solo queda el toggle de tema. */}
       <div className="mt-auto flex flex-col gap-0.5 px-2 pb-1">
