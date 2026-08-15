@@ -63,7 +63,7 @@ from utils.bas_config import (  # noqa: E402 -- reales, constantes puras
     METODO_PAGO_ARRAY_BAS,
 )
 from utils.bas_item_resolver import resolver_codigo_item  # noqa: E402 -- real
-from utils.validaciones_pre_bas import normalizar_numero_comprobante  # noqa: E402 -- real
+from utils.validaciones_pre_bas import combinar_numero_comprobante  # noqa: E402 -- real
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TARGET_FILE = REPO_ROOT / "routes" / "process_invoice_google_2.py"
@@ -222,7 +222,7 @@ namespace = {
     "BAS_CAJA": BAS_CAJA,
     "BAS_METODO_PAGO_CTA_CTE": BAS_METODO_PAGO_CTA_CTE,
     "resolver_codigo_item": resolver_codigo_item,
-    "normalizar_numero_comprobante": normalizar_numero_comprobante,
+    "combinar_numero_comprobante": combinar_numero_comprobante,
     "datetime": datetime,
     "fecha_hoy_bas": lambda: datetime.date(2026, 8, 12),
     "app_logger": _FakeAppLogger(),

@@ -66,7 +66,7 @@ from utils.bas_config import (
 )
 from utils.validaciones_pre_bas import (
     validar_factura_antes_de_pago_real,
-    normalizar_numero_comprobante,
+    combinar_numero_comprobante,
 )
 import google.auth.transport.requests as google_auth_requests
 
@@ -160,8 +160,29 @@ def _extraer_prefijo_numero_comprobante_externo(comprobante: dict):
     leerla de ahí) para no tener que tocar la firma/retorno de ese método
     existente. Usada tanto para persistir en PocketBase como por el endpoint
     de reintento de orden de pago.
+
+    combinar_numero_comprobante (no normalizar_numero_comprobante solo,
+    2026-08-14): este helper es la ÚNICA función que arma prefijo/numero
+    para BAS en todo el archivo -- los 4 call sites pasan por acá (dos con
+    el dict crudo de Gemini, que SÍ trae "punto_de_venta"; dos con un dict
+    sintético {"numero": invoice.get("numero_comprobante")} ya combinado
+    en la ingesta, que no trae esa clave y no la necesita). Antes usaba
+    normalizar_numero_comprobante a secas, así que el pase automático de
+    ingesta (InvoiceOrchestrator.procesar_factura_en_bas, worker()) mandaba
+    una consulta real a BAS con NumeroComprobanteExterno mal armado (ej.
+    "00000066" sin punto de venta -> Prefijo="00000066"/Numero=0) para
+    cualquier factura con el layout AFIP estándar (Punto de Venta y Comp.
+    Nro impresos por separado) -- sin escribir nada real porque ese pase
+    siempre corre en dry_run, pero consultando con la clave equivocada.
+    Con combinar_numero_comprobante acá, los 4 call sites quedan
+    consistentes automáticamente -- no hace falta tocar ninguno de ellos.
     """
-    numero_completo = normalizar_numero_comprobante((comprobante or {}).get("numero")) or ""
+    numero_completo = (
+        combinar_numero_comprobante(
+            (comprobante or {}).get("numero"), (comprobante or {}).get("punto_de_venta")
+        )
+        or ""
+    )
     numero_completo = numero_completo.replace(" ", "")
     prefijo_externo, _, numero_externo_str = numero_completo.partition("-")
     numero_externo = int(numero_externo_str) if numero_externo_str.isdigit() else 0
@@ -535,7 +556,20 @@ class InvoiceOrchestrator:
                             # previo), omitir tampoco pierde nada: PocketBase usa su
                             # default de todos modos.
                             _campos_extraidos = {
-                                "numero_comprobante": normalizar_numero_comprobante(_cmp.get("numero")),
+                                # combinar_numero_comprobante (2026-08-14):
+                                # arma "puntoDeVenta-numero" cuando el
+                                # comprobante los imprime como dos campos
+                                # separados (el header AFIP estándar) --
+                                # antes solo se usaba _cmp["numero"], que
+                                # para ese layout llega sin el punto de
+                                # venta y termina rechazado más adelante
+                                # por no tener el separador "-". Ver
+                                # utils/validaciones_pre_bas.py para el
+                                # detalle completo (caso real, reglas,
+                                # idempotencia).
+                                "numero_comprobante": combinar_numero_comprobante(
+                                    _cmp.get("numero"), _cmp.get("punto_de_venta")
+                                ),
                                 "fecha_emision": _cmp.get("fecha_emision"),
                                 "tipo_comprobante": _cmp.get("tipo"),
                                 "subtipo_comprobante": _cmp.get("subtipo"),
@@ -1837,7 +1871,10 @@ class InvoiceOrchestrator:
             # Número de comprobante externo: "PPPPP-NNNNNNNN" -> prefijo/numero.
             # (misma lógica que _extraer_prefijo_numero_comprobante_externo,
             # reusada acá en vez de duplicada para no perder el fix de
-            # normalizar_numero_comprobante si diverge más adelante).
+            # combinar_numero_comprobante si diverge más adelante -- este
+            # `comprobante` es el dict crudo de Gemini, con "punto_de_venta"
+            # disponible, así que el helper arma bien el prefijo aunque el
+            # documento los imprima como dos campos separados).
             prefijo_externo, numero_externo = _extraer_prefijo_numero_comprobante_externo(comprobante)
 
             comprobante_compra_payload = {
@@ -2408,7 +2445,11 @@ async def _procesar_imagen_o_pdf_impl(
         # Mismo criterio que ya se usaba para drive_file_id, ahora
         # generalizado a todos los campos extraídos.
         _campos_extraidos = {
-            "numero_comprobante": normalizar_numero_comprobante(_cmp.get("numero")),
+            # combinar_numero_comprobante -- ver comentario equivalente en
+            # worker() (mismo criterio, mismo caso real, misma función).
+            "numero_comprobante": combinar_numero_comprobante(
+                _cmp.get("numero"), _cmp.get("punto_de_venta")
+            ),
             "fecha_emision": _cmp.get("fecha_emision"),
             "tipo_comprobante": _cmp.get("tipo"),
             "subtipo_comprobante": _cmp.get("subtipo"),
