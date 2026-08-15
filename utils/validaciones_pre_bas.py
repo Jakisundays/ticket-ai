@@ -112,6 +112,67 @@ def normalizar_numero_comprobante(numero_comprobante: Optional[str]) -> Optional
     return numero_comprobante
 
 
+def combinar_numero_comprobante(
+    numero: Optional[str], punto_de_venta: Optional[str] = None
+) -> Optional[str]:
+    """Arma el "prefijo-numero" que BAS espera cuando el documento imprime
+    Punto de Venta y Número de Comprobante como dos campos separados (el
+    formato AFIP estándar -- "Punto de Venta: 00001" / "Comp. Nro:
+    00000066" -- presente en la enorme mayoría de comprobantes electrónicos
+    argentinos, no algo específico de un layout puntual). El schema de
+    extracción (tools_standard.py) ya le pide a Gemini estos dos valores
+    POR SEPARADO ("numero" y "punto_de_venta" son campos propios) -- lo que
+    faltaba era combinarlos acá. Bug real confirmado 2026-08-14 (factura
+    LEON LUGO BLANCA ELENA, comp. 00000066 / P.V. 00001): sin esto,
+    `numero_comprobante` quedaba guardado como "00000066" a secas, y las
+    tres copias de la validación (Invoicy, dashboard, hook de PocketBase)
+    lo rechazan por no tener el separador "-" -- factura bloqueada pidiendo
+    corrección manual por un dato que la IA ya había extraído bien, solo
+    que en dos pedazos.
+
+    No es determinístico confiar en que Gemini combine los dos números por
+    su cuenta -- confirmado real: la MISMA factura, en corridas distintas,
+    a veces devuelve "numero" ya combinado ("00001-00000066") y a veces
+    solo el comprobante ("00000066"). Por eso esta función NUNCA asume cuál
+    de los dos casos pasó -- siempre revisa la forma real de "numero" antes
+    de decidir si hace falta anteponer punto_de_venta.
+
+    Reglas, en orden (case-insensitive con normalizar_numero_comprobante,
+    que corre primero para no confundir un "A-00001-00000066" de 3 partes
+    con un caso ya combinado de 2):
+      1. Letra AFIP pegada adelante (3 partes) -> se saca primero, vía
+         normalizar_numero_comprobante (ej. "A-00001-00000066" ->
+         "00001-00000066").
+      2. Si el resultado YA tiene 2 partes (prefijo-numero) -> se devuelve
+         TAL CUAL, sin tocar. Nunca se antepone punto_de_venta acá aunque
+         venga presente -- haría "00001-00001-00000066" (doble prefijo) si
+         Gemini ya lo había combinado él mismo en esta corrida.
+      3. Si tiene 1 sola parte (sin guión) Y punto_de_venta viene no vacío
+         -> se combinan: f"{punto_de_venta}-{numero}". Concatenación de
+         strings, nunca se convierte a int en el camino -- los ceros a la
+         izquierda de ambos números quedan intactos tal como los extrajo
+         Gemini.
+      4. Cualquier otro caso (sin punto_de_venta, o una forma que no
+         reconocemos) -> se devuelve tal cual, sin inventar un prefijo --
+         mismo comportamiento de hoy, que dejaba bloquear aguas abajo y
+         pedir corrección manual en vez de adivinar.
+
+    Idempotente por construcción: el único caso que modifica el valor (la
+    regla 3) siempre produce un resultado de 2 partes, y un resultado de 2
+    partes SIEMPRE cae en la regla 2 (paso directo) si se le vuelve a pasar
+    -- nunca se le vuelve a anteponer punto_de_venta una segunda vez."""
+    numero_normalizado = normalizar_numero_comprobante(numero)
+    if not numero_normalizado:
+        return numero_normalizado
+    partes = numero_normalizado.replace(" ", "").split("-")
+    if len(partes) == 2:
+        return numero_normalizado
+    punto_de_venta = (punto_de_venta or "").strip()
+    if len(partes) == 1 and punto_de_venta:
+        return f"{punto_de_venta}-{numero_normalizado}"
+    return numero_normalizado
+
+
 def validar_numero_comprobante(numero_comprobante: Optional[str]) -> Optional[str]:
     """Mismo parseo que _extraer_prefijo_numero_comprobante_externo -- acá
     solo para RECHAZAR el caso en que ese parseo caería en el fallback
