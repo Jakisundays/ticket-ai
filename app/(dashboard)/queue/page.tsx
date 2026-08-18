@@ -3,23 +3,13 @@ import { CheckCircle } from "lucide-react";
 import { createServerClient } from "@/lib/pocketbase-server";
 import { Collections, type InvoicesRecord } from "@/lib/pocketbase-types";
 import { formatCurrency, formatDate } from "@/lib/format";
+import { FILTRO_COLA_COMPLETA } from "@/lib/invoice-queue-filters";
 import PageHeader from "@/components/PageHeader";
 import EmptyState from "@/components/EmptyState";
 import QueueList, { type QueueRow } from "./QueueList";
 import QueueRealtime from "./QueueRealtime";
 
 export const dynamic = "force-dynamic";
-
-// Antes solo "completed" (extracción terminada) contaba como "en la cola".
-// Ahora también entran pending/processing/error: el objetivo es que la
-// factura aparezca acá desde el instante en que se crea el placeholder
-// (ver /gemini2/website-upload/init en Invoicy), no recién cuando termina
-// de procesarse -- así el equipo ve la actividad en vivo, no solo el
-// resultado final.
-// deleted_at = "" al final (fuera del OR): excluye lo soft-deleted sin
-// importar cuál de las 4 ramas matcheó -- ver components/DeleteRowMenu.tsx.
-const FILTRO_COLA =
-  '((status = "completed" && review_status != "confirmed") || status = "pending" || status = "processing" || status = "error") && deleted_at = ""';
 
 type Antiguedad = { label: string; urgente: boolean };
 
@@ -82,7 +72,7 @@ export default async function QueuePage() {
   const result = await pb
     .collection<InvoicesRecord>(Collections.Invoices)
     .getList(1, 100, {
-      filter: FILTRO_COLA,
+      filter: FILTRO_COLA_COMPLETA,
       // "-created": la más nueva primero -- así el equipo ve de inmediato
       // lo que acaba de entrar (coherente con QueueRealtime.tsx, que refresca
       // la lista apenas se crea un placeholder). Antes era "+created" (la más

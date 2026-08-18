@@ -9,21 +9,13 @@ import {
   type ProcessingJobsRecord,
 } from "@/lib/pocketbase-types";
 import { formatCurrency, formatRelativeDateTime } from "@/lib/format";
+import { FILTRO_FACTURAS_PENDIENTES } from "@/lib/invoice-queue-filters";
 import PageHeader from "@/components/PageHeader";
 import MetricCard from "@/components/MetricCard";
 import { Button } from "@/components/ui/button";
 import RecentActivityTable, { type RecentActivityRow } from "./RecentActivityTable";
 
 export const dynamic = "force-dynamic";
-
-// Mismo filtro que app/(dashboard)/layout.tsx (badge del nav): "acción
-// humana pendiente" (facturas ya procesadas que todavía nadie confirmó),
-// no "actividad en curso" -- deliberadamente más angosto que
-// app/(dashboard)/queue/page.tsx, que desde este cambio también muestra
-// pending/processing/error para dar visibilidad temprana en la subida.
-// review_status != "confirmed" -- no "= needs_review": filas legacy con
-// review_status "" también cuentan como pendientes.
-const FILTRO_COLA = 'status = "completed" && review_status != "confirmed"';
 
 const MESES_ES = [
   "enero",
@@ -188,7 +180,7 @@ export default async function InicioPage() {
   const [pendientes, mesAnteriorResult, itemsDelMes, fallidasResult, actividadResult, jobsConEmail] =
     await Promise.all([
       pb.collection<InvoicesRecord>(Collections.Invoices).getList(1, 100, {
-        filter: FILTRO_COLA,
+        filter: FILTRO_FACTURAS_PENDIENTES,
         sort: "+created",
         requestKey: "inicio_pendientes",
       }),
