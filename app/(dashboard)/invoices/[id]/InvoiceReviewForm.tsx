@@ -98,6 +98,19 @@ function isDirty<T extends object>(draft: T, original: T): boolean {
   return (Object.keys(draft) as (keyof T)[]).some((key) => draft[key] !== original[key]);
 }
 
+/** Colapsa duplicados por `keyFn`, quedándose con la primera aparición --
+ * conserva el orden ya recibido (ej. el `sort` que aplicó el fetch server-side).
+ * Usado para los <Select> de abajo: bas_category_map tiene varias filas por
+ * categoría a propósito (una por alícuota, ver migración
+ * 1783483945_add_alicuota_to_bas_category_map.js), pero este selector de
+ * categoría es solo informativo -- el Servicio/Ítem BAS es el que se registra
+ * de verdad -- así que mostrar cada nombre una sola vez es lo correcto acá,
+ * sin tocar la colección. Se aplica también a bas_items por consistencia,
+ * aunque ahí `codigo` ya es único a nivel de índice de PocketBase. */
+function dedupeBy<T, K>(items: T[], keyFn: (item: T) => K): T[] {
+  return Array.from(new Map(items.map((item) => [keyFn(item), item])).values());
+}
+
 export default function InvoiceReviewForm({
   invoice,
   items,
@@ -173,6 +186,10 @@ export default function InvoiceReviewForm({
   // definición, inválido o desactualizado (ej. quedó de antes de que el
   // ítem se desactivara en BAS).
   const basItemCodes = useMemo(() => new Set(basItems.map((i) => i.codigo)), [basItems]);
+  // Ver dedupeBy: bas_category_map trae varias filas por categoría (una por
+  // alícuota) a propósito -- el selector de abajo solo necesita el nombre.
+  const uniqueCategories = useMemo(() => dedupeBy(categories, (c) => c.categoria), [categories]);
+  const uniqueBasItems = useMemo(() => dedupeBy(basItems, (b) => b.codigo), [basItems]);
   const proveedorResuelto =
     invoice.bas_registration_status === "awaiting_service_selection" ||
     invoice.bas_registration_status === "ready_to_register" ||
@@ -407,7 +424,7 @@ export default function InvoiceReviewForm({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {categories.map((cat) => (
+                        {uniqueCategories.map((cat) => (
                           <SelectItem key={cat.id} value={cat.categoria}>
                             {cat.categoria}
                           </SelectItem>
@@ -438,7 +455,7 @@ export default function InvoiceReviewForm({
                         <SelectValue placeholder="Elegir ítem…" />
                       </SelectTrigger>
                       <SelectContent>
-                        {basItems.map((basItem) => (
+                        {uniqueBasItems.map((basItem) => (
                           <SelectItem key={basItem.id} value={basItem.codigo}>
                             {basItem.descripcion}{" "}
                             <span className="font-mono text-muted-foreground">({basItem.codigo})</span>
