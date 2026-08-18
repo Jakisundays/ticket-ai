@@ -29,6 +29,7 @@ import {
   type InvoiceWithItemsExpand,
 } from "@/lib/pocketbase-types";
 import { formatCurrency, formatDate, formatRelativeDateTime, driveFileUrl } from "@/lib/format";
+import { FILTRO_FACTURAS_PENDIENTES } from "@/lib/invoice-queue-filters";
 import PageHeader from "@/components/PageHeader";
 
 export const dynamic = "force-dynamic";
@@ -170,7 +171,7 @@ export default async function InvoiceDetailPage({
     const [categoriesResult, queueResult, basItemsResult] = await Promise.all([
       pb.collection<BasCategoryMapRecord>(Collections.BasCategoryMap).getFullList({ sort: "categoria" }),
       pb.collection<{ id: string }>(Collections.Invoices).getFullList({
-        filter: 'status = "completed" && review_status != "confirmed"',
+        filter: FILTRO_FACTURAS_PENDIENTES,
         sort: "+created",
         fields: "id",
       }),

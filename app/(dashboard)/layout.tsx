@@ -4,6 +4,7 @@ import {
   ClientResponseError,
 } from "@/lib/pocketbase-server";
 import { Collections, type InvoicesRecord } from "@/lib/pocketbase-types";
+import { FILTRO_FACTURAS_PENDIENTES } from "@/lib/invoice-queue-filters";
 import {
   Sidebar,
   SidebarFooter,
@@ -37,7 +38,7 @@ export default async function DashboardLayout({
     const result = await pb
       .collection<InvoicesRecord>(Collections.Invoices)
       .getList(1, 1, {
-        filter: 'status = "completed" && review_status != "confirmed"',
+        filter: FILTRO_FACTURAS_PENDIENTES,
       });
     queueCount = result.totalItems;
   } catch (error) {
