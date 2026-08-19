@@ -21,6 +21,15 @@ registrar_comprobante (ver ese docstring para el detalle): reales cuando
 son puros y ya probados (resolver_codigo_item, _extraer_prefijo...),
 dobles para todo lo que toca red/estado.
 
+Actualizado 2026-08-19: el respeto del override de CodigoItem ya no vive
+en el source de crear_orden_pago -- se relocalizó a
+utils/bas_payload.py:_elegir_codigo_item_dominante (la misma función
+compartida que usan los 3 call sites de BAS, ver
+utils/bas_payload.py). El check estructural de abajo ahora verifica que
+crear_orden_pago llame a construir_comprobante_totales_e_items en vez de
+buscar el patrón viejo inline -- los escenarios I/J/K/L siguen probando
+el comportamiento de punta a punta contra el código real.
+
 Escenarios (mismos 4 del hallazgo, ver test_offline_registrar_comprobante_endpoint.py
 I/J/K/L para el detalle completo de cada uno):
   I. Override válido distinto del automático -> BAS recibe el override.
@@ -63,6 +72,7 @@ from utils.bas_config import (  # noqa: E402 -- reales, constantes puras
     METODO_PAGO_ARRAY_BAS,
 )
 from utils.bas_item_resolver import resolver_codigo_item  # noqa: E402 -- real
+from utils.bas_payload import construir_comprobante_totales_e_items  # noqa: E402 -- real
 from utils.validaciones_pre_bas import combinar_numero_comprobante  # noqa: E402 -- real
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -115,12 +125,15 @@ check("Se extrajo 'CrearOrdenPagoBody' del AST", bool(fuente_body_model))
 check("Se extrajo '_extraer_prefijo_numero_comprobante_externo' del AST", bool(fuente_extraer_prefijo))
 check("Se extrajo 'crear_orden_pago' del AST", bool(fuente_endpoint))
 
-# Regresión estructural directa: el hallazgo corregido acá es que este call
-# site pase el override -- si alguien lo vuelve a borrar, este check lo
-# pesca sin necesitar que ningún escenario de abajo falle primero.
+# Regresión estructural directa: el hallazgo corregido acá era que este
+# call site ignorara el override -- ahora se corrige delegando SIEMPRE a la
+# función compartida (construir_comprobante_totales_e_items), nunca
+# reimplementando su propia resolución de CodigoItem inline. Si alguien
+# reintroduce una copia local de esa lógica, este check lo pesca sin
+# necesitar que ningún escenario de abajo falle primero.
 check(
-    "El endpoint pasa override_codigo_item a resolver_codigo_item",
-    fuente_endpoint is not None and "override_codigo_item=(it.get(\"bas_codigo_item\") or None)" in fuente_endpoint,
+    "El endpoint delega la resolución de CodigoItem a construir_comprobante_totales_e_items (no la reimplementa)",
+    fuente_endpoint is not None and "construir_comprobante_totales_e_items(" in fuente_endpoint,
 )
 
 
@@ -222,6 +235,7 @@ namespace = {
     "BAS_CAJA": BAS_CAJA,
     "BAS_METODO_PAGO_CTA_CTE": BAS_METODO_PAGO_CTA_CTE,
     "resolver_codigo_item": resolver_codigo_item,
+    "construir_comprobante_totales_e_items": construir_comprobante_totales_e_items,
     "combinar_numero_comprobante": combinar_numero_comprobante,
     "datetime": datetime,
     "fecha_hoy_bas": lambda: datetime.date(2026, 8, 12),
@@ -233,7 +247,7 @@ namespace = {
 exec(compile(fuente_body_model, filename="<CrearOrdenPagoBody extraído>", mode="exec"), namespace)
 exec(compile(fuente_extraer_prefijo, filename="<_extraer_prefijo extraído>", mode="exec"), namespace)
 
-namespace["validar_factura_antes_de_pago_real"] = lambda invoice, items: []
+namespace["validar_factura_antes_de_pago_real"] = lambda invoice: []
 
 exec(compile(fuente_endpoint, filename="<crear_orden_pago extraído>", mode="exec"), namespace)
 crear_orden_pago = namespace.get("crear_orden_pago")

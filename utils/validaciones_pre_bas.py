@@ -195,23 +195,25 @@ def validar_cae(cae: Optional[str], cae_vencimiento: Optional[str]) -> Optional[
     return None
 
 
-def validar_items(items: list) -> Optional[str]:
-    """Solo completitud (hay ítems, cada uno tiene precio_total) -- lo único
-    que items_bas necesita para armar ImporteGravado por línea (ver
-    process_invoice_google_2.py). Antes también rechazaba acá si
-    cantidad * precio_unitario no cerraba contra precio_total (tolerancia
-    2%) -- se sacó (2026-08-05, mismo criterio que la baja de
-    validar_monto_aplicable_vs_neto, docs/incidente-2026-08-04-pagos-solo-
-    neto.md): BAS nunca recibe cantidad/precio_unitario como restricción,
-    solo ImporteGravado ya calculado a partir de precio_total -- ese cruce
-    era un invento de Invoicy sin correspondencia real en lo que BAS valida,
-    y el ruido normal de OCR (descuentos, redondeos) lo hacía bloquear
-    facturas reales que BAS habría aceptado sin problema."""
-    if not items:
-        return "No se detectaron ítems válidos en la factura para registrar. Revisá el documento antes de continuar."
-    for item in items:
-        if item.get("precio_total") is None:
-            return "Algunos ítems de la factura tienen el precio incompleto. Completalos antes de registrar la factura."
+def validar_total(total: Optional[float]) -> Optional[str]:
+    """`invoices.total` es, desde 2026-08-19, la ÚNICA fuente de Total/
+    TotalGravado/TotalIva que se manda a BAS -- ver
+    utils/bas_payload.py:construir_comprobante_totales_e_items. Antes de
+    ese cambio de arquitectura este campo nunca se validaba en ningún
+    lado (no hacía falta: el Total salía de sumar invoice_items). Ahora es
+    el dato más crítico de todo el flujo -- si falta o es inválido, no hay
+    ningún ítem de respaldo del cual reconstruirlo, así que corta acá con
+    un mensaje claro en vez de dejar que construir_comprobante_totales_e_items
+    levante un ValueError más abajo (defensa en profundidad, no el camino
+    esperado)."""
+    if total is None:
+        return "Falta el total de la factura. Verificalo antes de continuar."
+    try:
+        total = float(total)
+    except (TypeError, ValueError):
+        return "El total de la factura no es un número válido. Verificalo antes de continuar."
+    if total <= 0:
+        return f"El total de la factura (${total}) tiene que ser mayor a cero. Verificalo antes de continuar."
     return None
 
 
@@ -246,11 +248,18 @@ def validar_alicuota_iva(alicuota: Optional[float]) -> Optional[str]:
     return None
 
 
-def validar_factura_antes_de_pago_real(invoice: dict, items: list) -> list:
+def validar_factura_antes_de_pago_real(invoice: dict) -> list:
     """
     Corre las validaciones críticas de datos de la factura (Etapa 0 del plan
-    de validaciones) antes de crear una Orden de Pago REAL en BAS. Devuelve
-    una lista de mensajes amigables (vacía si todo está OK).
+    de validaciones) antes de crear/registrar un comprobante REAL en BAS.
+    Devuelve una lista de mensajes amigables (vacía si todo está OK).
+
+    Ya NO recibe `items` (hasta 2026-08-19 sí, para una validar_items() que
+    exigía "hay ítems" + "cada uno tiene precio_total"): desde la
+    arquitectura invoice.total-como-ancla
+    (utils/bas_payload.py:construir_comprobante_totales_e_items), el Total
+    que se registra en BAS nunca depende de los ítems -- ni de que existan,
+    ni de sus precios -- así que no queda nada de ellos que validar acá.
     """
     validaciones = (
         validar_cuit(invoice.get("emisor_cuit")),
@@ -258,7 +267,7 @@ def validar_factura_antes_de_pago_real(invoice: dict, items: list) -> list:
         validar_fecha_emision(invoice.get("fecha_emision")),
         validar_numero_comprobante(invoice.get("numero_comprobante")),
         validar_cae(invoice.get("cae"), invoice.get("cae_vencimiento")),
-        validar_items(items),
+        validar_total(invoice.get("total")),
         validar_alicuota_iva(invoice.get("iva_alicuota")),
     )
     return [mensaje for mensaje in validaciones if mensaje]

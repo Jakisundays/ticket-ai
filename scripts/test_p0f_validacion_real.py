@@ -93,6 +93,7 @@ from utils.bas_config import (  # noqa: E402
     fecha_hoy_bas,
 )
 from utils.bas_item_resolver import resolver_codigo_item  # noqa: E402
+from utils.bas_payload import construir_comprobante_totales_e_items  # noqa: E402
 from utils.pocketbase_client import PocketBaseClient  # noqa: E402
 from utils.validaciones_pre_bas import combinar_numero_comprobante  # noqa: E402
 
@@ -228,6 +229,7 @@ namespace = {
     "BAS_CAJA": BAS_CAJA,
     "BAS_METODO_PAGO_CTA_CTE": BAS_METODO_PAGO_CTA_CTE,
     "resolver_codigo_item": resolver_codigo_item,
+    "construir_comprobante_totales_e_items": construir_comprobante_totales_e_items,
     "combinar_numero_comprobante": combinar_numero_comprobante,
     "datetime": datetime,
     "fecha_hoy_bas": fecha_hoy_bas,  # REAL -- huso horario argentino real, no un stub.

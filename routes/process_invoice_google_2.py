@@ -47,6 +47,7 @@ from utils.bas import BasClient, BasApiError
 from utils.pocketbase_client import PocketBaseClient
 from utils.rate_limit import limiter
 from utils.bas_item_resolver import resolver_codigo_item
+from utils.bas_payload import construir_comprobante_totales_e_items
 from utils.bas_config import (
     fecha_hoy_bas,
     BAS_EMPRESA,
@@ -272,8 +273,9 @@ def _extraer_alicuota_iva(impuestos: list) -> Optional[float]:
     Gemini (tool impuestos_y_retenciones_de_la_factura) -- hasta ahora ese
     dato se calculaba pero solo se usaba para formatear_impuestos (texto de
     Sheets/email), nunca se persistía ni llegaba al payload de BAS. Se usa
-    para calcular ImporteIva/TotalIva por línea/cabecera (ver items_bas en
-    procesar_factura_en_bas y crear_orden_pago). Desde P0-E (2026-08-12)
+    para calcular ImporteIva/TotalIva de cabecera (ver
+    utils/bas_payload.py:construir_comprobante_totales_e_items, único lugar
+    que arma esto desde 2026-08-19). Desde P0-E (2026-08-12)
     TAMBIÉN se usa para elegir el CodigoItem: confirmado real que BAS no
     cruza ImporteIva/TasaIva contra la tasa configurada del catálogo para
     el CodigoItem elegido (no hay riesgo de 409 por esto), así que conectar
@@ -1729,144 +1731,49 @@ class InvoiceOrchestrator:
             # un CodigoItem inventado o faltante).
             resultado["bas_registration_status"] = "awaiting_service_selection"
 
-            if monto_override is not None:
-                # Un único ítem sintético -- mismo patrón ya probado real
-                # contra BAS (scripts/test_crear_comprobante_compra.py).
-                # Se preserva la categoría del primer ítem real extraído
-                # (si hay) para seguir ejercitando la resolución real de
-                # CodigoItem, no una hardcodeada.
-                categoria_real = detalles[0].get("categoria", "") if detalles else ""
-                resolucion = resolver_codigo_item(
-                    categoria=categoria_real,
-                    alicuota=alicuota_iva,
+            # Total/TotalGravado/TotalIva/CodigoItem anclados a `total`
+            # (el valor real extraído por Gemini, o monto_override si está
+            # seteado -- ya resuelto más arriba) -- NUNCA a la suma de
+            # `detalles`. Decisión de arquitectura 2026-08-19, misma
+            # función que crear_orden_pago/registrar_comprobante -- ver
+            # utils/bas_payload.py. Reemplaza las dos ramas viejas
+            # (monto_override / detalles) que existían acá: la elección de
+            # categoría "dominante" (o el catch-all) cubre ambos casos sin
+            # duplicar lógica, y ya no bloquea la factura entera si algún
+            # ítem no resuelve -- este flujo siempre corre en dry_run
+            # (nunca escribe nada real), así que antes bloqueaba una
+            # ingesta automática entera por un solo ítem sin categoría,
+            # sin necesidad real de hacerlo.
+            #
+            # Con monto_override, la alícuota se fuerza a 0 -- mismo
+            # criterio que ya existía (monto de prueba sintético para
+            # importación masiva, sin impacto contable real, ver docstring
+            # de monto_override arriba).
+            alicuota_para_bas = 0 if monto_override is not None else alicuota_iva
+            try:
+                totales_e_items = construir_comprobante_totales_e_items(
+                    total_bruto=total,
+                    alicuota_iva=alicuota_para_bas,
+                    items=detalles,
                     pb_client=self._pb_client,
                 )
-                if not resolucion["valido"]:
-                    resultado["error"] = resolucion["motivo_bloqueo"]
-                    app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
-                    return resultado
-                items_bas = [
-                    {
-                        "CodigoItem": resolucion["codigo_item"],
-                        "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
-                        "NumeroUnidadMedida": "1",
-                        "CantidadPrimeraUnidad": 1,
-                        "PrecioUnitario": monto_override,
-                        "ImporteGravado": monto_override,
-                        # Sin IVA a propósito -- es un monto de prueba
-                        # sintético, sin impacto contable real (ver
-                        # docstring de monto_override más abajo). "ImporteIva"
-                        # tiene que estar presente (aunque sea 0): el cálculo
-                        # de total_iva más abajo suma esta clave de TODOS los
-                        # ítems de items_bas, monto_override incluido.
-                        "ImporteIva": 0,
-                        "ImporteTotal": monto_override,
-                        "TasaIva": 0,
-                        "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
-                        "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
-                    }
-                ]
-            else:
-                if not detalles:
-                    resultado["error"] = "La factura no tiene ítems detallados -- no hay nada que resolver."
-                    app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
-                    return resultado
+            except ValueError as e:
+                resultado["error"] = str(e)
+                app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
+                return resultado
+            if totales_e_items["fallback_catch_all"]:
+                app_logger.info(
+                    f"[{process_id}] BAS: ningún ítem resolvió categoría -- se usa "
+                    f"el catch-all ({totales_e_items['Items'][0]['CodigoItem']})."
+                )
 
-                # Primera pasada: resolver y VALIDAR el CodigoItem de cada
-                # línea contra bas_items ANTES de construir ningún payload.
-                # Si cualquier línea no resuelve a un ítem válido, se
-                # bloquea la factura ENTERA -- no se arma un
-                # comprobante_compra_payload parcial ni se llama a BAS (ver
-                # regla 4 del alcance: nunca un CodigoItem inventado o
-                # faltante llega al payload).
-                resoluciones = [
-                    resolver_codigo_item(
-                        categoria=item.get("categoria", ""),
-                        alicuota=alicuota_iva,
-                        pb_client=self._pb_client,
-                    )
-                    for item in detalles
-                ]
-                invalidas = [r for r in resoluciones if not r["valido"]]
-                if invalidas:
-                    resultado["error"] = (
-                        f"No se pudo resolver un CodigoItem válido para {len(invalidas)} "
-                        f"de {len(detalles)} ítem(s) de la factura: "
-                        + " | ".join(r["motivo_bloqueo"] for r in invalidas)
-                    )
-                    app_logger.warning(f"[{process_id}] BAS: {resultado['error']}")
-                    return resultado
-
-                items_bas = []
-                for item, resolucion in zip(detalles, resoluciones):
-                    importe_gravado = round(float(item.get("precio_total", 0) or 0), 2)
-                    # ImporteIva/TasaIva con la alícuota REAL de la factura
-                    # (iva_alicuota, extraída por Gemini -- ver
-                    # _extraer_alicuota_iva). Si no se pudo determinar una
-                    # alícuota única, 0 (neto puro, comportamiento histórico
-                    # -- no se inventa una tasa).
-                    #
-                    # ImporteTotal de LÍNEA = ImporteGravado (el neto), NUNCA
-                    # gravado+iva. Confirmado leyendo el código fuente real
-                    # de PLATINUM_TEST.dbo.SP_VALIDA_TOTALES (instalación con
-                    # TRANSAC.IVA='I' en el 100% de los comprobantes): la
-                    # regla de línea exige `m.importe ≈ m.impgravado`
-                    # (tolerancia $1) -- el IVA de la línea va aparte, en
-                    # ImporteIva, y NO se suma acá. El intento anterior de
-                    # mandar ImporteTotal=gravado+iva "porque BAS lo aceptó
-                    # en pruebas de $1" fue un punto ciego: con importes de
-                    # prueba de $1, cualquier delta de fórmula queda oculto
-                    # bajo esa misma tolerancia de $1 del SP -- confirmado
-                    # con 3 fallos reales en producción (04/05-ago-2026, ej.
-                    # OESTEREICHER HUGO 00010-00001854, delta=$178.500) y
-                    # reproducido offline contra la regla exacta del SP en
-                    # scripts/test_offline_importe_total_linea.py. TotalGravado/
-                    # TotalIva/Total de CABECERA no cambian -- esos ya se
-                    # calculan bien (suma de las líneas, más abajo).
-                    tasa_iva = alicuota_iva if alicuota_iva is not None else 0
-                    importe_iva = round(importe_gravado * tasa_iva / 100, 2)
-                    importe_total = importe_gravado
-                    items_bas.append(
-                        {
-                            "CodigoItem": resolucion["codigo_item"],
-                            "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
-                            "NumeroUnidadMedida": "1",
-                            "CantidadPrimeraUnidad": item.get("cantidad", 1),
-                            "PrecioUnitario": item.get("precio_unitario", 0),
-                            "ImporteGravado": importe_gravado,
-                            "ImporteIva": importe_iva,
-                            "ImporteTotal": importe_total,
-                            "TasaIva": tasa_iva,
-                            "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
-                            "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
-                        }
-                    )
-
-            # Todas las líneas resolvieron a un CodigoItem válido (o, en la
-            # rama monto_override, el único ítem sintético) -- la factura ya
-            # está lista para el registro real (P0-F). "ready_to_register"
-            # es el valor reservado exactamente para esto desde P0-A (ver
-            # migración 1784500000_add_bas_traceability_and_state.js), nunca
-            # usado hasta ahora.
+            # La factura ya está lista para el registro real (P0-F):
+            # totales_e_items siempre resuelve un CodigoItem válido (real
+            # o catch-all) o levanta ValueError arriba -- nunca llega acá
+            # con un payload a medio construir. "ready_to_register" es el
+            # valor reservado exactamente para esto desde P0-A (ver
+            # migración 1784500000_add_bas_traceability_and_state.js).
             resultado["bas_registration_status"] = "ready_to_register"
-
-            # BAS valida que TotalGravado == suma de ImporteGravado de los
-            # ítems (409 "no coincide con la suma de los totales gravados de
-            # las líneas" si no matchea, ver SP_ICR_COMPROB_COMPRA). Antes
-            # acá se mandaba `total` (con IVA incluido) en vez del gravado
-            # real -- confirmado con una factura real: BAS reportó
-            # TotalGravado=11959.08 (el total con 21% de IVA) contra una
-            # suma de líneas de 9883.54 (9883.54*1.21 = 11959.08 exacto).
-            # Se calcula sumando los mismos valores que ya se mandan en
-            # items_bas, no un campo "subtotal" extraído por separado --
-            # así queda estructuralmente garantizado que matchea, en vez de
-            # confiar en que Gemini haya calculado ambos de forma consistente.
-            # round(): sumar floats acumula ruido de precisión (ej.
-            # 54981.340000000004) que BAS rechaza con 400 "must have not
-            # more than 5 decimals" -- confirmado en runtime, 2026-07-31.
-            total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
-            total_iva = round(sum(float(it["ImporteIva"] or 0) for it in items_bas), 2)
-            total_bruto = round(total_gravado + total_iva, 2)
 
             # Número de comprobante externo: "PPPPP-NNNNNNNN" -> prefijo/numero.
             # (misma lógica que _extraer_prefijo_numero_comprobante_externo,
@@ -1893,22 +1800,15 @@ class InvoiceOrchestrator:
                 # utils/bas_config.py:ZONA_HORARIA_BAS) siempre cae en el
                 # período contable abierto, sea cual sea.
                 "Fecha": fecha_hoy_bas().isoformat(),
-                # "Total" = "TotalGravado" + "TotalIva" (bruto real). Causa
-                # raíz confirmada real (2026-08-04): el schema real de BAS
-                # (/swagger/v1/swagger.json, ComprobanteCompra) tiene un
-                # campo "TotalIva" (cabecera) y cada Item tiene "ImporteIva"
-                # -- NINGUNO de los dos se mandaba antes. BAS valida "Total"
-                # contra la suma de sus propios totales parciales de
-                # cabecera (TotalGravado + TotalIva + ...), NO contra una
-                # suma re-derivada de los ítems -- por eso, sin TotalIva
-                # (quedaba en 0/null), "Total" quedaba matemáticamente
-                # forzado a "TotalGravado" (neto) sin importar qué se
-                # mandara en Items[].ImporteTotal. Con TotalIva/ImporteIva
-                # poblados (ver items_bas más arriba), un 201 real registró
-                # el comprobante por el bruto completo sin error.
-                "Total": total_bruto,
-                "TotalGravado": total_gravado,
-                "TotalIva": total_iva,
+                # Total/TotalGravado/TotalIva anclados a `total` (ver
+                # utils/bas_payload.py) -- garantizan Total == TotalGravado +
+                # TotalIva por construcción, la regla exacta de
+                # SP_VALIDA_TOTALES que causó el incidente de MEDINA
+                # (2026-08-04, ver docs/incidente-2026-08-04-pagos-solo-
+                # neto.md).
+                "Total": totales_e_items["Total"],
+                "TotalGravado": totales_e_items["TotalGravado"],
+                "TotalIva": totales_e_items["TotalIva"],
                 "EmitidoPor": BAS_EMITIDO_POR_CAE,
                 "Empresa": BAS_EMPRESA,
                 "Sucursal": BAS_SUCURSAL,
@@ -1921,11 +1821,13 @@ class InvoiceOrchestrator:
                 "FechaComprobanteExterno": comprobante.get("fecha_emision"),
                 "NumeroCAIoCAE": otros.get("CAE"),
                 "VencimientoCAIoCAE": otros.get("vencimiento_CAE"),
-                # Importe = total_bruto -- tiene que coincidir con "Total" de
-                # la cabecera (ver comentario ahí arriba). Este flujo siempre
+                # Importe = Total -- tiene que coincidir con "Total" de la
+                # cabecera (ver comentario ahí arriba). Este flujo siempre
                 # corre en dry_run así que hoy no escribe nada real.
-                "Vencimientos": [{"FechaVencimiento": comprobante.get("fecha_emision"), "Importe": total_bruto}],
-                "Items": items_bas,
+                "Vencimientos": [
+                    {"FechaVencimiento": comprobante.get("fecha_emision"), "Importe": totales_e_items["Total"]}
+                ],
+                "Items": totales_e_items["Items"],
             }
 
             with _lock_comprobante(proveedor.get("Codigo"), prefijo_externo, numero_externo):
@@ -1935,7 +1837,7 @@ class InvoiceOrchestrator:
                     comprobante_factura="MA",
                     prefijo_externo=prefijo_externo,
                     numero_externo=numero_externo,
-                    importe=total_bruto,
+                    importe=totales_e_items["Total"],
                     fecha_externo=comprobante.get("fecha_emision"),
                     prefijo_op=BAS_PREFIJO_TALONARIO_OP,
                     caja_op=BAS_CAJA,
@@ -1945,7 +1847,11 @@ class InvoiceOrchestrator:
                     # investigación previa (pasó la validación de existencia contra
                     # BAS a diferencia de otros códigos probados). No hay endpoint
                     # que exponga el catálogo real -- ver docs/bas-orden-de-pago-research.md.
-                    pagos={"Efectivos": [{"MedioPago": "1", "Importe": total_bruto, "IngresooEgreso": "E"}]},
+                    pagos={
+                        "Efectivos": [
+                            {"MedioPago": "1", "Importe": totales_e_items["Total"], "IngresooEgreso": "E"}
+                        ]
+                    },
                     comprobante_compra_payload=comprobante_compra_payload,
                     imputacion_contable=BAS_IMPUTACION_CONTABLE_PROVEEDORES,
                     dry_run=dry_run,
@@ -3743,7 +3649,7 @@ async def crear_orden_pago(
     # Etapa 0) ANTES de escribir dinero real. Se corre acá y no en el flujo
     # automático porque procesar_factura_en_bas siempre corre en dry_run --
     # este es el único punto donde vale la pena bloquear.
-    errores_validacion = validar_factura_antes_de_pago_real(invoice, items)
+    errores_validacion = validar_factura_antes_de_pago_real(invoice)
     if errores_validacion:
         raise HTTPException(
             status_code=422,
@@ -3765,96 +3671,36 @@ async def crear_orden_pago(
         alicuota_iva = float(invoice.get("iva_alicuota")) if invoice.get("iva_alicuota") is not None else None
     except (TypeError, ValueError):
         alicuota_iva = None
-    # `bas_codigo_item` guardado SÍ es la fuente de verdad acá cuando un
-    # humano lo eligió a mano en el selector del dashboard (P0-G) -- se pasa
-    # como `override_codigo_item`, que el resolver vuelve a validar
-    # (activo=true+elegible_compras=true) antes de aceptarlo; si es
-    # inválido, bloquea sin caer silenciosamente a la resolución por
-    # categoría (regla 1 de resolver_codigo_item -- un humano que eligió mal
-    # un ítem tiene que enterarse, no que el sistema le pise la elección con
-    # un guess). Si el campo viene vacío (nunca se resolvió un candidato
-    # automático válido en la ingesta y el humano tampoco lo corrigió), el
-    # resolver cae solo al camino categoria+alicuota de siempre. HALLAZGO
-    # CRÍTICO corregido acá (revisión final de P0-G, 2026-08-12): hasta
-    # ahora este call site nunca pasaba el override, así que una corrección
-    # manual de ítem en el dashboard no tenía ningún efecto real sobre lo
-    # que se mandaba a BAS. Validado y bloqueante (P0-E): este endpoint es
-    # el ÚNICO que escribe de verdad en BAS (dry_run=False) -- un CodigoItem
-    # sin validar acá es el escenario de mayor riesgo real de todo el
-    # alcance, así que se resuelve y valida TODA la factura (422 si
-    # cualquier línea falla) ANTES de construir cualquier payload.
-    if not items:
-        raise HTTPException(
-            status_code=422,
-            detail="La factura no tiene ítems -- no hay nada que registrar/pagar.",
-        )
-    resoluciones = [
-        resolver_codigo_item(
-            categoria=it.get("categoria", ""),
-            alicuota=alicuota_iva,
-            override_codigo_item=(it.get("bas_codigo_item") or None),
+    # Total/TotalGravado/TotalIva/CodigoItem anclados a invoice.total --
+    # NUNCA a la suma de items_bas. Decisión de arquitectura 2026-08-19,
+    # misma función que registrar_comprobante -- ver
+    # utils/bas_payload.py para el detalle completo. `bas_codigo_item`
+    # elegido a mano por un humano sigue mandando siempre que resuelva
+    # válido (mismo criterio de prioridad que ya tenía este endpoint desde
+    # P0-G, 2026-08-12 -- ahora centralizado en la función compartida).
+    # validar_total (validar_factura_antes_de_pago_real, más arriba) ya
+    # garantizó que invoice.total es válido antes de este punto -- el
+    # ValueError de acá es defensa en profundidad, no el camino esperado.
+    try:
+        totales_e_items = construir_comprobante_totales_e_items(
+            total_bruto=invoice.get("total"),
+            alicuota_iva=alicuota_iva,
+            items=items,
             pb_client=orchestrator._pb_client,
         )
-        for it in items
-    ]
-    invalidas = [r for r in resoluciones if not r["valido"]]
-    if invalidas:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "mensaje": "No se pudo resolver un CodigoItem válido para uno o más ítems de la factura.",
-                "motivos": [r["motivo_bloqueo"] for r in invalidas],
-            },
-        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
-    items_bas = []
-    for it, resolucion in zip(items, resoluciones):
-        _importe_gravado = round(float(it.get("precio_total", 0) or 0), 2)
-        # ImporteIva/TasaIva con la alícuota REAL -- ver comentario largo
-        # equivalente en InvoiceOrchestrator.procesar_factura_en_bas.
-        # ImporteTotal de LÍNEA = ImporteGravado (neto), no gravado+iva --
-        # ver ese comentario para la regla exacta de SP_VALIDA_TOTALES y la
-        # evidencia real (OESTEREICHER HUGO, 04/05-ago-2026).
-        _tasa_iva = alicuota_iva if alicuota_iva is not None else 0
-        _importe_iva = round(_importe_gravado * _tasa_iva / 100, 2)
-        _importe_total = _importe_gravado
-        items_bas.append(
-            {
-                "CodigoItem": resolucion["codigo_item"],
-                "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
-                "NumeroUnidadMedida": "1",
-                "CantidadPrimeraUnidad": it.get("cantidad", 1),
-                "PrecioUnitario": it.get("precio_unitario", 0),
-                "ImporteGravado": _importe_gravado,
-                "ImporteIva": _importe_iva,
-                "ImporteTotal": _importe_total,
-                "TasaIva": _tasa_iva,
-                "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
-                "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
-            }
-        )
-    # Mismo fix que InvoiceOrchestrator.procesar_factura_en_bas: TotalGravado
-    # tiene que ser la suma de ImporteGravado de las líneas, no invoice.total
-    # (que incluye IVA) -- ver el comentario largo allá para el caso real que
-    # lo confirmó. round(): idem, sumar floats sin redondear dispara 400
-    # "must have not more than 5 decimals" en BAS.
-    total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
-    total_iva = round(sum(float(it["ImporteIva"] or 0) for it in items_bas), 2)
-    total_bruto = round(total_gravado + total_iva, 2)
-
-    # Deliberadamente SIN gate local que compare `monto` contra total_bruto
-    # (existió como validar_monto_aplicable_vs_neto hasta 2026-08-04, ver
-    # docs/incidente-2026-08-04-pagos-solo-neto.md). Se quitó porque
-    # comparaba contra un total_bruto calculado acá mismo por Invoicy --
-    # nunca contra el importe realmente registrado en BAS (eso solo se
-    # confirma más abajo, dentro de crear_orden_de_pago_desde_factura, vía
-    # consultar_comprobante_externo) -- así que podía bloquear con una
-    # suposición en vez de un dato real. Ahora el flujo llega hasta BAS
-    # siempre; si el importe no cierra contra el vencimiento real, BAS lo
-    # rechaza en el paso de aplicación (ver el comentario ATENCIÓN en
-    # crear_orden_de_pago_desde_factura sobre la OP huérfana que deja ese
-    # rechazo, y op_huerfana/resultado["error"] más abajo, que sigue
-    # manejando y reportando ese caso).
+    # Deliberadamente SIN gate local que compare `monto` contra el Total
+    # registrado (existió como validar_monto_aplicable_vs_neto hasta
+    # 2026-08-04, ver docs/incidente-2026-08-04-pagos-solo-neto.md, y se
+    # quitó por comparar contra un valor calculado acá mismo, no contra lo
+    # realmente registrado en BAS). Ya no hace falta ese gate de todos
+    # modos: desde 2026-08-19, `monto` (línea ~3662, default
+    # invoice.get("total")) y `totales_e_items["Total"]` (arriba, también
+    # anclado a invoice.total) son EL MISMO CAMPO por construcción -- no
+    # pueden divergir salvo que se pase un `body.monto` explícito (pago
+    # parcial, un caso de uso válido y separado, no un bug).
 
     # NO se toca `monto` (el importe de la orden de pago en sí) -- es un
     # concepto aparte, puede ser un pago parcial de esta factura, no
@@ -3894,21 +3740,15 @@ async def crear_orden_pago(
         # real del documento. Huso ARGENTINO (fecha_hoy_bas(), NO
         # datetime.date.today()) -- ver utils/bas_config.py:ZONA_HORARIA_BAS.
         "Fecha": fecha_hoy_bas().isoformat(),
-        # "Total" = "TotalGravado" + "TotalIva" (bruto real). Ver el
-        # comentario largo equivalente en
-        # InvoiceOrchestrator.procesar_factura_en_bas -- causa raíz real
-        # (2026-08-04): faltaba mandar "TotalIva" (cabecera) e "ImporteIva"
-        # (por línea, ver items_bas más arriba), campos reales del schema de
-        # BAS que nunca se habían usado. El bug real de MEDINA (saldo del
-        # vencimiento negativo) era la consecuencia: se aplicaba `monto`
-        # (bruto) contra un Vencimiento que solo se registraba en neto. Con
-        # TotalIva/ImporteIva poblados, Vencimientos también se registra en
-        # bruto (ver más abajo) y coincide con lo que efectivamente se
-        # aplica -- confirmado real, flujo completo (comprobante + OP +
-        # aplicación) sin error.
-        "Total": total_bruto,
-        "TotalGravado": total_gravado,
-        "TotalIva": total_iva,
+        # Total/TotalGravado/TotalIva anclados a invoice.total (ver
+        # utils/bas_payload.py) -- garantizan Total == TotalGravado +
+        # TotalIva por construcción, la regla exacta de SP_VALIDA_TOTALES
+        # que causó el incidente de MEDINA (2026-08-04, ver docs/incidente-
+        # 2026-08-04-pagos-solo-neto.md): con TotalIva ausente, Total
+        # quedaba forzado al neto sin importar qué se mandara en Items[].
+        "Total": totales_e_items["Total"],
+        "TotalGravado": totales_e_items["TotalGravado"],
+        "TotalIva": totales_e_items["TotalIva"],
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
         "Empresa": BAS_EMPRESA,
         "Sucursal": BAS_SUCURSAL,
@@ -3921,10 +3761,13 @@ async def crear_orden_pago(
         "FechaComprobanteExterno": invoice.get("fecha_emision"),
         "NumeroCAIoCAE": invoice.get("cae"),
         "VencimientoCAIoCAE": invoice.get("cae_vencimiento"),
-        # Importe = total_bruto -- tiene que coincidir con "Total" de la
-        # cabecera (ver comentario ahí arriba).
-        "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": total_bruto}],
-        "Items": items_bas,
+        # Importe = Total -- tiene que coincidir con "Total" de la
+        # cabecera (ver comentario ahí arriba); son literalmente el mismo
+        # valor acá, nunca pueden divergir.
+        "Vencimientos": [
+            {"FechaVencimiento": invoice.get("fecha_emision"), "Importe": totales_e_items["Total"]}
+        ],
+        "Items": totales_e_items["Items"],
     }
 
     # `existente` ya se obtuvo arriba de todo (chequeo de idempotencia) --
@@ -4132,7 +3975,7 @@ async def registrar_comprobante(
         )
 
     items = orchestrator._pb_client.get_invoice_items(invoice["id"])
-    errores_validacion = validar_factura_antes_de_pago_real(invoice, items)
+    errores_validacion = validar_factura_antes_de_pago_real(invoice)
     if errores_validacion:
         raise HTTPException(
             status_code=422,
@@ -4147,66 +3990,27 @@ async def registrar_comprobante(
     except (TypeError, ValueError):
         alicuota_iva = None
 
-    # CodigoItem: resolver y VALIDAR TODA la factura contra bas_items ANTES
-    # de construir cualquier payload (P0-E) -- mismo criterio que
-    # crear_orden_pago, misma función. `bas_codigo_item` guardado por línea
-    # se pasa como `override_codigo_item`: si un humano corrigió el ítem a
-    # mano en el selector del dashboard (P0-G), esa elección manda (el
-    # resolver la revalida activo+elegible antes de aceptarla, y bloquea sin
-    # fallback si ya no es válida); si viene vacío, se resuelve por
-    # categoría+alícuota como siempre. HALLAZGO CRÍTICO corregido acá
-    # (revisión final de P0-G, 2026-08-12): ver comentario equivalente en
-    # crear_orden_pago para el detalle completo -- este call site tenía el
-    # mismo problema, la selección manual de ítem no llegaba a afectar el
-    # registro real en BAS.
-    resoluciones = [
-        resolver_codigo_item(
-            categoria=it.get("categoria", ""),
-            alicuota=alicuota_iva,
-            override_codigo_item=(it.get("bas_codigo_item") or None),
+    # Total/TotalGravado/TotalIva/CodigoItem anclados a invoice.total --
+    # NUNCA a la suma de items_bas. Decisión de arquitectura 2026-08-19:
+    # un descuento, una bonificación, un precio_total negativo/cero/null o
+    # un error de OCR en un ítem individual ya no pueden alterar el monto
+    # que se registra en BAS -- ver utils/bas_payload.py para el detalle
+    # completo. validar_total (validar_factura_antes_de_pago_real, más
+    # arriba) ya garantizó que invoice.total es válido antes de este punto
+    # -- el ValueError de acá es defensa en profundidad, no el camino
+    # esperado.
+    try:
+        totales_e_items = construir_comprobante_totales_e_items(
+            total_bruto=invoice.get("total"),
+            alicuota_iva=alicuota_iva,
+            items=items,
             pb_client=orchestrator._pb_client,
         )
-        for it in items
-    ]
-    invalidas = [r for r in resoluciones if not r["valido"]]
-    if invalidas:
+    except ValueError as e:
         orchestrator._pb_client.upsert_invoice(
             {"process_id": process_id, "bas_registration_status": "awaiting_service_selection"}
         )
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "mensaje": "No se pudo resolver un CodigoItem válido para uno o más ítems de la factura.",
-                "motivos": [r["motivo_bloqueo"] for r in invalidas],
-            },
-        )
-
-    items_bas = []
-    for it, resolucion in zip(items, resoluciones):
-        _importe_gravado = round(float(it.get("precio_total", 0) or 0), 2)
-        _tasa_iva = alicuota_iva if alicuota_iva is not None else 0
-        _importe_iva = round(_importe_gravado * _tasa_iva / 100, 2)
-        items_bas.append(
-            {
-                "CodigoItem": resolucion["codigo_item"],
-                "TipoEntrega": BAS_TIPO_ENTREGA_SIN_STOCK,
-                "NumeroUnidadMedida": "1",
-                "CantidadPrimeraUnidad": it.get("cantidad", 1),
-                "PrecioUnitario": it.get("precio_unitario", 0),
-                "ImporteGravado": _importe_gravado,
-                "ImporteIva": _importe_iva,
-                "ImporteTotal": _importe_gravado,
-                "TasaIva": _tasa_iva,
-                "CentroApropiacionA": BAS_CENTRO_APROPIACION_SD,
-                "CentroApropiacionB": BAS_CENTRO_APROPIACION_SD,
-            }
-        )
-
-    # Mismo fix que InvoiceOrchestrator.procesar_factura_en_bas/crear_orden_pago:
-    # TotalGravado tiene que ser la suma de ImporteGravado de las líneas.
-    total_gravado = round(sum(float(it["ImporteGravado"] or 0) for it in items_bas), 2)
-    total_iva = round(sum(float(it["ImporteIva"] or 0) for it in items_bas), 2)
-    total_bruto = round(total_gravado + total_iva, 2)
+        raise HTTPException(status_code=422, detail=str(e))
 
     prefijo_externo, numero_externo = _extraer_prefijo_numero_comprobante_externo(
         {"numero": invoice.get("numero_comprobante")}
@@ -4216,9 +4020,9 @@ async def registrar_comprobante(
         "Comprobante": "MA",
         "Prefijo": BAS_PREFIJO_TALONARIO_MA,
         "Fecha": fecha_hoy_bas().isoformat(),
-        "Total": total_bruto,
-        "TotalGravado": total_gravado,
-        "TotalIva": total_iva,
+        "Total": totales_e_items["Total"],
+        "TotalGravado": totales_e_items["TotalGravado"],
+        "TotalIva": totales_e_items["TotalIva"],
         "EmitidoPor": BAS_EMITIDO_POR_CAE,
         "Empresa": BAS_EMPRESA,
         "Sucursal": BAS_SUCURSAL,
@@ -4234,8 +4038,10 @@ async def registrar_comprobante(
         "FechaComprobanteExterno": invoice.get("fecha_emision"),
         "NumeroCAIoCAE": invoice.get("cae"),
         "VencimientoCAIoCAE": invoice.get("cae_vencimiento"),
-        "Vencimientos": [{"FechaVencimiento": invoice.get("fecha_emision"), "Importe": total_bruto}],
-        "Items": items_bas,
+        "Vencimientos": [
+            {"FechaVencimiento": invoice.get("fecha_emision"), "Importe": totales_e_items["Total"]}
+        ],
+        "Items": totales_e_items["Items"],
     }
 
     ahora = datetime.datetime.utcnow().isoformat() + "Z"

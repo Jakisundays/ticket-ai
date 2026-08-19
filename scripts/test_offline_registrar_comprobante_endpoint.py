@@ -12,7 +12,8 @@ constantes de BAS_*, helpers). Se extrae la función real vía AST (mismo
 criterio que test_offline_buscar_proveedor_bas.py) y se ejecuta en un
 namespace con:
   - Dependencias REALES cuando son puras y ya están probadas por su cuenta
-    (resolver_codigo_item, combinar_numero_comprobante, constantes de
+    (resolver_codigo_item, combinar_numero_comprobante,
+    construir_comprobante_totales_e_items, constantes de
     utils/bas_config.py) -- así el test ejercita la integración real, no
     una reimplementación paralela.
   - Dobles de prueba (Fake*) para todo lo que toca red/estado (orchestrator,
@@ -20,16 +21,43 @@ namespace con:
     llaman cuando no deberían (prueba mecánica de que un gate cortó el flujo
     antes de tiempo, no solo que el resultado final "se ve bien").
 
+Actualizado 2026-08-19 (arquitectura de Total anclado a invoice.total, ver
+utils/bas_payload.py): Total/TotalGravado/TotalIva ya NO salen de sumar
+invoice_items -- salen SIEMPRE de invoice.total (INVOICE_BASE["total"]=1000
+abajo, mismo valor que antes daba la suma de ITEMS_BASE, para no tener que
+tocar las aserciones de los escenarios F/F2/G/H que ya verificaban 1000.0).
+Los ítems ahora solo importan para elegir el CodigoItem de la única línea
+-- por eso el viejo escenario D ("CodigoItem inválido en algún ítem ->
+bloquea") ya no es correcto tal cual: un ítem inválido por sí solo YA NO
+bloquea nada mientras el catch-all ('Gs Gs 21%') siga disponible en BAS.
+D se redefinió para el caso real que sigue bloqueando (ni el automático NI
+el catch-all resuelven), y D2 es nueva: cubre exactamente el caso que
+antes bloqueaba y ahora no.
+
 Cubre, en orden de precedencia real del endpoint:
   A. review_status != "confirmed" -> 409, CERO llamadas a proveedor/items/BAS.
   B. bas_registration_status == "registered" -> idempotente, CERO llamadas
      a proveedor/items/BAS (ni siquiera se re-valida).
   C. Proveedor no resuelto -> 422 + bas_registration_status="awaiting_provider_match",
      CERO llamadas a registrar_comprobante_compra_idempotente.
-  D. CodigoItem inválido en algún ítem -> 422 + bas_registration_status=
-     "awaiting_service_selection", CERO llamadas a
+  D. Ningún CodigoItem resuelve -- NI el automático de los ítems NI el
+     catch-all ('Gs Gs 21%') están disponibles en BAS -- -> 422 +
+     bas_registration_status="awaiting_service_selection", CERO llamadas a
      registrar_comprobante_compra_idempotente (ningún payload con un
-     CodigoItem sin validar llega nunca a intentar escribirse).
+     CodigoItem sin validar llega nunca a intentar escribirse). Esto ya NO
+     depende de que "todos los ítems" sean inválidos -- ver D2.
+  D2. La categoría automática del ítem NO resuelve, pero el catch-all SÍ
+     está disponible en BAS -> YA NO bloquea (antes del cambio de
+     arquitectura, esto era exactamente D y bloqueaba). Cae en silencio al
+     catch-all, BAS recibe 'Gs Gs 21%', success=True.
+  N. invoice.total ausente (None) -> 422 + bas_registration_status=
+     "awaiting_service_selection", vía el ValueError de defensa en
+     profundidad de construir_comprobante_totales_e_items -- este test usa
+     validar_factura_antes_de_pago_real stubbeado a "sin errores" a
+     propósito, así que el bloqueo que se ve acá es el de la segunda capa,
+     no el gate primario (ese gate real -- validar_total -- se prueba
+     aparte, contra la función real sin stub, en
+     scripts/test_p0f_validacion_real.py).
   E. Falla validar_factura_antes_de_pago_real -> 422, bas_registration_status
      SIN TOCAR (mismo criterio que crear_orden_pago), CERO llamadas a BAS.
   F. Camino feliz -> se llama a registrar_comprobante_compra_idempotente
@@ -102,6 +130,7 @@ from utils.bas_config import (  # noqa: E402 -- reales, constantes puras
     BAS_TIPO_ENTREGA_SIN_STOCK,
 )
 from utils.bas_item_resolver import resolver_codigo_item  # noqa: E402 -- real
+from utils.bas_payload import construir_comprobante_totales_e_items  # noqa: E402 -- real
 from utils.validaciones_pre_bas import combinar_numero_comprobante  # noqa: E402 -- real
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -119,9 +148,14 @@ def check(descripcion, condicion):
 
 # Cache determinístico de bas_config (mismo criterio que
 # test_offline_resolver_codigo_item.py) -- resolver_codigo_item real no debe
-# intentar red.
+# intentar red. "Categoria Invalida" existe solo para D2: resuelve a un
+# CodigoItem que nunca está en BAS_ITEMS_VALIDOS, para poder distinguir
+# "el automático del ítem falló" de "el catch-all también falló" (con una
+# sola categoría cacheada, ambos caminos siempre colapsaban al mismo
+# 'Gs Gs 21%' y nunca se podía probar el fallback real).
 bas_config._cache_categoria_map["datos"] = {
     "Gastos Generales": {21: "Gs Gs 21%"},
+    "Categoria Invalida": {21: "Codigo-Invalido-No-En-BAS"},
 }
 import time as _time  # noqa: E402
 
@@ -287,6 +321,7 @@ namespace = {
     "BAS_CAJA": BAS_CAJA,
     "BAS_METODO_PAGO_CTA_CTE": BAS_METODO_PAGO_CTA_CTE,
     "resolver_codigo_item": resolver_codigo_item,
+    "construir_comprobante_totales_e_items": construir_comprobante_totales_e_items,
     "combinar_numero_comprobante": combinar_numero_comprobante,
     "datetime": datetime,
     "fecha_hoy_bas": lambda: datetime.date(2026, 8, 12),
@@ -300,7 +335,7 @@ exec(compile(fuente_extraer_prefijo, filename="<_extraer_prefijo extraído>", mo
 # validar_factura_antes_de_pago_real -- controlable por escenario vía esta
 # lista mutable capturada por closure (namespace["validar_factura_antes_de_pago_real"]
 # se reasigna directo entre escenarios, más simple).
-namespace["validar_factura_antes_de_pago_real"] = lambda invoice, items: []
+namespace["validar_factura_antes_de_pago_real"] = lambda invoice: []
 
 exec(compile(fuente_endpoint, filename="<registrar_comprobante extraído>", mode="exec"), namespace)
 registrar_comprobante = namespace.get("registrar_comprobante")
@@ -309,7 +344,7 @@ check("La función extraída (código real) se pudo compilar y ejecutar vía exe
 
 def correr(orchestrator, validar_stub=None):
     namespace["orchestrator"] = orchestrator
-    namespace["validar_factura_antes_de_pago_real"] = validar_stub or (lambda invoice, items: [])
+    namespace["validar_factura_antes_de_pago_real"] = validar_stub or (lambda invoice: [])
     return asyncio.run(registrar_comprobante(process_id="proc-test-1", x_invoicy_secret="lo-que-sea"))
 
 
@@ -325,6 +360,12 @@ INVOICE_BASE = {
     "cae_vencimiento": "2026-09-01",
     "iva_alicuota": None,
     "moneda": "ARS",
+    # Desde 2026-08-19, éste -- no la suma de ITEMS_BASE -- es lo que
+    # termina en Total/comprobante_total_registrado (ver
+    # utils/bas_payload.py). Mismo valor que antes daba sumar ITEMS_BASE
+    # (precio_total=1000) para no tener que retocar las aserciones de
+    # F/F2/G/H que ya esperaban 1000.0.
+    "total": 1000,
 }
 ITEMS_BASE = [{"categoria": "Gastos Generales", "precio_total": 1000, "cantidad": 1, "precio_unitario": 1000}]
 BAS_ITEMS_VALIDOS = {"Gs Gs 21%": {"activo": True, "elegible_compras": True}}
@@ -385,24 +426,94 @@ if registrar_comprobante is not None:
 
 print()
 print("=" * 78)
-print("D -- CodigoItem inválido -> 422 + awaiting_service_selection, sin llegar a BAS")
+print("D -- NI el automático NI el catch-all resuelven -> 422 + awaiting_service_selection, sin llegar a BAS")
 print("=" * 78)
 
 if registrar_comprobante is not None:
-    pb_d = FakePbClient(dict(INVOICE_BASE), ITEMS_BASE, bas_items_validos={})  # "Gs Gs 21%" NO está -> inválido
+    # bas_items_validos={} -> ni "Gs Gs 21%" (lo que resolvería el ítem) ni
+    # el catch-all (el mismo código, en este fixture) están en BAS. Este es
+    # el único caso que sigue bloqueando bajo la arquitectura nueva: cuando
+    # de verdad no hay NINGÚN CodigoItem disponible, ítem o catch-all.
+    pb_d = FakePbClient(dict(INVOICE_BASE), ITEMS_BASE, bas_items_validos={})
     bas_d = FakeBasClient()
     orch_d = FakeOrchestrator(pb_d, proveedor={"Codigo": "PROV001"}, bas_client=bas_d)
     try:
         correr(orch_d)
-        check("CodigoItem inválido -> debería haber lanzado HTTPException", False)
+        check("Ningún CodigoItem resuelve -> debería haber lanzado HTTPException", False)
     except HTTPException as e:
-        check("CodigoItem inválido -> 422", e.status_code == 422)
+        check("Ningún CodigoItem resuelve -> 422", e.status_code == 422)
     check(
-        "CodigoItem inválido -> se persistió bas_registration_status='awaiting_service_selection'",
+        "Ningún CodigoItem resuelve -> se persistió bas_registration_status='awaiting_service_selection'",
         any(u.get("bas_registration_status") == "awaiting_service_selection" for u in pb_d.upserts_invoice),
     )
-    check("CodigoItem inválido -> NUNCA llegó a llamar a registrar_comprobante_compra_idempotente", len(bas_d.llamadas) == 0)
-    check("CodigoItem inválido -> SÍ se consultó bas_items (el resolver real corrió de verdad)", len(pb_d.llamadas_get_bas_item) > 0)
+    check("Ningún CodigoItem resuelve -> NUNCA llegó a llamar a registrar_comprobante_compra_idempotente", len(bas_d.llamadas) == 0)
+    check("Ningún CodigoItem resuelve -> SÍ se consultó bas_items (el resolver real corrió de verdad)", len(pb_d.llamadas_get_bas_item) > 0)
+
+
+print()
+print("=" * 78)
+print("D2 -- categoría automática del ítem inválida, pero el catch-all SÍ está disponible -> YA NO bloquea")
+print("=" * 78)
+
+if registrar_comprobante is not None:
+    # "Categoria Invalida" resuelve (vía bas_config real) a
+    # 'Codigo-Invalido-No-En-BAS', que nunca aparece en bas_items_validos --
+    # pero 'Gs Gs 21%' (el catch-all) SÍ está disponible acá. Antes del
+    # cambio de arquitectura esto era exactamente el viejo escenario D y
+    # bloqueaba con 422 -- ahora cae en silencio al catch-all.
+    items_d2 = [{"categoria": "Categoria Invalida", "precio_total": 1000, "cantidad": 1, "precio_unitario": 1000}]
+    pb_d2 = FakePbClient(dict(INVOICE_BASE), items_d2, BAS_ITEMS_VALIDOS)
+    bas_client_d2 = FakeBasClient(respuesta={
+        "comprobante": {"Prefijo": "00010", "Numero": 555, "Anulado": False},
+        "ya_existia": False,
+        "id_transaccion": 55556,
+    })
+    orch_d2 = FakeOrchestrator(pb_d2, proveedor={"Codigo": "PROV001"}, bas_client=bas_client_d2)
+    resultado_d2 = correr(orch_d2)
+
+    check(
+        "Categoría automática inválida + catch-all disponible -> success=True (el viejo D bloqueaba esto)",
+        resultado_d2.get("success") is True,
+    )
+    check("Categoría automática inválida + catch-all disponible -> SÍ llegó a llamar a BAS", len(bas_client_d2.llamadas) == 1)
+    codigo_enviado_d2 = (
+        bas_client_d2.llamadas[0]["comprobante_compra_payload"]["Items"][0]["CodigoItem"]
+        if bas_client_d2.llamadas
+        else None
+    )
+    check("Categoría automática inválida + catch-all disponible -> BAS recibió el catch-all 'Gs Gs 21%'", codigo_enviado_d2 == "Gs Gs 21%")
+    check(
+        "Categoría automática inválida + catch-all disponible -> se persistió bas_registration_status='registered'",
+        any(u.get("bas_registration_status") == "registered" for u in pb_d2.upserts_invoice),
+    )
+
+
+print()
+print("=" * 78)
+print("N -- invoice.total ausente (None) -> 422 + awaiting_service_selection (defensa en profundidad)")
+print("=" * 78)
+
+if registrar_comprobante is not None:
+    # validar_factura_antes_de_pago_real está stubbeado a "sin errores" acá
+    # a propósito -- el bloqueo que se prueba en este escenario es el
+    # segundo gate (el ValueError de construir_comprobante_totales_e_items),
+    # no el gate primario (validar_total, probado con la función real sin
+    # stub en scripts/test_p0f_validacion_real.py).
+    invoice_n = dict(INVOICE_BASE)
+    invoice_n["total"] = None
+    pb_n = FakePbClient(invoice_n, ITEMS_BASE, BAS_ITEMS_VALIDOS)
+    bas_n = FakeBasClient()
+    orch_n = FakeOrchestrator(pb_n, proveedor={"Codigo": "PROV001"}, bas_client=bas_n)
+    try:
+        correr(orch_n)
+        check("invoice.total ausente -> debería haber lanzado HTTPException", False)
+    except HTTPException as e:
+        check("invoice.total ausente -> 422", e.status_code == 422)
+    check(
+        "invoice.total ausente -> se persistió bas_registration_status='awaiting_service_selection'",
+        any(u.get("bas_registration_status") == "awaiting_service_selection" for u in pb_n.upserts_invoice),
+    )
+    check("invoice.total ausente -> NUNCA llegó a llamar a registrar_comprobante_compra_idempotente", len(bas_n.llamadas) == 0)
 
 
 print()
@@ -415,7 +526,7 @@ if registrar_comprobante is not None:
     bas_e = FakeBasClient()
     orch_e = FakeOrchestrator(pb_e, proveedor={"Codigo": "PROV001"}, bas_client=bas_e)
     try:
-        correr(orch_e, validar_stub=lambda invoice, items: ["El CAE no es válido."])
+        correr(orch_e, validar_stub=lambda invoice: ["El CAE no es válido."])
         check("Validación de datos falla -> debería haber lanzado HTTPException", False)
     except HTTPException as e:
         check("Validación de datos falla -> 422", e.status_code == 422)
