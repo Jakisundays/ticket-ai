@@ -98,6 +98,11 @@ efecto sobre lo que se registraba en BAS. Escenarios I-M cubren el fix:
      "ready_to_register") + override válido -> llega a "registered" igual:
      el endpoint no gatea sobre el estado previo (salvo el atajo B de
      "registered"), revalida todo en fresco en cada llamada.
+  O. Factura SIN ítems (items=[]) -> cae al catch-all 'Gs Gs 21%',
+     success=True, no bloquea -- de punta a punta contra el endpoint real
+     (no solo construir_comprobante_totales_e_items aislada). Agregado
+     2026-08-19 junto con la remoción del bloqueo viejo de "factura no
+     tiene ítems cargados" en el dashboard y el hook de PocketBase.
 
 Uso: python3 scripts/test_offline_registrar_comprobante_endpoint.py
 Sale con código 0 si todo pasa, 1 si algo falla.
@@ -777,6 +782,41 @@ if registrar_comprobante is not None:
     check(
         "Arranca en awaiting_service_selection -> termina en bas_registration_status='registered'",
         any(u.get("bas_registration_status") == "registered" for u in pb_m.upserts_invoice),
+    )
+
+
+print()
+print("=" * 78)
+print("O -- factura SIN ítems (lista vacía) -> cae al catch-all, success=True (no bloquea)")
+print("=" * 78)
+
+if registrar_comprobante is not None:
+    # Prueba de punta a punta pedida explícitamente por el usuario (2026-08-19,
+    # tras remover el bloqueo viejo de "factura no tiene ítems cargados" del
+    # dashboard y del hook de PocketBase): confirma que el ENDPOINT REAL --
+    # no solo construir_comprobante_totales_e_items aislada, ya cubierta en
+    # test_offline_bas_payload.py escenario D1 -- también se comporta así,
+    # de punta a punta, contra el código real extraído por AST.
+    pb_o = FakePbClient(dict(INVOICE_BASE), [], BAS_ITEMS_VALIDOS)  # items=[] -- sin ítems
+    bas_client_o = FakeBasClient(respuesta={
+        "comprobante": {"Prefijo": "00010", "Numero": 666, "Anulado": False},
+        "ya_existia": False,
+        "id_transaccion": 66667,
+    })
+    orch_o = FakeOrchestrator(pb_o, proveedor={"Codigo": "PROV001"}, bas_client=bas_client_o)
+    resultado_o = correr(orch_o)
+
+    check("Sin ítems -> success=True (el catch-all resuelve, no bloquea)", resultado_o.get("success") is True)
+    check("Sin ítems -> SÍ llegó a llamar a BAS", len(bas_client_o.llamadas) == 1)
+    codigo_enviado_o = (
+        bas_client_o.llamadas[0]["comprobante_compra_payload"]["Items"][0]["CodigoItem"]
+        if bas_client_o.llamadas
+        else None
+    )
+    check("Sin ítems -> BAS recibió el catch-all 'Gs Gs 21%'", codigo_enviado_o == "Gs Gs 21%")
+    check(
+        "Sin ítems -> se persistió bas_registration_status='registered'",
+        any(u.get("bas_registration_status") == "registered" for u in pb_o.upserts_invoice),
     )
 
 
