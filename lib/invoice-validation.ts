@@ -1,11 +1,18 @@
 /**
- * Mismas 6 reglas que Invoicy/utils/validaciones_pre_bas.py (Etapa 0 del plan
+ * Mismas reglas que Invoicy/utils/validaciones_pre_bas.py (Etapa 0 del plan
  * de validaciones pre-BAS) y que ticket-ai-infra/pocketbase/pb_hooks/invoices.pb.js
  * (la barrera real -- este módulo es solo para feedback en vivo en el
  * formulario de revisión, ver docs/plan-validacion-antes-de-confirmar.md en
  * el repo Invoicy). Duplicado a mano en TypeScript porque corre en el
  * navegador; SI SE CAMBIA UNA REGLA ACÁ, revisar también esos otros dos
  * archivos.
+ *
+ * `total` (agregado 2026-08-19, junto con el cambio de arquitectura que
+ * ancla Total/TotalGravado/TotalIva de BAS a invoice.total en vez de a la
+ * suma de items -- ver utils/bas_payload.py en Invoicy) espeja
+ * validar_total del lado Python, y la misma regla en el hook de PocketBase
+ * (ticket-ai-infra/pocketbase/pb_hooks/invoices.pb.js): obligatorio y > 0
+ * en las 3 capas.
  *
  * El hook de PocketBase es la única barrera que no se puede saltear -- esto
  * es puramente UX (feedback inmediato mientras se edita, sin esperar a que
@@ -21,6 +28,7 @@ export interface InvoiceDraftForValidation {
   numero_comprobante: string;
   cae: string;
   cae_vencimiento: string;
+  total: number;
 }
 
 export interface ItemDraftForValidation {
@@ -34,7 +42,8 @@ export type InvoiceFieldWithError =
   | "fecha_emision"
   | "numero_comprobante"
   | "cae"
-  | "cae_vencimiento";
+  | "cae_vencimiento"
+  | "total";
 
 export interface InvoiceValidationResult {
   fieldErrors: Partial<Record<InvoiceFieldWithError, string>>;
@@ -103,6 +112,15 @@ export function validarFacturaParaConfirmar(
   if (moneda && !MONEDAS_VALIDAS.has(moneda.toUpperCase())) {
     fieldErrors.moneda = "Esta moneda no es pesos -- no se puede confirmar automáticamente.";
     messages.push("Moneda distinta a pesos");
+  }
+
+  // Desde 2026-08-19, invoice.total es la ÚNICA fuente de Total/TotalGravado/
+  // TotalIva que se registra en BAS (ver utils/bas_payload.py en Invoicy) --
+  // ya no hay ningún ítem de respaldo del cual reconstruirlo si falta o es
+  // inválido, así que se corta acá con el mismo criterio que validar_total.
+  if (!(draft.total > 0)) {
+    fieldErrors.total = "El total de la factura tiene que ser mayor a cero.";
+    messages.push("Total de la factura inválido");
   }
 
   const fechaEmision = parsearFecha(draft.fecha_emision);

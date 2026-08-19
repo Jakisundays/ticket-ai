@@ -351,7 +351,7 @@ export default function InvoiceReviewForm({
           <TextField label="Forma de pago" value={invoiceDraft.forma_pago} onChange={(v) => setInvoiceField("forma_pago", v)} />
           <TextField label="Moneda" value={invoiceDraft.moneda} onChange={(v) => setInvoiceField("moneda", v)} error={validation.fieldErrors.moneda} />
           <NumberField label="Subtotal" value={invoiceDraft.subtotal} onChange={(v) => setInvoiceField("subtotal", v)} />
-          <NumberField label="Total" value={invoiceDraft.total} onChange={(v) => setInvoiceField("total", v)} />
+          <NumberField label="Total" value={invoiceDraft.total} onChange={(v) => setInvoiceField("total", v)} error={validation.fieldErrors.total} />
           <NumberField label="Alícuota IVA (%)" value={invoiceDraft.iva_alicuota} onChange={(v) => setInvoiceField("iva_alicuota", v)} />
           <TextField label="CAE" value={invoiceDraft.cae} onChange={(v) => setInvoiceField("cae", v)} mono error={validation.fieldErrors.cae} />
           <DateField label="Vencimiento CAE" value={invoiceDraft.cae_vencimiento} onChange={(v) => setInvoiceField("cae_vencimiento", v)} error={validation.fieldErrors.cae_vencimiento} />
@@ -614,13 +614,15 @@ function NumberField({
   label,
   value,
   onChange,
+  error,
 }: {
   label: string;
   value: number | null;
   onChange: (value: number) => void;
+  error?: string | null;
 }) {
   return (
-    <Field label={label}>
+    <Field label={label} error={error}>
       <Input
         type="number"
         step="0.01"
