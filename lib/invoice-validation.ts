@@ -95,11 +95,16 @@ export function fechaComoInputDate(valor: string | null | undefined): string {
 
 export function validarFacturaParaConfirmar(
   draft: InvoiceDraftForValidation,
+  // Ya no se usa (ver comentario más abajo, donde antes vivía la validación
+  // de ítems) -- se mantiene en la firma por estabilidad de interfaz:
+  // itemErrors/itemsSummaryError del resultado siguen siendo consumidos por
+  // InvoiceReviewForm.tsx, aunque ahora queden siempre vacíos.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   items: ItemDraftForValidation[]
 ): InvoiceValidationResult {
   const fieldErrors: InvoiceValidationResult["fieldErrors"] = {};
   const itemErrors: Record<string, string> = {};
-  let itemsSummaryError: string | null = null;
+  const itemsSummaryError: string | null = null;
   const messages: string[] = [];
 
   const cuit = (draft.emisor_cuit || "").replace(/\D/g, "");
@@ -151,35 +156,19 @@ export function validarFacturaParaConfirmar(
     messages.push("Falta el vencimiento del CAE");
   }
 
-  if (items.length === 0) {
-    itemsSummaryError = "La factura no tiene ítems.";
-    messages.push("Sin ítems");
-  } else {
-    // Solo completitud (precio_total presente y positivo) -- antes también
-    // rechazaba acá si cantidad*precio_unitario no cerraba contra
-    // precio_total, y por separado si la suma de ítems no cerraba contra
-    // subtotal/total de la factura (tolerancias del 2% y $0.05). Se sacaron
-    // los dos cruces (2026-08-05, mismo criterio que la baja de
-    // validar_monto_aplicable_vs_neto en Invoicy, ver
-    // docs/incidente-2026-08-04-pagos-solo-neto.md): BAS nunca recibe
-    // cantidad/precio_unitario como restricción -- solo ImporteGravado ya
-    // calculado a partir de precio_total -- así que eran cruces inventados
-    // por este pipeline, sin correspondencia real en lo que BAS valida, y
-    // el ruido normal de OCR (descuentos, redondeos, impuestos a veces
-    // desglosados como ítem propio) los hacía bloquear facturas reales que
-    // BAS habría aceptado sin problema. La barrera real contra el límite de
-    // BAS (aplicar el neto correcto) queda en crear_orden_pago (Invoicy) y
-    // en el hook de PocketBase, justo antes de escribir, que es donde
-    // corresponde -- no acá, que es solo feedback en vivo del formulario.
-    items.forEach((item) => {
-      if (item.precio_total <= 0) {
-        itemErrors[item.id] = "Precio total inválido.";
-      }
-    });
-    if (Object.keys(itemErrors).length > 0) {
-      messages.push("Hay ítems con datos inconsistentes");
-    }
-  }
+  // Desde 2026-08-19, invoice.total (validado arriba) es la ÚNICA fuente de
+  // Total/TotalGravado/TotalIva -- los ítems solo eligen el CodigoItem de la
+  // línea BAS (utils/bas_payload.py en Invoicy). Por eso ACÁ no se valida
+  // nada de los ítems: ni que existan, ni que precio_total sea positivo, ni
+  // que sumen contra subtotal/total -- un descuento, bonificación o ajuste
+  // negativo es un ítem perfectamente válido y no debe bloquear la
+  // confirmación. (Esta sección históricamente sí bloqueaba por eso -- ver
+  // git blame -- quitado a pedido explícito del usuario tras encontrar que
+  // seguía marcando ítems negativos reales como "inconsistentes" pese a que
+  // el Total ya no dependía de ellos.) La única validación real de ítems que
+  // importa (¿resuelve un CodigoItem?) corre en Invoicy, que es el único
+  // lugar con acceso al catálogo real de bas_items -- acá no hay forma de
+  // replicarla ni tendría sentido intentarlo.
 
   return {
     fieldErrors,
