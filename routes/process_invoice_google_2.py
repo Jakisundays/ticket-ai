@@ -18,12 +18,14 @@ import asyncio
 import threading
 import hashlib
 import ssl
-import mimetypes
 import uuid
 import datetime
+import time
 import unicodedata
+import re
+import zlib
 from pathlib import Path
-from typing import Dict, Optional, Union, TypedDict
+from typing import Callable, Dict, Optional, Union, TypedDict
 import fitz  # PyMuPDF
 from PIL import Image
 import io
@@ -90,6 +92,102 @@ router = APIRouter(prefix="/gemini2")
 PROCESSING_SEMAPHORE = asyncio.Semaphore(
     min(int(os.getenv("INVOICY_MAX_CONCURRENT_PROCESSING", "1")), 2)
 )
+
+# Tope de archivos por ZIP y de peso total descomprimido -- compartido por
+# los 2 canales que aceptan ZIP (email, /website-upload) y por /process-invoice
+# (que antes tenía su propio MAX_ARCHIVOS_ZIP=20 local). Si se supera
+# cualquiera de los dos, se rechaza el ZIP COMPLETO con un error claro --
+# a propósito no se procesan parcialmente los primeros N: el cliente no
+# tiene forma de saber, mirando la cola, que "solo llegaron los primeros 100"
+# en vez de todo el ZIP. Ver docs/plan-fase1-zip-FINAL.md, sección 8.
+MAX_ARCHIVOS_ZIP = 100
+MAX_ZIP_DESCOMPRIMIDO_BYTES = 500 * 1024 * 1024  # 500MB
+
+# Gate de concurrencia para la Pass 0 -- pre-registro de TODOS los
+# miembros candidatos de un ZIP en PocketBase, ANTES de extraer/clasificar
+# ninguno (ver _extraer_zip_y_despachar_individualmente). Deliberadamente
+# SEPARADO de ZIP_EXTRACTION_SEMAPHORE (más abajo), con más concurrencia
+# permitida: la Pass 0 es liviana (solo upsert_invoice, un GET+POST/PATCH
+# JSON chico por miembro, sin extraer ni subir ningún archivo -- ver
+# utils/pocketbase_client.py:_upsert), no compite por CPU/disco/zlib como
+# la extracción real. Compartir el mismo semáforo de concurrencia=2 que la
+# extracción pesada dejaba a un ZIP recién llegado esperando en cola
+# potencialmente varios minutos (mientras 2 ZIPs anteriores terminan TODA
+# su Fase A) sin haber registrado ni una sola fila en PocketBase -- si el
+# proceso se reiniciaba en esa espera, el ZIP entero desaparecía sin
+# rastro, con el cliente ya habiendo recibido un 201 de éxito (hallazgo
+# real de la revisión adversarial de la ronda 5). Con Pass 0 desacoplada y
+# con más cupo, ese registro ocurre casi de inmediato, incluso con varios
+# ZIPs pesados ya en curso. Igual acotada (no ilimitada): sigue habiendo un
+# techo, y el límite real de backlog total sigue siendo
+# MAX_TRABAJO_EN_VUELO_ZIP, no este número. Ver
+# docs/informe-final-zip-fase1.md sección 6.
+ZIP_REGISTRO_SEMAPHORE = asyncio.Semaphore(8)
+
+# Gate de concurrencia para la Pass 1 -- clasificación real (extracción,
+# CRC/encriptación, Zip Slip, tipo soportado) Y, para cada miembro
+# ACEPTADO, el adjunto de su archivo (adjuntar_archivo_original, PATCH
+# multipart que sube el contenido completo) inmediatamente después de
+# aceptarlo -- ya no en una Pass 2 separada al final (ver
+# _extraer_zip_y_despachar_individualmente para el motivo: adjuntar de
+# inmediato, no al final del loop, es lo que garantiza que "Reintentar"
+# funcione para los miembros YA clasificados aunque el proceso muera antes
+# de terminar de clasificar el resto del ZIP). I/O de disco + zlib
+# (CPU-bound) Y llamadas HTTP bloqueantes a PocketBase reales: hasta
+# MAX_ARCHIVOS_ZIP adjuntos (1 PATCH cada uno) más hasta MAX_ARCHIVOS_ZIP
+# descartes de placeholder para los rechazados (soft_delete_invoice = 1
+# GET + 1 PATCH cada uno, ver utils/pocketbase_client.py). Separado de
+# PROCESSING_SEMAPHORE (que gatea el trabajo pesado real de Gemini/BAS) a
+# propósito: si compartieran el mismo semáforo, una extracción larga
+# podría bloquear turnos de facturas sueltas que no tienen nada que ver
+# con ningún ZIP (starvation cruzada), o viceversa. Tamaño chico a
+# propósito: la extracción ya corre en asyncio.to_thread, este semáforo
+# solo evita que demasiadas extracciones pesadas (disco+zlib+red a
+# PocketBase) compitan a la vez por la única vCPU real del droplet. Ver
+# docs/plan-fase1-zip-REDISEÑO.md, sección 5, y
+# docs/informe-final-zip-fase1.md sección 6.
+ZIP_EXTRACTION_SEMAPHORE = asyncio.Semaphore(2)
+
+# "Trabajo en vuelo" = facturas de ZIP ya registradas (status="pending"/
+# "processing" real en PocketBase) pero todavía no en un estado terminal
+# (completed/error). A diferencia de PROCESSING_SEMAPHORE (que limita
+# CONCURRENCIA de ejecución) esto limita BACKLOG ACEPTADO -- sin esto,
+# varios ZIPs grandes podrían aceptarse todos y quedar horas en cola
+# invisible para el caller. Contador en memoria de proceso, protegido con
+# threading.Lock (NO asyncio.Lock) a propósito: se reserva/libera tanto
+# desde la fase de extracción -- que corre en un hilo real de
+# asyncio.to_thread, no en el event loop -- como desde el event loop mismo
+# (Fase B) -- mismo criterio exacto que _comprobante_locks_guard más abajo
+# para el mismo tipo de problema (estado compartido entre hilo real y
+# coroutines). Se resetea a 0 en cada reinicio del proceso -- aceptable: el
+# barrido de huérfanos (sección de durabilidad) es quien garantiza que
+# ninguna factura "pending" real se pierda, este contador es solo
+# backpressure blando, no la fuente de verdad de qué hay pendiente.
+# Alcance deliberadamente limitado a ZIP (no cubre facturas sueltas): el
+# riesgo nuevo que motiva este límite es específicamente "1 request vale
+# hasta 100 unidades de trabajo", que no existe para /website-upload ni
+# /process-invoice de archivo individual (ya bounded 1:1 por sus propios
+# límites existentes). Ver docs/plan-fase1-zip-REDISEÑO.md, sección 6.
+MAX_TRABAJO_EN_VUELO_ZIP = 200
+_trabajo_en_vuelo_zip = 0
+_trabajo_en_vuelo_zip_lock = threading.Lock()
+
+
+def _reservar_trabajo_en_vuelo_zip(cantidad: int) -> bool:
+    global _trabajo_en_vuelo_zip
+    with _trabajo_en_vuelo_zip_lock:
+        if _trabajo_en_vuelo_zip + cantidad > MAX_TRABAJO_EN_VUELO_ZIP:
+            return False
+        _trabajo_en_vuelo_zip += cantidad
+        return True
+
+
+def _liberar_trabajo_en_vuelo_zip(cantidad: int) -> None:
+    global _trabajo_en_vuelo_zip
+    if cantidad <= 0:
+        return
+    with _trabajo_en_vuelo_zip_lock:
+        _trabajo_en_vuelo_zip = max(0, _trabajo_en_vuelo_zip - cantidad)
 
 # Lock en memoria de proceso, keyed por proveedor+comprobante externo, para
 # serializar la secuencia "GET ConsultaComprobantesExternos -> si no existe,
@@ -368,6 +466,15 @@ class InvoiceOrchestrator:
         model: str,
         semaphore: int,
     ):
+        # Capturado ANTES que cualquier otra cosa -- es el corte real que
+        # usa _barrido_huerfanos_al_arrancar para distinguir "huérfana de un
+        # proceso anterior" (updated < este momento) de "en curso, la está
+        # procesando este mismo proceso" (updated >= este momento). Un
+        # umbral de antigüedad fijo (ej. "hace 30 minutos") no sirve: con
+        # auto-restart real el proceso vuelve a arrancar en segundos, así
+        # que una fila recién huérfana nunca llega a acumular 30 minutos
+        # antes de que el barrido (que corre una sola vez) ya haya pasado.
+        self._iniciado_en = datetime.datetime.now(datetime.timezone.utc)
         self.secret = secret
         self.webhook_url = webhook_url
         self.api_key = api_key
@@ -384,6 +491,55 @@ class InvoiceOrchestrator:
         self._pb_client = PocketBaseClient()  # Persistencia (facturas/items/jobs/estado BAS); ver utils/pocketbase_client.py
         self.job_queue = asyncio.Queue()  # Cola para jobs
         asyncio.create_task(self.worker())
+        asyncio.create_task(self._barrido_huerfanos_al_arrancar())
+
+    async def _barrido_huerfanos_al_arrancar(self):
+        """Recuperación de facturas interrumpidas por un reinicio del
+        backend a mitad de procesamiento -- ver Fase A/B de
+        _extraer_zip_y_despachar_individualmente y
+        docs/plan-fase1-zip-REDISEÑO.md sección 3. Corre UNA VEZ al
+        arrancar el proceso (no periódico): el único momento en que "trabajo
+        que estaba en curso" puede quedar huérfano es exactamente un
+        reinicio, no un chequeo recurrente mientras el proceso sigue vivo.
+        Pasa cada factura vieja "pending"/"processing" a status="error" con
+        un mensaje claro -- reusa el botón "Reintentar" que ya existe
+        (/invoices/{process_id}/retry-extraction) para la recuperación, sin
+        ningún endpoint ni UI nueva. Best-effort: un fallo acá nunca debe
+        frenar el arranque del resto de la app.
+
+        Usa self._iniciado_en (el momento real en que ESTE proceso arrancó)
+        como corte -- NO un umbral de antigüedad fijo. Bug real encontrado
+        en la revisión adversarial: con auto-restart real (systemd/
+        supervisor/docker restart=always) el proceso vuelve a levantarse en
+        segundos, así que con un umbral tipo "hace 30 minutos" el barrido
+        (que corre una sola vez, a los 10s de este mismo arranque) nunca
+        encontraba nada que recuperar -- las filas recién huérfanas todavía
+        no habían acumulado 30 minutos de antigüedad, y como el barrido no
+        se repite, quedaban "pending" invisibles para siempre. Comparar
+        contra el arranque del proceso es correcto sin importar cuánto haya
+        tardado el restart (ver docstring de find_stale_invoices)."""
+        await asyncio.sleep(10)  # deja que el resto de la app termine de iniciar
+        try:
+            huerfanas = self._pb_client.find_stale_invoices(antes_de=self._iniciado_en)
+            for inv in huerfanas:
+                self._pb_client.upsert_invoice(
+                    {
+                        "process_id": inv["process_id"],
+                        "status": "error",
+                        "error_message": (
+                            "Interrumpido por un reinicio del servidor durante "
+                            "el procesamiento -- usá 'Reintentar' para "
+                            "procesarla de nuevo."
+                        ),
+                    }
+                )
+            if huerfanas:
+                app_logger.info(
+                    f"Barrido de huérfanos al arrancar: {len(huerfanas)} "
+                    "factura(s) recuperada(s) a status=error tras reinicio"
+                )
+        except Exception as e:
+            app_logger.warning(f"Barrido de huérfanos al arrancar falló (no crítico): {e}")
 
     async def worker(self):
         app_logger.info("Iniciando worker")
@@ -809,8 +965,17 @@ class InvoiceOrchestrator:
 
     # Envía resultados vía webhook
     async def fire_webhook(self, data):
+        # requests.post es bloqueante -- antes corría directo dentro de un
+        # método async, así que su timeout=10 bloqueaba el ÚNICO hilo del
+        # event loop (droplet de 1 vCPU) hasta por 10s por cada llamada. El
+        # rediseño de ZIP la invoca ahora hasta N veces por ZIP (una por
+        # factura), secuencial dentro de la misma task -- sin este fix, un
+        # webhook externo lento podía bloquear el servicio ENTERO (no solo
+        # el ZIP en curso) hasta N×10s. to_thread saca la llamada del event
+        # loop sin cambiar el comportamiento/contrato de la función.
         try:
-            res = requests.post(
+            res = await asyncio.to_thread(
+                requests.post,
                 self.webhook_url,
                 json=data,
                 timeout=10,
@@ -1942,8 +2107,14 @@ class InvoiceOrchestrator:
         }
 
     def get_file_type_from_url(self, url: str) -> str:
+        # Mismo fix y mismo motivo que download_file_from_url (ver su
+        # comentario): esta llamada corre dentro del mismo endpoint sin
+        # ninguna autenticación, DOS LÍNEAS antes de la que ya se había
+        # corregido -- bug real encontrado en la revisión adversarial (el
+        # primer fix cerró un vector y dejó exactamente el mismo abierto,
+        # dos líneas más arriba, en el mismo flujo).
         try:
-            response = requests.get(url, stream=True)
+            response = requests.get(url, stream=True, timeout=15)
             if response.status_code == 200:
                 content = next(response.iter_content(262))
                 kind = filetype.guess(content)
@@ -1960,15 +2131,54 @@ class InvoiceOrchestrator:
         # Si no hay coma, devolvemos el string tal cual
         return file_string
 
-    def download_file_from_url(self, url: str, file_path: str):
-        response = requests.get(url)
-        if response.status_code == 200:
-            with open(file_path, "wb") as f:
-                f.write(response.content)
-            return True
-        else:
+    def download_file_from_url(self, url: str, file_path: str, *, max_bytes: int = 100 * 1024 * 1024, max_segundos: float = 60):
+        # Este método corre síncrono dentro de webhook_endpoint, el ÚNICO
+        # de los 3 canales de ingesta SIN NINGUNA autenticación (sin
+        # secret_key, sin X-Invoicy-Secret, sin rate limiting) -- `url`
+        # viene tal cual del body del request, así que un caller sin
+        # credenciales controla de dónde se descarga y a qué ritmo llegan
+        # los bytes. Dos defensas, no una sola:
+        #   1. timeout=15 -- connect+read timeout de requests. Bug real
+        #      encontrado en la revisión adversarial: este es un timeout de
+        #      INACTIVIDAD por lectura (se reinicia con cada byte que
+        #      llega), NO un límite de duración total -- una respuesta que
+        #      "gotea" 1 byte cada 10s nunca lo dispara.
+        #   2. stream=True + loop manual con reloj propio (max_segundos) y
+        #      tope de tamaño (max_bytes) -- cierra el caso que (1) no
+        #      cubre: aborta la descarga en cuanto se supera CUALQUIERA de
+        #      los dos límites, sin importar cuántos bytes hayan llegado o
+        #      qué tan espaciados vengan. Con response.content (el código
+        #      viejo) no había ningún tope de tamaño: un archivo de varios
+        #      GB se cargaba entero en memoria antes de escribir el primer
+        #      byte, en un droplet de 960MB de RAM.
+        inicio = time.monotonic()
+        response = requests.get(url, timeout=15, stream=True)
+        if response.status_code != 200:
             app_logger.error(f"Failed to download file: {response.status_code}")
             return False
+        total_descargado = 0
+        try:
+            with open(file_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=65536):
+                    if not chunk:
+                        continue
+                    total_descargado += len(chunk)
+                    if total_descargado > max_bytes:
+                        app_logger.error(
+                            f"download_file_from_url: {url} supera el máximo de "
+                            f"{max_bytes} bytes -- descarga abortada"
+                        )
+                        return False
+                    if time.monotonic() - inicio > max_segundos:
+                        app_logger.error(
+                            f"download_file_from_url: {url} supera el máximo de "
+                            f"{max_segundos}s de duración total -- descarga abortada"
+                        )
+                        return False
+                    f.write(chunk)
+            return True
+        finally:
+            response.close()
 
     def generar_html_factura(self, data):
         receptor = data.get("emisor_receptor", {}).get("receptor", {})
@@ -2071,8 +2281,14 @@ class InvoiceOrchestrator:
             # Cuerpo del mensaje
             mensaje.attach(MIMEText(cuerpo, "html"))
 
-            # Conectar al servidor SMTP de Gmail
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            # Conectar al servidor SMTP de Gmail -- timeout explícito
+            # (antes no tenía ninguno): sin esto, un SMTP colgado dejaba el
+            # hilo bloqueado indefinidamente. Esta función ya se invoca
+            # dentro de asyncio.to_thread desde el flujo de ZIP (nunca
+            # bloquea el event loop), pero sin timeout propio podía agotar
+            # de todas formas el pool de hilos compartido si varios ZIPs
+            # entraban a la vez y el SMTP no respondía.
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
                 server.login(GMAIL_USER, GMAIL_PASS)
                 server.sendmail(GMAIL_USER, destinatario, mensaje.as_string())
 
@@ -2460,6 +2676,12 @@ async def _procesar_imagen_o_pdf_impl(
     factura["saved_sheet"] = bool(saved_sheet)
     factura["saved_items"] = bool(saved_items)
     factura["bas"] = resultado_bas
+    # drive_file_id ya se calculaba más arriba (para el upsert a
+    # PocketBase) pero nunca se propagaba al dict que esta función
+    # devuelve -- lo necesita el payload de fire_webhook por factura del
+    # flujo de ZIP, para que coincida con el contrato que ya emite
+    # worker() (compatibilidad, ver docs/plan-fase1-zip-REDISEÑO.md).
+    factura["drive_file_id"] = drive_file_id
     factura["status_code"] = 200
 
     # El archivo original ya se adjuntó al arranque de esta función (ver el
@@ -2470,7 +2692,7 @@ async def _procesar_imagen_o_pdf_impl(
     return factura
 
 
-async def _procesar_en_background(**kwargs) -> None:
+async def _procesar_en_background(**kwargs) -> dict:
     """Corre _procesar_imagen_o_pdf() sin bloquear la respuesta HTTP.
 
     El procesamiento real (Gemini + búsqueda de proveedor en BAS) puede
@@ -2482,9 +2704,16 @@ async def _procesar_en_background(**kwargs) -> None:
     cancela solo porque nginx se desconectó). El cliente veía un error falso
     mientras el backend seguía trabajando -- confuso, y arriesga que alguien
     reintente y duplique el procesamiento de la misma factura.
+
+    Devuelve {"success": True, "factura": {...}} o {"success": False,
+    "error": "..."} -- los 2 callers históricos (process_invoice,
+    website_upload) ignoran el valor de retorno sin ningún problema (nunca
+    lo leían); _extraer_zip_y_despachar_individualmente sí lo usa, para
+    saber qué payload de webhook disparar por factura.
     """
     try:
-        await _procesar_imagen_o_pdf(**kwargs)
+        factura = await _procesar_imagen_o_pdf(**kwargs)
+        return {"success": True, "factura": factura}
     except Exception as exc:
         process_id = kwargs.get("process_id", "?")
         app_logger.info(f"[{process_id}] Error procesando en background: {exc}")
@@ -2500,6 +2729,697 @@ async def _procesar_en_background(**kwargs) -> None:
                     "error_message": str(exc)[:1000],
                 }
             )
+        return {"success": False, "error": str(exc)[:1000]}
+
+
+def _sanear_nombre_para_process_id(nombre: str) -> str:
+    """Solo para legibilidad del process_id resultante y de los logs -- la
+    unicidad real la garantiza el índice de posición dentro del ZIP (ver
+    _extraer_zip_y_despachar_individualmente), no este nombre saneado. Se
+    queda con el basename (descarta cualquier carpeta interna del ZIP) y
+    reemplaza todo lo que no sea alfanumérico/./-/_ por "_", para que el
+    resultado sea seguro de usar en una ruta de disco, en un process_id y en
+    una URL de los 8 endpoints que lo reciben como path param."""
+    base = os.path.basename(nombre)
+    seguro = re.sub(r"[^A-Za-z0-9._-]", "_", base)
+    return seguro[:80] or "archivo"
+
+
+def _truncar_nombre_a_bytes(nombre: str, max_bytes: int) -> str:
+    """Trunca un nombre de archivo a `max_bytes` BYTES reales (no
+    caracteres) -- a diferencia de nombre[:N] de Python, que cuenta code
+    points: un nombre con tildes/ñ/otros caracteres UTF-8 multi-byte puede
+    pesar hasta 4x más en bytes que en caracteres, así que un simple [:200]
+    puede seguir superando el límite típico de 255 bytes de nombre de
+    archivo del filesystem (bug real encontrado en la revisión adversarial
+    -- el truncado por caracteres no cumplía la garantía que decía dar).
+    Preserva el nombre original tal cual cuando entra en el presupuesto;
+    solo lo recorta cuando hace falta, descartando con errors="ignore"
+    cualquier secuencia multi-byte que quede cortada a la mitad en el
+    límite."""
+    codificado = nombre.encode("utf-8")
+    if len(codificado) <= max_bytes:
+        return nombre
+    return codificado[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _validar_zip_rapido(zip_path: str) -> dict:
+    """Chequeos baratos de METADATA del índice del ZIP (sin descomprimir
+    nada) -- corren síncronamente en el handler HTTP, antes de crear
+    cualquier background task, para que el caller reciba un rechazo claro e
+    inmediato en los casos más comunes (corrupto, vacío, demasiados
+    archivos, demasiado pesado, sistema saturado). zip_ref.file_size
+    declarado por miembro no se puede falsificar para esconder un payload
+    más grande: ZipExtFile trunca la lectura al tamaño declarado
+    (verificado empíricamente), así que sumar file_size acá es una defensa
+    real contra zip bombs.
+
+    A propósito NO valida integridad de CRC/encriptación acá (eso era
+    zip_ref.testzip() en el diseño anterior -- medido ~2617x más lento que
+    estos chequeos de metadata para un ZIP grande, y además era un gate
+    TODO-o-nada que abortaba el ZIP entero por un solo miembro corrupto).
+    Esa validación ahora es POR MIEMBRO, dentro de
+    _extraer_zip_y_despachar_individualmente (zip_ref.extract() ya detecta
+    CRC corrupto/encriptación por sí solo, aislado por archivo -- ver su
+    docstring).
+
+    Última validación (más cara relativamente, por eso al final): reserva
+    capacidad de "trabajo en vuelo" para los miembros de este ZIP (ver
+    MAX_TRABAJO_EN_VUELO_ZIP) -- si el sistema ya tiene demasiadas facturas
+    pendientes/en proceso, rechaza el ZIP COMPLETO de forma clara e
+    inmediata en vez de aceptarlo y dejarlo esperando horas en una cola
+    invisible. La reserva queda a cargo del caller de liberarla
+    (_extraer_zip_y_despachar_individualmente lo hace, miembro por
+    miembro, a medida que cada uno llega a un estado terminal o se
+    descarta).
+
+    Devuelve {"ok": True, "miembros": [...], "reservado": N} o
+    {"ok": False, "error": "..."}.
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            miembros = [i for i in zip_ref.infolist() if not i.is_dir()]
+    except (
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        zlib.error,
+        RuntimeError,
+        UnicodeError,
+        OSError,
+    ) as e:
+        return {"ok": False, "error": f"El ZIP está corrupto o no es un ZIP válido: {e}"}
+
+    if len(miembros) == 0:
+        return {"ok": False, "error": "El ZIP no contiene archivos."}
+
+    if len(miembros) > MAX_ARCHIVOS_ZIP:
+        return {
+            "ok": False,
+            "error": (
+                f"El ZIP tiene {len(miembros)} archivos, el máximo permitido "
+                f"es {MAX_ARCHIVOS_ZIP}. Dividilo en varios envíos más chicos."
+            ),
+        }
+
+    total_descomprimido = sum(i.file_size for i in miembros)
+    if total_descomprimido > MAX_ZIP_DESCOMPRIMIDO_BYTES:
+        return {
+            "ok": False,
+            "error": (
+                f"El ZIP pesa demasiado descomprimido "
+                f"({total_descomprimido / (1024 * 1024):.0f}MB, máximo "
+                f"{MAX_ZIP_DESCOMPRIMIDO_BYTES // (1024 * 1024)}MB)."
+            ),
+        }
+
+    if not _reservar_trabajo_en_vuelo_zip(len(miembros)):
+        return {
+            "ok": False,
+            "error": (
+                "El sistema está procesando demasiadas facturas en este "
+                "momento. Esperá unos minutos y reintentá."
+            ),
+        }
+
+    return {"ok": True, "miembros": miembros, "reservado": len(miembros)}
+
+
+def _carpeta_ingest_zip(*, origen: str, ingest_id: str) -> str:
+    """Única fuente de verdad para el nombre de la carpeta temporal de UNA
+    ingesta de ZIP -- usada tanto por los 3 endpoints (para guardar el .zip
+    crudo recién subido/descargado) como por _extraer_zip_y_despachar_individualmente
+    (que extrae los miembros DENTRO de esta misma carpeta y al final la
+    borra completa con shutil.rmtree, limpiando .zip crudo + miembros
+    extraídos en un solo paso). `origen` y `ingest_id` son SIEMPRE
+    server-side (una constante fija por canal + un uuid4 generado en el
+    backend) -- nunca un valor de cliente, ver docs/plan-fase1-zip-REDISEÑO.md
+    sección 1."""
+    return f"./downloads/zip-{origen}-{ingest_id}"
+
+
+def _generar_html_resumen_zip(
+    *, total: int, aceptados: int, no_soportados: list, errores_despacho: Optional[list] = None
+) -> str:
+    """Email-resumen de UN ZIP (no uno por factura -- ver decisión en
+    docs/plan-fase1-zip-REDISEÑO.md sección 4). Deliberadamente chico: no
+    reusa generar_html_factura (que arma el detalle de UNA factura ya
+    procesada), esto es solo un acuse de recibo del envío completo.
+
+    errores_despacho (archivos que SÍ eran del tipo correcto pero fallaron
+    al procesarse -- Gemini/BAS, no un rechazo de Fase A) se lista aparte
+    de no_soportados: antes no se mencionaban en absoluto, así que
+    "aceptados" + "no_soportados" no sumaba "total" cuando había alguno, y
+    el destinatario veía un conteo que no cerraba, sin ninguna explicación
+    de qué pasó con la diferencia."""
+    errores_despacho = errores_despacho or []
+    lineas_no_soportados = "".join(
+        f"<li>{n.get('nombre', '?')} -- {n.get('motivo', 'no soportado')}</li>"
+        for n in no_soportados[:20]
+    )
+    if len(no_soportados) > 20:
+        lineas_no_soportados += f"<li>... y {len(no_soportados) - 20} más.</li>"
+    bloque_no_soportados = (
+        f"<p>{len(no_soportados)} archivo(s) no se pudieron procesar:</p><ul>{lineas_no_soportados}</ul>"
+        if no_soportados
+        else ""
+    )
+    bloque_errores_despacho = (
+        f"<p>{len(errores_despacho)} factura(s) fallaron durante el procesamiento "
+        "y van a aparecer con un error en el sistema -- se pueden reintentar "
+        "desde ahí.</p>"
+        if errores_despacho
+        else ""
+    )
+    return (
+        f"<p>Recibimos tu ZIP con {total} archivo(s).</p>"
+        f"<p>{aceptados} factura(s) están en proceso -- vas a poder verlas "
+        "en el sistema en los próximos minutos.</p>"
+        f"{bloque_errores_despacho}"
+        f"{bloque_no_soportados}"
+    )
+
+
+async def _extraer_zip_y_despachar_individualmente(
+    *,
+    zip_path: str,
+    ingest_id: str,
+    origen: str,
+    reservado_trabajo_en_vuelo: int,
+    client_reference: Optional[str] = None,
+    notificar_no_soportados_por_webhook: bool = False,
+    enviar_resumen_por_email: bool = False,
+    datos_email: Optional[dict] = None,
+    on_item_completado: Optional[Callable] = None,
+) -> dict:
+    """Punto único de entrada de ZIP al pipeline individual existente --
+    reutilizado por el webhook de email y por /website-upload (y por
+    /process-invoice). Asume que _validar_zip_rapido() ya corrió, pasó, y
+    reservó `reservado_trabajo_en_vuelo` unidades de trabajo (ver
+    MAX_TRABAJO_EN_VUELO_ZIP) -- esta función es la responsable de liberar
+    esas unidades a medida que cada archivo se descarta o termina su
+    procesamiento (nunca antes). Pensada para correr SIEMPRE dentro de un
+    asyncio.create_task, nunca esperada (await) directamente desde un
+    handler HTTP.
+
+    Identidad (ver docs/plan-fase1-zip-REDISEÑO.md sección 1): `ingest_id`
+    SIEMPRE lo genera el caller con uuid4() server-side (nunca un valor de
+    cliente) -- cada uno de los 3 endpoints lo genera apenas confirma que
+    está ante un ZIP y lo reusa tanto para guardar el .zip crudo
+    (_carpeta_ingest_zip) como para esta llamada, así ambas cosas terminan
+    en la MISMA carpeta y se limpian juntas. Esta función NUNCA recibe ni
+    usa ningún valor del cliente para construir rutas de disco ni claves de
+    PocketBase -- `client_reference` (si vino) es puramente informativo,
+    solo va a los logs. Como `ingest_id` es un uuid4 fresco por invocación
+    (nunca derivado del `id`/`process_id` que mandó el cliente), dos
+    invocaciones concurrentes -- mismo id de cliente, reintento, o abuso
+    deliberado -- nunca comparten carpeta ni prefijo de process_id.
+
+    Dos fases, separadas para durabilidad (sección 3 del rediseño; el
+    detalle de Fase A -- 2 sub-pasadas, cada una bajo su propio semáforo --
+    se agregó después, ver sección 6 de docs/informe-final-zip-fase1.md):
+      Fase A (síncrona, corre en hilos reales vía asyncio.to_thread), 2
+      sub-pasadas sobre los mismos miembros, cada una con su propio gate
+      de concurrencia (motivo: la Pass 0 es liviana y no debería esperar
+      detrás de la Pass 1, que sí es pesada -- ver ZIP_REGISTRO_SEMAPHORE
+      vs ZIP_EXTRACTION_SEMAPHORE más arriba en el módulo):
+        Pass 0 (bajo ZIP_REGISTRO_SEMAPHORE, mayor concurrencia) --
+        pre-registra TODOS los miembros potencialmente válidos
+        (upsert_invoice status="pending") ANTES de extraer o clasificar
+        ninguno -- así un reinicio en CUALQUIER punto posterior deja a
+        todo miembro candidato con al menos una fila recuperable, sin
+        importar en qué índice estaba la clasificación NI si la task
+        todavía estaba esperando su turno para arrancar.
+        Pass 1 (bajo ZIP_EXTRACTION_SEMAPHORE, la extracción pesada de
+        siempre) -- clasifica cada miembro (integridad CRC/encriptación
+        por miembro vía zip_ref.extract(), Zip Slip, tipo soportado). Un
+        miembro ACEPTADO adjunta su archivo original
+        (adjuntar_archivo_original) DE INMEDIATO, apenas se acepta --no
+        espera a que el loop termine de clasificar el resto del ZIP--, así
+        que un reinicio a mitad de la clasificación deja a los miembros YA
+        aceptados con su archivo YA adjuntado (reintentables de verdad),
+        no solo con una fila "pending" sin archivo. Un miembro RECHAZADO
+        descarta su placeholder de la Pass 0 (soft-delete, mismo mecanismo
+        que el placeholder huérfano de /website-upload/init) -- nunca
+        queda como factura pendiente procesable. La verificación de
+        integridad es POR MIEMBRO -- un miembro corrupto o encriptado no
+        afecta a los demás -- reemplaza al testzip() global del diseño
+        original, que abortaba el ZIP entero por un solo miembro dañado.
+      Fase B (async, en el event loop): despacha cada archivo aceptado a
+      _procesar_en_background (protegido por PROCESSING_SEMAPHORE, sin
+      cambios), libera su unidad de trabajo-en-vuelo al terminar, y
+      dispara on_item_completado si vino (usado por el canal de email para
+      fire_webhook por factura).
+
+    Fallos aislados en las DOS fases: un archivo que no se puede extraer,
+    está corrupto, encriptado, o es de tipo no soportado no aborta el
+    resto (queda en "no_soportados"); un archivo que falla al despacharse
+    a _procesar_en_background (que ya atrapa sus propias excepciones y las
+    deja como status="error" en PocketBase) no frena el despacho de los
+    demás. Solo un ZIP que ni siquiera se puede abrir aborta todo -- eso
+    es un check GLOBAL legítimo (no hay nada que aislar si no se puede ni
+    leer el índice del archivo).
+    """
+    carpeta_base = _carpeta_ingest_zip(origen=origen, ingest_id=ingest_id)
+
+    if client_reference:
+        app_logger.info(
+            f"[{ingest_id}] ZIP origen={origen} -- referencia del cliente (solo "
+            f"trazabilidad, nunca usada para rutas/claves): {client_reference!r}"
+        )
+
+    resultado = {
+        "origen": origen,
+        "ingest_id": ingest_id,
+        "aceptados": 0,
+        "no_soportados": [],
+        "errores_despacho": [],
+        "error_zip": None,
+    }
+
+    def _es_zip_anidado(miembro):
+        return miembro.filename.lower().endswith(".zip")
+
+    def _pass0_pre_registrar():
+        """Corre en un hilo separado, bajo ZIP_REGISTRO_SEMAPHORE (más
+        concurrencia que la extracción pesada -- ver el comentario del
+        semáforo en la cabecera del módulo). TODO acá es sincrónico
+        (upsert_invoice usa `requests` de forma bloqueante). Pre-registra
+        TODOS los miembros potencialmente válidos ANTES de que la
+        clasificación real (Pass 1) toque a ninguno -- así un reinicio en
+        CUALQUIER punto posterior (incluida la espera por el semáforo de
+        extracción, más abajo) deja a todo miembro candidato con al menos
+        una fila recuperable. Se salta los ZIP anidados (detectables solo
+        por nombre, sin extraer nada) para no crear-y-enseguida-descartar
+        un placeholder para algo que nunca fue candidato real.
+
+        No es atómico en sentido matemático -- sigue siendo N llamadas de
+        red secuenciales, no una transacción. Una garantía dura de "cero
+        pérdida bajo cualquier reinicio" requeriría el batch API
+        transaccional de PocketBase, que necesita habilitarse
+        explícitamente por colección en la configuración real de
+        producción -- algo que no podemos verificar ni tocar desde acá sin
+        desplegar. Lo que SÍ logra esta Pass 0, sin infraestructura nueva:
+        reduce la ventana de riesgo al mínimo práctico alcanzable con lo
+        que ya existe. Decisión de arquitectura documentada en
+        docs/informe-final-zip-fase1.md sección 6.
+
+        Devuelve (process_ids_por_indice, record_ids_por_process_id,
+        error_apertura)."""
+        process_ids_por_indice = {}
+        # id real de PocketBase (record["id"], NO process_id) de cada
+        # upsert "pending" -- la Pass 1 lo necesita para llamar
+        # adjuntar_archivo_original sin tener que repetir el upsert.
+        record_ids_por_process_id = {}
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                miembros = [i for i in zip_ref.infolist() if not i.is_dir()]
+                for indice, miembro in enumerate(miembros):
+                    if _es_zip_anidado(miembro):
+                        continue
+                    nombre_saneado = _sanear_nombre_para_process_id(miembro.filename)
+                    process_id = f"{origen}--{ingest_id}--{indice:03d}-{nombre_saneado}"
+                    process_ids_por_indice[indice] = process_id
+                    registro_pass0 = orchestrator._pb_client.upsert_invoice(
+                        {"process_id": process_id, "status": "pending", "error_message": ""}
+                    )
+                    if registro_pass0 and registro_pass0.get("id"):
+                        record_ids_por_process_id[process_id] = registro_pass0["id"]
+        except Exception as e:
+            return process_ids_por_indice, record_ids_por_process_id, f"Error inesperado abriendo el ZIP: {e}"
+        return process_ids_por_indice, record_ids_por_process_id, None
+
+    def _pass1_clasificar_extraer_y_adjuntar(process_ids_por_indice, record_ids_por_process_id):
+        """Corre en un hilo separado, bajo ZIP_EXTRACTION_SEMAPHORE. TODO
+        acá es sincrónico (I/O de disco, zlib, y las llamadas HTTP
+        bloqueantes de adjuntar_archivo_original/soft_delete_invoice). No
+        debe hacer ningún `await` ni tocar el event loop. Reusa el
+        process_id que ya calculó la Pass 0 -- no lo recalcula, para que
+        ambas pasadas siempre hablen exactamente de la misma fila.
+
+        A diferencia del diseño anterior (Pass 2 separada, que adjuntaba
+        el archivo de TODOS los miembros recién después de que este loop
+        terminara para TODO el ZIP), acá cada miembro ACEPTADO adjunta su
+        archivo DE INMEDIATO, en la misma iteración que lo acepta -- así
+        un reinicio a mitad de este loop deja a los miembros YA aceptados
+        con su archivo YA adjuntado (documento_original set, "Reintentar"
+        funciona de verdad), no solo con una fila "pending" sin archivo
+        esperando a que el loop termine entero. Ver
+        docs/informe-final-zip-fase1.md sección 6.
+
+        Devuelve (archivos_a_despachar, no_soportados_para_webhook,
+        error_zip, unidades_liberadas)."""
+        archivos_a_despachar = []
+        no_soportados_para_webhook = []
+        unidades_liberadas = 0
+
+        def _descartar_placeholder_pass0(process_id, *, motivo):
+            """Un miembro que la Pass 0 pre-registró como "pending" resultó
+            NO ser una factura válida (corrupto, encriptado, Zip Slip, tipo
+            no soportado, error inesperado de extracción) -- lo saca de
+            PocketBase con el mismo mecanismo de soft-delete ya usado para
+            el placeholder huérfano de /website-upload/init (nunca un DELETE
+            físico, nunca un endpoint nuevo), para que NO quede como factura
+            pendiente/procesable: el estado final debe ser indistinguible de
+            "nunca tuvo fila", igual que un miembro rechazado antes de este
+            fix. Best-effort -- un fallo acá no debe frenar la clasificación
+            de los demás miembros (ver docs/informe-final-zip-fase1.md
+            sección 6 para el residuo que esto deja si el proceso muere
+            justo en medio de esta llamada)."""
+            if not process_id:
+                return
+            try:
+                orchestrator._pb_client.soft_delete_invoice(
+                    process_id,
+                    deleted_by="sistema:zip-fase-a-rechazo",
+                    reason=motivo,
+                )
+            except Exception as e:
+                app_logger.warning(
+                    f"[{process_id}] PocketBase: error descartando placeholder "
+                    f"de Pass 0 tras rechazo ({motivo}): {e}"
+                )
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                miembros = [i for i in zip_ref.infolist() if not i.is_dir()]
+                for indice, miembro in enumerate(miembros):
+                    process_id = process_ids_por_indice.get(indice)
+                    try:
+                        if _es_zip_anidado(miembro):
+                            resultado["no_soportados"].append(
+                                {"nombre": miembro.filename, "motivo": "ZIP anidado no soportado"}
+                            )
+                            no_soportados_para_webhook.append(
+                                {
+                                    "indice": indice,
+                                    "nombre_miembro": miembro.filename,
+                                    "ruta": None,
+                                    "extension": ".zip",
+                                    "mime": "application/zip",
+                                }
+                            )
+                            _liberar_trabajo_en_vuelo_zip(1)
+                            unidades_liberadas += 1
+                            continue
+
+                        carpeta_miembro = f"{carpeta_base}/{indice:03d}"
+                        os.makedirs(carpeta_miembro, exist_ok=True)
+
+                        try:
+                            # zip_ref.extract() valida CRC (BadZipFile) y
+                            # detecta encriptación (RuntimeError) por sí
+                            # solo, POR MIEMBRO -- verificado empíricamente
+                            # que un miembro corrupto/encriptado no afecta
+                            # a los demás. Además usamos su valor de
+                            # retorno (la ruta REAL que escribió) en vez de
+                            # reconstruirla a mano con os.path.join, que
+                            # podía divergir del algoritmo de saneo interno
+                            # de zipfile._extract_member y dar falsos
+                            # negativos/positivos en el chequeo de Zip Slip
+                            # de abajo.
+                            ruta_extraida = zip_ref.extract(miembro, carpeta_miembro)
+                        except (zipfile.BadZipFile, RuntimeError, zlib.error) as e:
+                            resultado["no_soportados"].append(
+                                {
+                                    "nombre": miembro.filename,
+                                    "motivo": f"archivo corrupto o encriptado: {e}",
+                                }
+                            )
+                            _descartar_placeholder_pass0(
+                                process_id, motivo=f"archivo corrupto o encriptado: {e}"
+                            )
+                            _liberar_trabajo_en_vuelo_zip(1)
+                            unidades_liberadas += 1
+                            continue
+
+                        ruta_extraida = os.path.realpath(ruta_extraida)
+                        if not ruta_extraida.startswith(os.path.realpath(carpeta_miembro)):
+                            # Zip Slip: la ruta REAL escrita por extract()
+                            # terminó fuera de la carpeta del miembro.
+                            resultado["no_soportados"].append(
+                                {"nombre": miembro.filename, "motivo": "ruta interna inválida"}
+                            )
+                            _descartar_placeholder_pass0(process_id, motivo="ruta interna inválida")
+                            _liberar_trabajo_en_vuelo_zip(1)
+                            unidades_liberadas += 1
+                            continue
+
+                        tipo_real = filetype.guess(ruta_extraida)
+                        extensiones_soportadas = {"pdf", "png", "jpg", "jpeg", "webp", "gif"}
+                        if tipo_real is None or tipo_real.extension not in extensiones_soportadas:
+                            motivo_no_soportado = (
+                                f"tipo no soportado ({tipo_real.mime if tipo_real else 'desconocido'})"
+                            )
+                            resultado["no_soportados"].append(
+                                {"nombre": miembro.filename, "motivo": motivo_no_soportado}
+                            )
+                            no_soportados_para_webhook.append(
+                                {
+                                    "indice": indice,
+                                    "nombre_miembro": miembro.filename,
+                                    "ruta": ruta_extraida,
+                                    "extension": os.path.splitext(miembro.filename)[1],
+                                    "mime": tipo_real.mime if tipo_real else None,
+                                }
+                            )
+                            _descartar_placeholder_pass0(process_id, motivo=motivo_no_soportado)
+                            _liberar_trabajo_en_vuelo_zip(1)
+                            unidades_liberadas += 1
+                            continue
+
+                        # ACEPTADO -- adjunta el archivo YA, en esta misma
+                        # iteración, no en una pasada separada al final (ver
+                        # docstring de esta función). Best-effort: un fallo
+                        # acá no debe sacar a este miembro de la cola de
+                        # despacho -- Fase B vuelve a adjuntar el mismo
+                        # archivo cuando le llega su turno real (ver
+                        # _procesar_imagen_o_pdf_impl), así que esto es
+                        # best-effort redundante, no la única oportunidad.
+                        record_id = record_ids_por_process_id.get(process_id)
+                        if record_id:
+                            try:
+                                orchestrator._pb_client.adjuntar_archivo_original(
+                                    record_id,
+                                    ruta_extraida,
+                                    os.path.basename(miembro.filename),
+                                    tipo_real.mime,
+                                )
+                            except Exception as e:
+                                app_logger.warning(
+                                    f"[{process_id}] PocketBase: error adjuntando archivo "
+                                    f"original en Pass 1: {e}"
+                                )
+
+                        archivos_a_despachar.append(
+                            {
+                                "file_location": ruta_extraida,
+                                "file_name": os.path.basename(miembro.filename),
+                                "extension": tipo_real.extension,
+                                "media_type": tipo_real.mime,
+                                "process_id": process_id,
+                            }
+                        )
+                    except Exception as e:
+                        resultado["no_soportados"].append(
+                            {"nombre": miembro.filename, "motivo": f"error de extracción: {e}"}
+                        )
+                        app_logger.warning(
+                            f"[{ingest_id}] No se pudo extraer {miembro.filename}: {e}"
+                        )
+                        _descartar_placeholder_pass0(process_id, motivo=f"error de extracción: {e}")
+                        _liberar_trabajo_en_vuelo_zip(1)
+                        unidades_liberadas += 1
+                        continue
+        except Exception as e:
+            # El ZIP ni siquiera se pudo abrir/leer -- acá SÍ es un check
+            # global legítimo (no hay nada que aislar por miembro si no se
+            # puede ni leer el índice). Libera TODO lo reservado que no se
+            # haya liberado todavía.
+            return (
+                archivos_a_despachar,
+                no_soportados_para_webhook,
+                f"Error inesperado abriendo el ZIP: {e}",
+                unidades_liberadas,
+            )
+        return archivos_a_despachar, no_soportados_para_webhook, None, unidades_liberadas
+
+    async with ZIP_REGISTRO_SEMAPHORE:
+        (
+            process_ids_por_indice,
+            record_ids_por_process_id,
+            error_apertura_pass0,
+        ) = await asyncio.to_thread(_pass0_pre_registrar)
+
+    if error_apertura_pass0:
+        # Mismo camino que "el ZIP ni siquiera se pudo abrir" de siempre --
+        # acá la Pass 0 ya intentó abrirlo y falló, así que la Pass 1 ni
+        # siquiera arranca. unidades_liberadas_fase_a=0 porque nada se
+        # reservó/liberó todavía en esta rama.
+        error_zip = error_apertura_pass0
+        unidades_liberadas_fase_a = 0
+        archivos_a_despachar = []
+        no_soportados_para_webhook = []
+    else:
+        async with ZIP_EXTRACTION_SEMAPHORE:
+            (
+                archivos_a_despachar,
+                no_soportados_para_webhook,
+                error_zip,
+                unidades_liberadas_fase_a,
+            ) = await asyncio.to_thread(
+                _pass1_clasificar_extraer_y_adjuntar, process_ids_por_indice, record_ids_por_process_id
+            )
+
+    unidades_pendientes_de_liberar = reservado_trabajo_en_vuelo - unidades_liberadas_fase_a
+
+    if error_zip:
+        resultado["error_zip"] = error_zip
+        app_logger.error(f"[{ingest_id}] {error_zip}")
+        if unidades_pendientes_de_liberar > 0:
+            _liberar_trabajo_en_vuelo_zip(unidades_pendientes_de_liberar)
+        shutil.rmtree(carpeta_base, ignore_errors=True)
+        # Notificación de rechazo total -- semántica existente del canal
+        # email (worker() NUNCA mandó un email de error, solo fire_webhook;
+        # ver comparación en docs/plan-fase1-zip-REDISEÑO.md): mismo
+        # criterio acá, on_item_completado es fire_webhook solo para
+        # origen="email", así que esto no afecta a los otros 2 canales, que
+        # nunca tuvieron esta notificación.
+        if on_item_completado:
+            try:
+                await on_item_completado(
+                    {
+                        "process_id": ingest_id,
+                        "file_name": os.path.basename(zip_path),
+                        "error": error_zip,
+                        "status": "error",
+                        "success": False,
+                    }
+                )
+            except Exception as e:
+                app_logger.warning(
+                    f"[{ingest_id}] on_item_completado (rechazo total) falló: {e}"
+                )
+        return resultado
+
+    async def _notificar_no_soportado_si_corresponde(
+        *, indice: int, nombre_miembro: str, ruta: Optional[str], extension: str, mime: Optional[str]
+    ) -> None:
+        # Preserva un efecto externo que ya existía en /process-invoice (el
+        # único de los 3 canales que lo tenía): notificar por webhook cada
+        # archivo rechazado dentro de un ZIP. Protegido por su propio
+        # try/except: un fallo notificando (red, DNS, timeout) nunca puede
+        # impedir que el resto del ZIP se siga procesando.
+        if not notificar_no_soportados_por_webhook:
+            return
+        try:
+            await orchestrator.fire_webhook(
+                {
+                    "file_name": os.path.basename(nombre_miembro),
+                    "file_extension": extension,
+                    "file_path": ruta,
+                    "media_type": mime,
+                    "process_id": f"{origen}--{ingest_id}--{indice:03d}-{_sanear_nombre_para_process_id(nombre_miembro)}",
+                    "error": "Tipo de archivo no permitido.",
+                }
+            )
+        except Exception as e:
+            app_logger.warning(
+                f"[{ingest_id}] No se pudo notificar webhook para {nombre_miembro}: {e}"
+            )
+
+    for item in no_soportados_para_webhook:
+        await _notificar_no_soportado_si_corresponde(**item)
+
+    for archivo in archivos_a_despachar:
+        resultado_item = await _procesar_en_background(**archivo)
+        if resultado_item.get("success"):
+            resultado["aceptados"] += 1
+        else:
+            resultado["errores_despacho"].append(
+                {"process_id": archivo.get("process_id", "?"), "error": resultado_item.get("error")}
+            )
+            app_logger.error(
+                f"[{ingest_id}] Error despachando {archivo.get('process_id', '?')}: "
+                f"{resultado_item.get('error')}"
+            )
+
+        if on_item_completado:
+            # Forma EXACTA del payload que ya emite worker() (el pipeline
+            # viejo de email para archivo suelto) por cada item -- incluidas
+            # sus inconsistencias tal cual (worker() usa la clave "id" en
+            # éxito pero "process_id" en error; success SÍ trae "factura"
+            # completo, error NO). Comparación campo por campo contra
+            # worker() documentada en docs/plan-fase1-zip-REDISEÑO.md. Se
+            # replica así, sin "corregir" las inconsistencias, porque el
+            # objetivo es compatibilidad real con integraciones que ya
+            # consumen ese contrato, no una forma nueva más prolija.
+            if resultado_item.get("success"):
+                factura_item = resultado_item.get("factura") or {}
+                payload = {
+                    "id": archivo["process_id"],
+                    "file_name": archivo["file_name"],
+                    "factura": factura_item,
+                    "saved": factura_item.get("saved_sheet"),
+                    "saved_items": factura_item.get("saved_items"),
+                    "bas": factura_item.get("bas"),
+                    "drive_file_id": factura_item.get("drive_file_id"),
+                    "status": "procesada",
+                    "success": True,
+                }
+            else:
+                payload = {
+                    "process_id": archivo["process_id"],
+                    "file_name": archivo["file_name"],
+                    "error": resultado_item.get("error"),
+                    "status": "error",
+                    "success": False,
+                }
+            try:
+                await on_item_completado(payload)
+            except Exception as e:
+                app_logger.warning(
+                    f"[{ingest_id}] on_item_completado falló para {archivo['process_id']}: {e}"
+                )
+
+        _liberar_trabajo_en_vuelo_zip(1)
+        unidades_pendientes_de_liberar -= 1
+
+    # Safety-net: no debería quedar nada sin liberar (cada rama de arriba
+    # ya libera 1 por unidad), pero si algún camino no contemplado se
+    # escapó, esto evita que el contador quede "pisado" para siempre.
+    if unidades_pendientes_de_liberar > 0:
+        app_logger.warning(
+            f"[{ingest_id}] {unidades_pendientes_de_liberar} unidad(es) de "
+            "trabajo-en-vuelo liberadas por el safety-net (no deberían haber "
+            "quedado sin contabilizar -- revisar si se agregó un camino nuevo "
+            "sin su propio _liberar_trabajo_en_vuelo_zip)."
+        )
+        _liberar_trabajo_en_vuelo_zip(unidades_pendientes_de_liberar)
+
+    shutil.rmtree(carpeta_base, ignore_errors=True)
+
+    app_logger.info(
+        f"[{ingest_id}] ZIP procesado (origen={origen}): "
+        f"{resultado['aceptados']} aceptados, "
+        f"{len(resultado['no_soportados'])} no soportados, "
+        f"{len(resultado['errores_despacho'])} errores de despacho"
+    )
+
+    if enviar_resumen_por_email and datos_email and datos_email.get("from_email"):
+        html = _generar_html_resumen_zip(
+            total=len(archivos_a_despachar) + len(resultado["no_soportados"]),
+            aceptados=resultado["aceptados"],
+            no_soportados=resultado["no_soportados"],
+            errores_despacho=resultado["errores_despacho"],
+        )
+        asunto = f"Re: {datos_email.get('subject') or 'Tu ZIP de facturas'}"
+        # enviar_email es sincrónico/bloqueante (smtplib) -- to_thread para
+        # no bloquear el event loop, mismo criterio que la Fase A.
+        await asyncio.to_thread(
+            orchestrator.enviar_email, datos_email["from_email"], asunto, html
+        )
+
+    return resultado
 
 
 @router.post(
@@ -2562,11 +3482,30 @@ async def process_invoice(
 
         # Guarda el archivo localmente
         os.makedirs("downloads", exist_ok=True)
-        file_location = f"./downloads/{file.filename.split('/')[-1]}"
+        # Prefijo uuid4 único por-request -- antes esta ruta se armaba solo
+        # con el basename de file.filename, sin ningún componente único:
+        # dos uploads concurrentes con el mismo nombre de archivo (nombres
+        # genéricos de cámara/scanner, o alguien forzándolo a propósito acá
+        # en /website-upload, que es público) se pisaban en disco, mezclando
+        # el contenido de dos facturas de dos process_id distintos.
+        # Truncado a 200 BYTES reales (_truncar_nombre_a_bytes, no un
+        # simple [:200] de caracteres -- ese truncado por code points
+        # seguía permitiendo superar el límite de 255 bytes del filesystem
+        # con nombres ricos en tildes/ñ/UTF-8 multi-byte, bug real
+        # encontrado en la revisión adversarial). El prefijo uuid4.hex (33
+        # bytes con el "-") ya reducía el margen disponible.
+        file_location = (
+            f"./downloads/{uuid.uuid4().hex}-"
+            f"{_truncar_nombre_a_bytes(file.filename.split('/')[-1], 200)}"
+        )
         with open(file_location, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         with open(file_location, "rb") as f:
             kind = filetype.guess(f.read(262))
+
+        if kind is None:
+            os.remove(file_location)
+            raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
 
         app_logger.info(f"Mime type: {kind.mime}")
 
@@ -2590,85 +3529,50 @@ async def process_invoice(
                 "status_code": 201,
             }
 
-        # Procesa ZIP
+        # Procesa ZIP -- extracción + despacho a través del pipeline
+        # individual compartido (_extraer_zip_y_despachar_individualmente),
+        # el mismo que usan el webhook de email y /website-upload. Único
+        # caller que pasa notificar_no_soportados_por_webhook=True -- ver su
+        # docstring: preserva un efecto externo real que ya existía acá
+        # (y solo acá) antes de este cambio. `id` (el que mandó el caller)
+        # NUNCA se usa para construir la carpeta -- eso era el path
+        # traversal real (hallazgo #1 de la revisión adversarial, ver
+        # docs/plan-fase1-zip-REDISEÑO.md sección 1): la carpeta se arma
+        # con un ingest_id generado acá mismo, server-side.
         elif (
             kind.mime == "application/zip"
             or kind.mime == "application/x-zip-compressed"
         ):
             app_logger.info("Tenemos un ZIP")
-            supported_extensions = [".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"]
-            # Tope de archivos por ZIP -- el Droplet tiene 1 vCPU/960MB y cada
-            # archivo encadena Gemini + búsqueda de proveedor en BAS (puede
-            # tardar 1-2 min sola, ver nginx.conf); un ZIP gigante saturaría
-            # el background task de abajo por horas.
-            MAX_ARCHIVOS_ZIP = 20
+            ingest_id = uuid.uuid4().hex
+            zip_carpeta = _carpeta_ingest_zip(origen="process-invoice", ingest_id=ingest_id)
+            os.makedirs(zip_carpeta, exist_ok=True)
+            zip_path = f"{zip_carpeta}/{os.path.basename(file_location)}"
+            shutil.move(file_location, zip_path)
 
-            archivos_a_procesar = []
+            validacion = _validar_zip_rapido(zip_path)
+            if not validacion["ok"]:
+                shutil.rmtree(zip_carpeta, ignore_errors=True)
+                raise HTTPException(status_code=400, detail=validacion["error"])
 
-            with zipfile.ZipFile(file_location, "r") as zip_ref:
-                miembros = [n for n in zip_ref.namelist() if not n.endswith("/")]
-                if len(miembros) > MAX_ARCHIVOS_ZIP:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"El ZIP tiene {len(miembros)} archivos, el máximo "
-                            f"permitido es {MAX_ARCHIVOS_ZIP}. Subilo en lotes más chicos."
-                        ),
-                    )
-
-                # Extrae y clasifica cada archivo
-                for member_name in miembros:
-                    file_name_in_zip = os.path.basename(member_name)
-                    file_extension_in_zip = os.path.splitext(file_name_in_zip)[
-                        1
-                    ].lower()
-
-                    downloads_folder = "downloads"
-                    zip_ref.extract(member_name, downloads_folder)
-                    extracted_file_path = os.path.join(downloads_folder, member_name)
-                    media_type, _ = mimetypes.guess_type(extracted_file_path)
-
-                    # Procesa si es compatible
-                    if file_extension_in_zip in supported_extensions:
-                        archivos_a_procesar.append(
-                            {
-                                "file_location": extracted_file_path,
-                                "file_name": file_name_in_zip,
-                                "extension": file_extension_in_zip.lstrip("."),
-                                "media_type": media_type,
-                                "process_id": f"{id}/{file_name_in_zip}",
-                            }
-                        )
-
-                    # Notifica y elimina si no es compatible
-                    else:
-                        await orchestrator.fire_webhook(
-                            {
-                                "file_name": file_name_in_zip,
-                                "file_extension": file_extension_in_zip,
-                                "file_path": extracted_file_path,
-                                "media_type": kind.media_type,
-                                "process_id": f"{id}/{file_name_in_zip}",
-                                "error": "Tipo de archivo no permitido.",
-                            }
-                        )
-                        os.remove(extracted_file_path)
-
-            async def _procesar_zip_en_background(archivos):
-                # Secuencial a propósito (ver comentario de MAX_ARCHIVOS_ZIP):
-                # correr todos los archivos en paralelo saturaría la única
-                # vCPU del Droplet. Un archivo que falla no frena al resto
-                # (_procesar_en_background ya loguea y traga la excepción).
-                for archivo in archivos:
-                    await _procesar_en_background(**archivo)
-
-            # No se espera (await) a propósito -- el endpoint responde 201 de
-            # inmediato y el batch sigue procesándose en background. Antes de
-            # este fix, esta rama llamaba a "orchestrator.task_queue" que no
-            # existe en esta clase (solo existe "job_queue", con una forma de
-            # item distinta) -- cada archivo de cada ZIP subido a este
-            # endpoint fallaba en silencio con AttributeError.
-            asyncio.create_task(_procesar_zip_en_background(archivos_a_procesar))
+            asyncio.create_task(
+                _extraer_zip_y_despachar_individualmente(
+                    zip_path=zip_path,
+                    ingest_id=ingest_id,
+                    origen="process-invoice",
+                    reservado_trabajo_en_vuelo=validacion["reservado"],
+                    client_reference=id,
+                    notificar_no_soportados_por_webhook=True,
+                )
+            )
+            return {
+                "success": True,
+                "message": (
+                    f"ZIP recibido ({len(validacion['miembros'])} archivos) -- "
+                    "cada factura se procesa de forma independiente."
+                ),
+                "status_code": 201,
+            }
 
         else:
             raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
@@ -2740,11 +3644,20 @@ async def website_upload(
     request: Request,  # requerido por @limiter.limit para identificar al caller por IP
     file: UploadFile = File(
         ...,
-        description="Archivo de la factura a procesar. Imagen (png, jpg, jpeg, webp, gif) o PDF -- no se aceptan ZIP por este canal.",
+        description=(
+            "Archivo de la factura a procesar. Imagen (png, jpg, jpeg, webp, "
+            "gif), PDF, o ZIP conteniendo varios de esos archivos -- cada uno "
+            "se procesa como una factura independiente."
+        ),
     ),
     process_id: str = Form(
         None,
-        description="process_id ya reservado por POST /website-upload/init. Si no se manda, se genera uno nuevo (comportamiento previo).",
+        description=(
+            "process_id ya reservado por POST /website-upload/init. Si no se "
+            "manda, se genera uno nuevo (comportamiento previo). No aplica "
+            "para ZIP -- el frontend no debe llamar a /init para archivos "
+            ".zip, ver SubirFacturaForm.tsx."
+        ),
     ),
 ):
     """Puerta de entrada pública (sin secret_key) para el formulario de subida
@@ -2755,30 +3668,118 @@ async def website_upload(
     """
     app_logger.info("Website upload")
     try:
-        extensiones_permitidas = ["pdf", "png", "jpg", "jpeg", "webp", "gif"]
+        extensiones_permitidas = ["pdf", "png", "jpg", "jpeg", "webp", "gif", "zip"]
         extension = file.filename.split(".")[-1].lower()
         if extension not in extensiones_permitidas:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"Tipo de archivo no permitido: .{extension}. Solo se aceptan: "
-                    f"{', '.join(extensiones_permitidas)}. Los ZIP no se aceptan por este canal."
+                    f"{', '.join(extensiones_permitidas)}."
                 ),
             )
 
-        # Reusa el process_id reservado por /website-upload/init si vino uno
-        # -- _procesar_imagen_o_pdf hace upsert (no create) por process_id,
-        # así que esto pisa el mismo row "pending" en vez de duplicarlo.
+        # `process_id` (si vino) es SOLO el placeholder reservado por
+        # /website-upload/init para el camino de archivo suelto -- para
+        # ZIP nunca se usa para construir ninguna ruta ni como process_id
+        # final de ninguna factura (eso era el path traversal real,
+        # hallazgo #1 de la revisión adversarial). Se conserva únicamente
+        # como client_reference (trazabilidad en logs) y, si efectivamente
+        # existe un placeholder "pending" con ese id, se limpia más abajo
+        # apenas se detecta que el contenido real es un ZIP -- el backend
+        # es la fuente de verdad de "esto es un ZIP", no el frontend (ver
+        # docs/plan-fase1-zip-REDISEÑO.md sección 7): aunque el frontend
+        # haya adivinado mal (nombre no terminaba en .zip) y por eso sí
+        # llamó a /init, acá se corrige solo, sin dejar ningún row
+        # "pending" huérfano para siempre.
+        process_id_reservado = process_id
         process_id = process_id or f"website-{uuid.uuid4()}"
 
         os.makedirs("downloads", exist_ok=True)
-        file_location = f"./downloads/{file.filename.split('/')[-1]}"
+        # Prefijo uuid4 único por-request -- antes esta ruta se armaba solo
+        # con el basename de file.filename, sin ningún componente único:
+        # dos uploads concurrentes con el mismo nombre de archivo (nombres
+        # genéricos de cámara/scanner, o alguien forzándolo a propósito acá
+        # en /website-upload, que es público) se pisaban en disco, mezclando
+        # el contenido de dos facturas de dos process_id distintos.
+        # Truncado a 200 BYTES reales (_truncar_nombre_a_bytes, no un
+        # simple [:200] de caracteres -- ese truncado por code points
+        # seguía permitiendo superar el límite de 255 bytes del filesystem
+        # con nombres ricos en tildes/ñ/UTF-8 multi-byte, bug real
+        # encontrado en la revisión adversarial). El prefijo uuid4.hex (33
+        # bytes con el "-") ya reducía el margen disponible.
+        file_location = (
+            f"./downloads/{uuid.uuid4().hex}-"
+            f"{_truncar_nombre_a_bytes(file.filename.split('/')[-1], 200)}"
+        )
         with open(file_location, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         with open(file_location, "rb") as f:
             kind = filetype.guess(f.read(262))
 
+        if kind is None:
+            os.remove(file_location)
+            raise HTTPException(status_code=400, detail="Tipo de archivo no permitido.")
+
         app_logger.info(f"Mime type: {kind.mime}")
+
+        if kind.mime in ("application/zip", "application/x-zip-compressed"):
+            if process_id_reservado:
+                # Limpieza del placeholder huérfano: solo si REALMENTE
+                # existe y sigue en "pending" (nunca tocar una factura real
+                # en otro estado -- ver razonamiento completo en el
+                # rediseño, sección 7. process_id es un uuid4 de 128 bits,
+                # no adivinable, así que este chequeo es una salvaguarda
+                # razonable contra un caller que reuse a propósito el
+                # process_id de otra factura ajena).
+                try:
+                    placeholder = orchestrator._pb_client.get_invoice_by_process_id(
+                        process_id_reservado
+                    )
+                    if placeholder and placeholder.get("status") == "pending":
+                        orchestrator._pb_client.soft_delete_invoice(
+                            process_id_reservado,
+                            deleted_by="sistema:deteccion-zip",
+                            reason=(
+                                "Placeholder reservado antes de conocer el "
+                                "contenido real -- resultó ser un ZIP, no una "
+                                "factura individual."
+                            ),
+                        )
+                except Exception as e:
+                    app_logger.warning(
+                        f"No se pudo limpiar el placeholder huérfano "
+                        f"{process_id_reservado}: {e}"
+                    )
+
+            ingest_id = uuid.uuid4().hex
+            zip_carpeta = _carpeta_ingest_zip(origen="website-upload", ingest_id=ingest_id)
+            os.makedirs(zip_carpeta, exist_ok=True)
+            zip_path = f"{zip_carpeta}/{os.path.basename(file_location)}"
+            shutil.move(file_location, zip_path)
+
+            validacion = _validar_zip_rapido(zip_path)
+            if not validacion["ok"]:
+                shutil.rmtree(zip_carpeta, ignore_errors=True)
+                raise HTTPException(status_code=400, detail=validacion["error"])
+
+            asyncio.create_task(
+                _extraer_zip_y_despachar_individualmente(
+                    zip_path=zip_path,
+                    ingest_id=ingest_id,
+                    origen="website-upload",
+                    reservado_trabajo_en_vuelo=validacion["reservado"],
+                    client_reference=process_id_reservado,
+                )
+            )
+            return {
+                "success": True,
+                "message": (
+                    f"ZIP recibido ({len(validacion['miembros'])} archivos) -- "
+                    "cada factura se procesa de forma independiente."
+                ),
+                "status_code": 201,
+            }
 
         if not (kind.mime.startswith("image") or kind.mime == "application/pdf"):
             os.remove(file_location)
@@ -2856,7 +3857,11 @@ async def webhook_endpoint(request: Request):
         to_email = data.get("to_email")
         file_name = data.get("file_name")
 
-        file_type = orchestrator.get_file_type_from_url(attachments)
+        # to_thread -- mismo motivo que download_file_from_url un poco más
+        # abajo (bug real: el primer fix cerró un vector de bloqueo del
+        # event loop y dejó exactamente el mismo abierto acá, 2 líneas
+        # antes, en el mismo flujo sin autenticación).
+        file_type = await asyncio.to_thread(orchestrator.get_file_type_from_url, attachments)
         app_logger.info(f"📄 Tipo de archivo detectado: {file_type}")
 
         process_id = str(uuid.uuid4())
@@ -2865,9 +3870,39 @@ async def webhook_endpoint(request: Request):
         app_logger.info(f"📁 Creando directorio temporal: {temp_dir}")
         os.makedirs(temp_dir, exist_ok=True)
 
-        file_location = f"{temp_dir}/{file_name}"
+        # file_name viene crudo del body de este webhook -- que no tiene
+        # NINGUNA autenticación (sin secret_key, sin X-Invoicy-Secret, sin
+        # rate limiting). Antes de este fix se usaba directo para armar
+        # file_location, sin sanear -- un file_name como "../../algo"
+        # permitía escribir fuera de temp_dir con contenido descargado de
+        # `attachments` (también controlado por el caller). Doble garantía,
+        # no solo saneo de caracteres: (1) _sanear_nombre_para_process_id
+        # reduce el nombre a un basename con charset seguro (mismo criterio
+        # que ya se usa para nombres de miembro dentro de un ZIP), y (2) se
+        # verifica que la ruta final resuelva DENTRO de temp_dir antes de
+        # escribir nada -- mismo patrón que el chequeo de Zip Slip.
+        nombre_archivo_seguro = _sanear_nombre_para_process_id(file_name or "archivo")
+        file_location = os.path.join(temp_dir, nombre_archivo_seguro)
+        if not os.path.realpath(file_location).startswith(
+            os.path.realpath(temp_dir) + os.sep
+        ):
+            app_logger.error(f"❌ file_name inválido/inseguro: {file_name!r}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return {
+                "success": False,
+                "status": "error",
+                "message": "Nombre de archivo inválido.",
+                "id": process_id,
+            }
+
         app_logger.info(f"⬇️ Descargando archivo desde: {attachments}")
-        doc_saved = orchestrator.download_file_from_url(attachments, file_location)
+        # to_thread -- requests.get es bloqueante (ver el timeout agregado
+        # en download_file_from_url); antes corría directo en el event loop
+        # de un endpoint sin ninguna autenticación, mismo problema que ya
+        # se corrigió para fire_webhook/enviar_email.
+        doc_saved = await asyncio.to_thread(
+            orchestrator.download_file_from_url, attachments, file_location
+        )
         if not doc_saved:
             app_logger.error(
                 f"❌ Error al descargar archivo para process_id: {process_id}"
@@ -2887,71 +3922,93 @@ async def webhook_endpoint(request: Request):
         type_ = "unknown"
 
         if file_type in ["application/zip", "application/x-zip-compressed"]:
-            type_ = "zip"
             app_logger.info(f"📦 Procesando archivo ZIP: {file_name}")
-            try:
-                with zipfile.ZipFile(file_location, "r") as zip_ref:
-                    if zip_ref.testzip() is not None:
-                        raise ValueError("ZIP corrupto")
-                    total_count = len(
-                        [name for name in zip_ref.namelist() if not name.endswith("/")]
+            # process_id ya es un uuid4 generado server-side más arriba
+            # (línea "process_id = str(uuid.uuid4())") -- se reusa tal
+            # cual como ingest_id, sin generar uno nuevo. Se mueve del
+            # temp_dir genérico (compartido con el camino no-zip) a la
+            # carpeta canónica de ingesta ZIP para que
+            # _extraer_zip_y_despachar_individualmente limpie todo junto
+            # al terminar (.zip crudo + miembros extraídos).
+            ingest_id = process_id
+            zip_carpeta = _carpeta_ingest_zip(origen="email", ingest_id=ingest_id)
+            os.makedirs(zip_carpeta, exist_ok=True)
+            zip_path = f"{zip_carpeta}/{os.path.basename(file_location)}"
+            shutil.move(file_location, zip_path)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+            validacion = _validar_zip_rapido(zip_path)
+            if not validacion["ok"]:
+                app_logger.error(f"❌ {validacion['error']} ({file_name})")
+                shutil.rmtree(zip_carpeta, ignore_errors=True)
+                # Notificación de rechazo total -- misma semántica que el
+                # caso error_zip async (ver más abajo en
+                # _extraer_zip_y_despachar_individualmente): worker() nunca
+                # mandó un email de error, solo fire_webhook, así que acá se
+                # replica exactamente eso, sin inventar un email de error
+                # que no tiene precedente. asyncio.create_task (no await) --
+                # el endpoint responde de inmediato, no espera al webhook.
+                asyncio.create_task(
+                    orchestrator.fire_webhook(
+                        {
+                            "process_id": process_id,
+                            "file_name": file_name,
+                            "error": validacion["error"],
+                            "status": "error",
+                            "success": False,
+                        }
                     )
-                    app_logger.info(f"📊 ZIP contiene {total_count} archivos")
-                    zip_ref.extractall(temp_dir)
-                    app_logger.info(f"📂 ZIP extraído en: {temp_dir}")
-                os.remove(file_location)  # Eliminar ZIP después de extracción
-                app_logger.info(f"🗑️ ZIP original eliminado: {file_location}")
-
-                app_logger.info(f"🔍 Analizando archivos extraídos...")
-                for root, _, files in os.walk(temp_dir):
-                    for f in files:
-                        file_path = os.path.join(root, f)
-                        file_size = os.path.getsize(file_path)
-                        app_logger.info(
-                            f"📄 Analizando: {f} (tamaño: {file_size} bytes)"
-                        )
-
-                        if file_size == 0:
-                            app_logger.info(f"⚠️ Archivo vacío omitido: {f}")
-                            files_skipped.append({"name": f, "reason": "empty_file"})
-                            os.remove(file_path)
-                            continue
-
-                        mime, _ = mimetypes.guess_type(file_path)
-                        if mime == "application/pdf" or mime.startswith("image/"):
-                            app_logger.info(
-                                f"✅ Archivo válido para procesar: {f} (tipo: {mime})"
-                            )
-                            files_to_process.append(
-                                {"name": f, "path": file_path, "mime": mime}
-                            )
-                        else:
-                            app_logger.info(
-                                f"❌ Tipo no soportado, omitiendo: {f} (tipo: {mime})"
-                            )
-                            files_skipped.append(
-                                {"name": f, "reason": "unsupported_type", "mime": mime}
-                            )
-                            os.remove(file_path)
-
-            except zipfile.LargeZipFile:
-                app_logger.error(f"❌ ZIP demasiado grande: {file_name}")
-                shutil.rmtree(temp_dir)
+                )
                 return {
                     "success": False,
                     "status": "error",
-                    "message": "ZIP demasiado grande",
+                    "message": validacion["error"],
                     "id": process_id,
                 }
-            except Exception as e:
-                app_logger.error(f"❌ Error procesando ZIP {file_name}: {str(e)}")
-                shutil.rmtree(temp_dir)
-                return {
-                    "success": False,
-                    "status": "error",
-                    "message": f"Error procesando ZIP: {str(e)}",
-                    "id": process_id,
-                }
+            app_logger.info(
+                f"📊 ZIP contiene {len(validacion['miembros'])} archivos -- "
+                "despachando cada uno al pipeline individual"
+            )
+            # No se espera (await) a propósito -- el endpoint responde de
+            # inmediato y cada archivo se procesa en background por
+            # _extraer_zip_y_despachar_individualmente, igual que un archivo
+            # suelto vía _procesar_en_background.
+            #
+            # Compatibilidad con el pipeline viejo (worker()/job_queue, que
+            # esta rama deja de usar): worker() disparaba, por cada
+            # adjunto, un email de confirmación al remitente Y un
+            # fire_webhook por factura (éxito o error) -- ver hallazgo #5
+            # de la revisión adversarial. Acá se preservan los DOS
+            # efectos, con la granularidad que corresponde a cada uno
+            # (decisión confirmada, docs/plan-fase1-zip-REDISEÑO.md
+            # sección 4): UN email de confirmación por ZIP (no uno por
+            # factura -- evita mandarle 50 emails a quien mandó un ZIP de
+            # 50 facturas), y fire_webhook por FACTURA (preserva la
+            # granularidad que ya consumen integraciones externas).
+            asyncio.create_task(
+                _extraer_zip_y_despachar_individualmente(
+                    zip_path=zip_path,
+                    ingest_id=ingest_id,
+                    origen="email",
+                    reservado_trabajo_en_vuelo=validacion["reservado"],
+                    enviar_resumen_por_email=True,
+                    datos_email={"from_email": from_email, "subject": subject},
+                    on_item_completado=orchestrator.fire_webhook,
+                )
+            )
+            return {
+                "success": True,
+                "status": "processing",
+                "process_id": process_id,
+                "type": "zip",
+                "total_count": len(validacion["miembros"]),
+                "message": (
+                    f"ZIP recibido ({len(validacion['miembros'])} archivos) -- "
+                    "cada factura se procesa de forma independiente y va a "
+                    "aparecer en la cola de revisión por separado."
+                ),
+                "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            }
 
         elif file_type == "application/pdf" or file_type.startswith("image/"):
             type_ = "pdf" if file_type == "application/pdf" else "image"
@@ -3394,8 +4451,18 @@ async def reintentar_extraccion(
 
     os.makedirs("downloads", exist_ok=True)
     # Prefijo "retry-" para no pisar un archivo que otro proceso pueda estar
-    # escribiendo con el mismo nombre original en paralelo.
-    file_location = f"./downloads/retry-{process_id}-{file_name}"
+    # escribiendo con el mismo nombre original en paralelo. `file_name`
+    # viene de documento_original (un valor guardado en PocketBase, no
+    # input directo de este request) -- pero mismo criterio que el fix H1
+    # del webhook de email: nunca asumir que un nombre ya está saneado por
+    # venir de "más atrás" en el flujo, sino verificar la ruta final
+    # estructuralmente antes de escribir nada.
+    nombre_archivo_seguro = _sanear_nombre_para_process_id(file_name or "archivo")
+    file_location = f"./downloads/retry-{process_id}-{nombre_archivo_seguro}"
+    if not os.path.realpath(file_location).startswith(
+        os.path.realpath("./downloads") + os.sep
+    ):
+        raise HTTPException(status_code=422, detail="Nombre de archivo original inválido.")
     with open(file_location, "wb") as f:
         f.write(upstream.content)
 

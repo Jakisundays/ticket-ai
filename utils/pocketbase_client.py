@@ -999,6 +999,59 @@ class PocketBaseClient:
             app_logger.warning(f"PocketBase: error en find_stale_batch_items({batch_id}): {e}")
             return []
 
+    def find_stale_invoices(self, *, antes_de: "datetime.datetime") -> list:
+        """Mismo problema que find_stale_batch_items, aplicado a invoices en
+        general (no solo las de un ZIP): una factura que quedó en
+        status="pending"/"processing" porque el backend se reinició a mitad
+        de camino -- ver Fase A/B de _extraer_zip_y_despachar_individualmente
+        en process_invoice_google_2.py y docs/plan-fase1-zip-REDISEÑO.md
+        sección 3.
+
+        `antes_de` DEBE ser el momento en que el proceso ACTUAL arrancó
+        (InvoiceOrchestrator._iniciado_en), no un umbral relativo tipo
+        "hace 30 minutos". Es la diferencia real que importa: cualquier
+        invoice pending/processing con `updated` ANTERIOR al arranque de
+        este proceso quedó huérfana con certeza (ningún código de ESTE
+        proceso pudo haberla tocado antes de existir -- el loop de Fase B
+        que la estaba procesando murió con el proceso viejo, sin importar
+        cuántos minutos lleve, sean 10 segundos o hace 3 horas). Un umbral
+        de antigüedad fijo (el diseño original, 30 minutos) es incorrecto
+        en el caso más común real: con auto-restart (systemd/supervisor/
+        docker restart=always), el proceso vuelve a arrancar en segundos, y
+        el barrido corre a los 10s -- en ese momento las filas recién
+        huérfanas tienen segundos de antigüedad, no 30 minutos, así que un
+        umbral de edad las descarta TODAS y, como el barrido corre una sola
+        vez, quedan "pending" invisibles para siempre. Comparar contra el
+        arranque del proceso (no contra "ahora") es correcto sin importar
+        cuánto haya tardado el restart.
+
+        No hace falta distinguir "vino de un ZIP" de "factura suelta": el
+        mismo botón "Reintentar" del dashboard resuelve ambos casos por
+        igual. Mismo criterio de filtrar por tiempo en Python (no en el
+        filtro de PocketBase) que find_stale_batch_items, por el mismo
+        motivo."""
+        try:
+            candidatos = self._list_all(
+                INVOICES_COLLECTION,
+                '(status = "pending" || status = "processing") && deleted_at = ""',
+                page_size=500,
+            )
+            resultado = []
+            for inv in candidatos:
+                actualizado = inv.get("updated")
+                if not actualizado:
+                    continue
+                try:
+                    ts = datetime.datetime.fromisoformat(actualizado.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if ts < antes_de:
+                    resultado.append(inv)
+            return resultado
+        except Exception as e:
+            app_logger.warning(f"PocketBase: error en find_stale_invoices: {e}")
+            return []
+
 
 # ---------------------------------------------------------------------- #
 # Helpers de respuesta / auth (privados al módulo)
