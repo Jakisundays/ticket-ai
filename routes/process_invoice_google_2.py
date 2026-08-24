@@ -3090,8 +3090,15 @@ async def _extraer_zip_y_despachar_individualmente(
             try:
                 orchestrator._pb_client.soft_delete_invoice(
                     process_id,
-                    deleted_by="sistema:zip-fase-a-rechazo",
-                    reason=motivo,
+                    # deleted_by es relation -> users (ver migración
+                    # 1783483896_add_soft_delete_fields.js): "quien pide el
+                    # borrado siempre es un humano autenticado en el
+                    # dashboard" -- acá no hay ningún humano, es un rechazo
+                    # automático de Fase A, así que deleted_by va None (el
+                    # campo es opcional, minSelect=0) y la identidad del
+                    # actor queda en `reason`, que sí es texto libre.
+                    deleted_by=None,
+                    reason=f"sistema:zip-fase-a-rechazo -- {motivo}",
                 )
             except Exception as e:
                 app_logger.warning(
@@ -3739,11 +3746,20 @@ async def website_upload(
                     if placeholder and placeholder.get("status") == "pending":
                         orchestrator._pb_client.soft_delete_invoice(
                             process_id_reservado,
-                            deleted_by="sistema:deteccion-zip",
+                            # deleted_by es relation -> users (ver migración
+                            # 1783483896_add_soft_delete_fields.js) -- acá no
+                            # hay ningún humano involucrado, es limpieza
+                            # automática, así que va None (opcional,
+                            # minSelect=0); la identidad del actor queda en
+                            # `reason`. Bug real encontrado en producción
+                            # (PocketBase 400 validation_missing_rel_records
+                            # con un string acá) durante el smoke test
+                            # post-deploy de la Fase 1 de ZIP.
+                            deleted_by=None,
                             reason=(
-                                "Placeholder reservado antes de conocer el "
-                                "contenido real -- resultó ser un ZIP, no una "
-                                "factura individual."
+                                "sistema:deteccion-zip -- Placeholder reservado "
+                                "antes de conocer el contenido real -- resultó "
+                                "ser un ZIP, no una factura individual."
                             ),
                         )
                 except Exception as e:

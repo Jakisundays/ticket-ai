@@ -470,11 +470,21 @@ try:
             llamada_sd_c2.get("process_id") == "website-abc",
         )
         check(
-            f"C2: soft_delete_invoice se llamó con deleted_by no vacío (fue {llamada_sd_c2.get('deleted_by')!r})",
-            bool(llamada_sd_c2.get("deleted_by")),
+            # deleted_by es relation -> users en PocketBase (ver migración
+            # 1783483896_add_soft_delete_fields.js): "quien pide el borrado
+            # siempre es un humano autenticado en el dashboard". Una limpieza
+            # de sistema (sin ningún humano de por medio) NUNCA debe mandar
+            # un string acá -- PocketBase lo rechaza con 400
+            # validation_missing_rel_records (bug real encontrado en
+            # producción durante el smoke test post-deploy de la Fase 1 de
+            # ZIP). El campo es opcional (minSelect=0): debe ir None.
+            f"C2: soft_delete_invoice se llamó con deleted_by=None (limpieza de sistema, sin "
+            f"usuario humano -- fue {llamada_sd_c2.get('deleted_by')!r})",
+            llamada_sd_c2.get("deleted_by") is None,
         )
         check(
-            f"C2: soft_delete_invoice se llamó con reason no vacío (fue {llamada_sd_c2.get('reason')!r})",
+            f"C2: soft_delete_invoice se llamó con reason no vacío -- ahí va la identidad del "
+            f"actor de sistema, no en deleted_by (fue {llamada_sd_c2.get('reason')!r})",
             bool(llamada_sd_c2.get("reason")),
         )
     check(

@@ -493,8 +493,24 @@ try:
             "b.pdf" in ns["_orchestrator_fake"].soft_deletes[0]["process_id"],
         )
         check(
+            # deleted_by es relation -> users en PocketBase real (ver
+            # migración 1783483896_add_soft_delete_fields.js) -- una
+            # limpieza de sistema (Fase A, sin ningún humano de por medio)
+            # NUNCA debe mandar un string acá, o PocketBase real lo rechaza
+            # con 400 validation_missing_rel_records (bug real encontrado
+            # en producción vía el smoke test post-deploy). Debe ir None.
+            f"A1: soft_delete_invoice se llamó con deleted_by=None, nunca un string de sistema "
+            f"(fue {ns['_orchestrator_fake'].soft_deletes[0]['deleted_by']!r})",
+            ns["_orchestrator_fake"].soft_deletes[0]["deleted_by"] is None,
+        )
+        check(
             "A1: soft_delete_invoice se llamó con reason mencionando la corrupción",
             "corrupto" in (ns["_orchestrator_fake"].soft_deletes[0]["reason"] or "").lower(),
+        )
+        check(
+            "A1: reason también lleva la identidad del actor de sistema (ya que deleted_by no "
+            "puede llevarla)",
+            "sistema:zip-fase-a-rechazo" in (ns["_orchestrator_fake"].soft_deletes[0]["reason"] or ""),
         )
 
     # ========================================================================
@@ -531,6 +547,11 @@ try:
         "A2: soft_delete_invoice fue llamado exactamente 1 vez, para el miembro rechazado (b.pdf, encriptado)",
         len(ns["_orchestrator_fake"].soft_deletes) == 1
         and "b.pdf" in ns["_orchestrator_fake"].soft_deletes[0]["process_id"],
+    )
+    check(
+        f"A2: soft_delete_invoice se llamó con deleted_by=None (limpieza de sistema, ver A1 -- fue "
+        f"{ns['_orchestrator_fake'].soft_deletes[0]['deleted_by']!r})",
+        ns["_orchestrator_fake"].soft_deletes[0]["deleted_by"] is None,
     )
 
     # ========================================================================
@@ -1064,6 +1085,11 @@ try:
         check(
             "A14: el descarte fue para notas.txt específicamente",
             "notas.txt" in orch_a14.soft_deletes[0]["process_id"],
+        )
+        check(
+            f"A14: soft_delete_invoice se llamó con deleted_by=None (limpieza de sistema, ver "
+            f"A1 -- fue {orch_a14.soft_deletes[0]['deleted_by']!r})",
+            orch_a14.soft_deletes[0]["deleted_by"] is None,
         )
     check(
         "A14: invariante -- cada uno de los 3 miembros pre-registrados en Pass 0 terminó en "
